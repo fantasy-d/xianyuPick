@@ -8,12 +8,7 @@ const App = () => {
     const [selectedItem, setSelectedItem] = useState(null); 
     const [sysStatus, setSysStatus] = useState({});
     const [newKeyword, setNewKeyword] = useState("");
-
-    useEffect(() => {
-        const timer = setInterval(refreshData, 60000);
-        refreshData();
-        return () => clearInterval(timer);
-    }, []);
+    const timerRef = useRef(null);
 
     const refreshData = async () => {
         if (document.hidden) return;
@@ -24,6 +19,21 @@ const App = () => {
             setSysStatus(await sResp.json());
         } catch (e) {}
     };
+
+    useEffect(() => {
+        const POLL_INTERVAL = 10000; // 调试时设为10秒，方便观察暂停状态
+        const startPolling = () => {
+            if (!timerRef.current) {
+                refreshData();
+                timerRef.current = setInterval(refreshData, POLL_INTERVAL);
+            }
+        };
+        const stopPolling = () => {
+            if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+        };
+        startPolling();
+        return () => stopPolling();
+    }, []);
 
     const createTask = async () => {
         if (!newKeyword) return;
@@ -37,6 +47,23 @@ const App = () => {
         refreshData();
     };
 
+    const pauseTask = async (id) => {
+        await fetch(`/api/tasks/${id}/pause`, { method: "POST" });
+        refreshData();
+    };
+
+    const retryTask = async (id) => {
+        await fetch(`/api/tasks/${id}/retry`, { method: "POST" });
+        refreshData();
+    };
+
+    const deleteTask = async (id) => {
+        if (confirm("确定删除任务?")) {
+            await fetch(`/api/tasks/${id}`, { method: "DELETE" });
+            refreshData();
+        }
+    };
+
     const loadTaskResults = async (task) => {
         const resp = await fetch(`/api/task_details/${task.id}`);
         const data = await resp.json();
@@ -47,153 +74,134 @@ const App = () => {
         }
     };
 
-    const completedTasks = tasks.filter(t => t.status === '已完成');
+    const enterItemDetail = (group) => {
+        setSelectedItem(group);
+        setActiveView("item_detail");
+    };
+
+    const getStatusIcon = (status) => {
+        if (status === '执行中') return <i className="fas fa-sync fa-spin" style={{color: 'var(--system-orange)'}}></i>;
+        if (status === '正在暂停') return <i className="fas fa-hand-paper" style={{color: 'var(--system-orange)'}}></i>;
+        if (status === '已完成') return <i className="fas fa-check-circle" style={{color: 'var(--system-green)'}}></i>;
+        if (status === '已暂停') return <i className="fas fa-pause-circle" style={{color: '#8E8E93'}}></i>;
+        return <i className="far fa-clock" style={{color: '#8E8E93'}}></i>;
+    };
 
     return (
-        <React.Fragment>
-            {/* 1. PC 侧边栏 (由 CSS 控制在移动端隐藏) */}
-            <aside className="sidebar">
-                <div className="logo-area">选品中枢 PRO</div>
-                <ul className="nav-menu">
-                    <li className={`sidebar-item ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveView("dashboard")}>
-                        <i className="fas fa-chart-pie"></i><span>控制台概览</span>
-                    </li>
-                    <li className={`sidebar-item ${view === 'tasks' ? 'active' : ''}`} onClick={() => setActiveView("tasks")}>
-                        <i className="fas fa-tasks"></i><span>任务调度池</span>
-                    </li>
-                    <li className={`sidebar-item ${['results', 'item_detail'].includes(view) ? 'active' : ''}`} onClick={() => setActiveView("results")}>
-                        <i className="fas fa-database"></i><span>选品资产库</span>
-                    </li>
-                </ul>
-            </aside>
-
-            {/* 2. 移动端底部导航 (由 CSS 控制在 PC 端隐藏) */}
+        <div className="container">
             <nav className="nav-bar">
                 <div className={`nav-item ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveView("dashboard")}>
-                    <i className="fas fa-chart-line"></i><span>概览</span>
+                    <i className="fas fa-compass"></i><span>探索</span>
                 </div>
                 <div className={`nav-item ${view === 'tasks' ? 'active' : ''}`} onClick={() => setActiveView("tasks")}>
-                    <i className="fas fa-list-check"></i><span>任务</span>
+                    <i className="fas fa-bolt"></i><span>执行</span>
                 </div>
                 <div className={`nav-item ${['results', 'item_detail'].includes(view) ? 'active' : ''}`} onClick={() => setActiveView("results")}>
-                    <i className="fas fa-gem"></i><span>决策</span>
+                    <i className="fas fa-gem"></i><span>宝库</span>
                 </div>
             </nav>
 
-            {/* 3. 主内容区 */}
-            <main className="main-container">
-                {view === "dashboard" && (
-                    <div className="view-content animate-in">
-                        <header><h1>系统中枢</h1><p>全自动选品调度管理系统</p></header>
-                        
-                        <div className="stats-grid">
-                            <div className="stat-card">
-                                <span className="label">1688 节点</span>
-                                <span className={`val ${sysStatus["1688_login"] === '有效' ? 'text-green' : 'text-red'}`}>{sysStatus["1688_login"] || 'OFF'}</span>
-                            </div>
-                            <div className="stat-card"><span className="label">资产库</span><span className="val">{completedTasks.length} 个品类</span></div>
-                            <div className="stat-card"><span className="label">活跃 Worker</span><span className="val">{sysStatus["active_workers"]}</span></div>
-                            <div className="stat-card"><span className="label">存储架构</span><span className="val">MySQL</span></div>
-                        </div>
-                        
-                        <div className="task-card" style={{marginTop: '20px'}}>
-                            <h3 style={{marginBottom: '15px'}}>新建深度挖掘任务</h3>
-                            <div style={{display: 'flex', gap: '10px'}}>
-                                <input value={newKeyword} onChange={e => setNewKeyword(e.target.value)} placeholder="输入品类词..." />
-                                <button className="pro-btn" style={{background:'#000', color:'#fff'}} onClick={createTask}>立即启动</button>
-                            </div>
+            {view === "dashboard" && (
+                <div className="view-content animate-in">
+                    <header>
+                        <h1 className="hero-title">Mission HUB</h1>
+                        <p className="hero-subtitle">支持 Checkpoint 级平滑暂停</p>
+                    </header>
+                    <div className="stats-grid">
+                        <div className="stat-card"><span className="label">1688 节点</span><span className="val text-green">ONLINE</span></div>
+                        <div className="stat-card"><span className="label">已存资产</span><span className="val">{tasks.filter(t=>t.status==='已完成').length}</span></div>
+                    </div>
+                    <div className="console-card">
+                        <div className="search-glow">
+                            <input value={newKeyword} onChange={e => setNewKeyword(e.target.value)} placeholder="输入待爆破品类..." />
+                            <button className="run-btn" onClick={createTask}><i className="fas fa-paper-plane"></i></button>
                         </div>
                     </div>
-                )}
+                </div>
+            )}
 
-                {view === "tasks" && (
-                    <div className="view-content animate-in">
-                        <header><h1>任务流水线</h1></header>
-                        <div className="task-list">
-                            {tasks.map(t => (
-                                <div className={`task-card ${t.status}`} key={t.id} onClick={() => t.status === '已完成' && loadTaskResults(t)}>
-                                    <div className="task-title">{t.keyword}</div>
-                                    <div style={{fontSize: '0.8rem', color: '#666'}}>{t.msg}</div>
-                                    <div className="nano-progress"><div className="nano-bar" style={{width: `${t.progress}%`}}></div></div>
-                                    <div style={{display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem'}}>
-                                        <span>进度: {t.progress}%</span>
-                                        {t.status === '已完成' && <span style={{color: 'var(--primary)', fontWeight: 'bold'}}>查看详情 →</span>}
+            {view === "tasks" && (
+                <div className="view-content animate-in">
+                    <header><h1 className="hero-title">执行队列</h1></header>
+                    <div className="task-list">
+                        {tasks.map(t => (
+                            <div className={`task-card ${t.status}`} key={t.id}>
+                                <div className="task-header" onClick={() => t.status === '已完成' && loadTaskResults(t)}>
+                                    <div className="task-kw-group">
+                                        <div className="task-icon">{getStatusIcon(t.status)}</div>
+                                        <div className="task-kw">{t.keyword}</div>
                                     </div>
+                                    <div style={{fontSize: '0.6rem', color: 'var(--text-secondary)'}}>{t.created_at}</div>
                                 </div>
-                            ))}
-                        </div>
+                                <div style={{fontSize: '0.75rem', color: 'var(--text-secondary)', marginLeft: '28px', marginBottom: '10px'}}>{t.msg}</div>
+                                <div className="nano-progress" style={{marginLeft: '28px'}}><div className="nano-bar" style={{width: `${t.progress}%`}}></div></div>
+                                
+                                <div className="task-actions" style={{marginLeft: '28px', marginTop: '10px', display: 'flex', gap: '10px'}}>
+                                    {t.status === '执行中' && (
+                                        <button className="pro-btn outline" onClick={() => pauseTask(t.id)}>
+                                            <i className="fas fa-pause"></i> 暂停
+                                        </button>
+                                    )}
+                                    {(t.status === '已完成' || t.status === '已暂停' || t.status === '失败') && (
+                                        <button className="pro-btn outline" onClick={() => retryTask(t.id)}>
+                                            <i className="fas fa-play"></i> {t.status === '已完成' ? '重扫' : '恢复执行'}
+                                        </button>
+                                    )}
+                                    {t.status === '已完成' && <button className="pro-btn outline" onClick={() => loadTaskResults(t)}>查看结果</button>}
+                                    <button className="pro-btn danger" onClick={() => deleteTask(t.id)}><i className="fas fa-trash"></i></button>
+                                </div>
+                            </div>
+                        ))}
                     </div>
-                )}
+                </div>
+            )}
 
-                {view === "results" && (
-                    <div className="view-content animate-in">
-                        {selectedTask ? (
-                            <>
-                                <header>
-                                    <h1 onClick={() => setSelectedTask(null)} style={{cursor: 'pointer'}}>← {selectedTask.keyword}</h1>
-                                    <button className="pro-btn outline" onClick={() => window.open(`/api/download/${selectedTask.id}`)}>导出 XLSX</button>
-                                </header>
-                                <div className="item-list">
-                                    {detailedItems.map((group, i) => (
-                                        <div className="item-card-flat" key={i} onClick={() => {setSelectedItem(group); setActiveView("item_detail")}}>
-                                            <img src={group.xianyu_item.image_url} className="item-img-flat" referrerPolicy="no-referrer" />
-                                            <div className="tile-body">
-                                                <div className="tile-title" style={{fontWeight:'bold', fontSize:'0.9rem', marginBottom:'10px'}}>#{group.rank} {group.xianyu_item.title}</div>
-                                                <div className="tile-price">¥{group.xianyu_item.price}</div>
-                                            </div>
+            {view === "results" && (
+                <div className="view-content animate-in">
+                    {selectedTask ? (
+                        <>
+                            <header style={{display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end'}}>
+                                <div><div onClick={() => setSelectedTask(null)} style={{fontSize: '0.7rem', color: 'var(--text-secondary)', cursor: 'pointer'}}>← BACK</div><h1 className="hero-title">{selectedTask.keyword}</h1></div>
+                                <button className="mini-btn" onClick={() => window.open(`/api/download/${selectedTask.id}`)}>XLSX</button>
+                            </header>
+                            <div className="results-list">
+                                {detailedItems.map((group, i) => (
+                                    <div className="item-card-flat" key={i} onClick={() => enterItemDetail(group)}>
+                                        <img src={group.xianyu_item.image_url} className="item-img-flat" referrerPolicy="no-referrer" />
+                                        <div className="tile-body">
+                                            <div className="tile-title">#{group.rank} {group.xianyu_item.title}</div>
+                                            <div className="tile-price">¥{group.xianyu_item.price}</div>
                                         </div>
-                                    ))}
-                                </div>
-                            </>
-                        ) : (
-                            <div className="task-list">
-                                <header><h1>选品决策资产库</h1></header>
-                                {completedTasks.map(t => (
-                                    <div className="task-card 已完成" key={t.id} onClick={() => loadTaskResults(t)}>
-                                        <div className="task-title">{t.keyword}</div>
-                                        <div style={{fontSize: '0.75rem', color: '#666'}}>调研完成日期: {t.created_at}</div>
                                     </div>
                                 ))}
                             </div>
-                        )}
-                    </div>
-                )}
-
-                {view === "item_detail" && selectedItem && (
-                    <div className="view-content animate-in">
-                        <div style={{fontSize: '0.9rem', color: 'var(--text-sec)', cursor: 'pointer', marginBottom: '20px'}} onClick={() => setActiveView("results")}>← 返回品类列表</div>
-                        <div className="task-card" style={{display: 'flex', gap: '20px', padding: '20px', background: '#fff', border: 'none'}}>
-                            <img src={selectedItem.xianyu_item.image_url} style={{width: '120px', height: '120px', borderRadius: '12px', objectFit: 'cover'}} referrerPolicy="no-referrer" />
-                            <div>
-                                <h2 style={{fontSize: '1rem', fontWeight: 'bold', marginBottom: '10px'}}>{selectedItem.xianyu_item.title}</h2>
-                                <div style={{display: 'flex', gap: '30px'}}>
-                                    <div><span style={{fontSize: '0.7rem', color: '#999'}}>售价</span><div style={{fontWeight: '800'}}>¥{selectedItem.xianyu_item.price}</div></div>
-                                    <div><span style={{fontSize: '0.7rem', color: '#999'}}>想要</span><div style={{fontWeight: '800'}}>{selectedItem.xianyu_item.want_count}</div></div>
+                        </>
+                    ) : (
+                        <div className="task-list">
+                            <header><h1 className="hero-title">选品资产库</h1></header>
+                            {completedTasks.map(t => (
+                                <div className="task-card 已完成" key={t.id} onClick={() => loadTaskResults(t)}>
+                                    <div className="task-header"><div className="task-kw-group"><div className="task-icon"><i className="fas fa-folder" style={{color: '#FFCC00'}}></i></div><div className="task-kw">{t.keyword}</div></div><i className="fas fa-chevron-right"></i></div>
                                 </div>
-                            </div>
+                            ))}
                         </div>
-                        <div style={{marginTop: '30px'}}>
-                            <h3 style={{fontSize: '0.95rem', marginBottom: '15px'}}>1688 深度货源对比</h3>
-                            {selectedItem.sources.map((src, i) => {
-                                const margin = (selectedItem.xianyu_item.price - src.min_price - 20).toFixed(2);
-                                return (
-                                    <div className="task-card" key={i} style={{padding: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-                                        <div style={{flex: 1, paddingRight: '15px'}}>
-                                            <a href={src.url} target="_blank" style={{textDecoration: 'none', color: 'inherit', fontWeight: 'bold', fontSize: '0.85rem'}}>{src.title}</a>
-                                            <div style={{fontSize: '0.7rem', color: '#999', marginTop: '5px'}}>{src.sku_count} 个 SKU 规格</div>
-                                        </div>
-                                        <div style={{textAlign: 'right'}}>
-                                            <div style={{fontWeight: '800'}}>¥{src.min_price}</div>
-                                            <div style={{fontSize: '0.75rem', color: margin > 50 ? 'var(--success)' : 'var(--text-sec)', fontWeight: 'bold'}}>利: ¥{margin}</div>
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                        </div>
+                    )}
+                </div>
+            )}
+
+            {view === "item_detail" && selectedItem && (
+                <div className="view-content animate-in">
+                    <div className="back-btn" onClick={() => setActiveView("results")}>← 返回列表</div>
+                    <div className="detail-hero-card">
+                        <img src={selectedItem.xianyu_item.image_url} className="hero-img-full" referrerPolicy="no-referrer" />
+                        <div className="hero-content"><h2 style={{fontSize: '1rem'}}>{selectedItem.xianyu_item.title}</h2><div className="hero-metrics" style={{display: 'flex', gap: '20px', marginTop: '10px'}}><div><span>售价</span><strong>¥{selectedItem.xianyu_item.price}</strong></div><div><span>想要</span><strong>{selectedItem.xianyu_item.want_count}</strong></div></div></div>
                     </div>
-                )}
-            </main>
-        </React.Fragment>
+                    {selectedItem.sources.map((src, i) => (
+                        <div className="source-detail-row" key={i}><div style={{flex: 1}}><a href={src.url} target="_blank" style={{color: 'inherit', textDecoration: 'none', fontWeight: 'bold'}}>{src.title}</a></div><div style={{textAlign: 'right'}}><strong>¥{src.min_price}</strong></div></div>
+                    ))}
+                </div>
+            )}
+        </div>
     );
 };
 

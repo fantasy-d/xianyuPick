@@ -77,9 +77,11 @@ def generate_summary_report(root_dir: Path, keyword: str):
 async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--keyword", required=True)
+    parser.add_argument("--task-id", required=False) # 新增 task-id 支持
     args = parser.parse_args()
     
     keyword = args.keyword
+    task_id = args.task_id
     date_str = datetime.now().strftime("%Y%m%d")
     root_dir = Path(f"outputs/{keyword}_{date_str}")
     root_dir.mkdir(parents=True, exist_ok=True)
@@ -87,15 +89,13 @@ async def main():
     python_path = "/opt/anaconda3/envs/mytools/bin/python"
 
     # 1. 闲鱼扫描
+    # ... (Phase 1 保持不变)
     print(f"--- Phase 1: Scanning '{keyword}' ---", flush=True)
     xianyu_json = root_dir / "xianyu_hot_items.json"
-    
-    # 恢复性检查：如果闲鱼数据已存在且非空，直接跳过抓取
     if xianyu_json.exists() and xianyu_json.stat().st_size > 500:
         print(f"Checkpoint: Xianyu data exists. Skipping scan.", flush=True)
         try:
-            with open(xianyu_json) as f:
-                output = f.read()
+            with open(xianyu_json) as f: output = f.read()
         except: output = ""
     else:
         cmd_xianyu = f"export PYTHONPATH=$PYTHONPATH:$(pwd)/src && {python_path} scripts/run_xianyu_hot_items.py --keyword '{keyword}' --state-file xianyu_state.json --max-pages 1 --top-n 10"
@@ -111,7 +111,24 @@ async def main():
     import random
     
     for i, item in enumerate(hot_items, start=1):
-        # 增加任务间的休息时间
+        # --- 核心：Checkpoint 暂停自检 ---
+        if task_id:
+            try:
+                # 导入 pymysql 动态查询
+                import pymysql
+                db_config = json.load(open("config/database.json"))
+                conn = pymysql.connect(**db_config)
+                cursor = conn.cursor()
+                cursor.execute("SELECT status FROM tasks WHERE id = %s", (task_id,))
+                row = cursor.fetchone()
+                conn.close()
+                if row and row[0] == "正在暂停":
+                    print(f"\n[Checkpoint] Pause signal detected for task {task_id}. Graceful exit.", flush=True)
+                    return # 安全退出
+            except Exception as e:
+                print(f"Pause check failed: {e}", flush=True)
+        # -----------------------------
+
         if i > 1:
             task_gap = random.uniform(5.0, 10.0)
             print(f"Waiting {task_gap:.2f}s before next item task...", flush=True)
