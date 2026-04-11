@@ -4,6 +4,9 @@
 
 这个文档是当前执行清单。
 
+
+Python环境在/opt/anaconda3/envs/mytools/
+
 目标：
 
 - 任务要能直接转成实现动作
@@ -24,9 +27,10 @@
 4. 获取全部结果
 5. 按 `想要人数` 倒序，取 `Top 10 hot_items`
 6. 用 `hot_items.image_url` 去 1688 以图搜上游货源
-7. 在 1688 图片搜索结果页固定筛选 `退货包运费 + 一件代发`
-8. 计算利润
-9. 输出 `listing_candidates`
+7. 获取 1688 结果页里的 `7天代发数量` 与 `月代发数量`
+8. 按 `7天代发数量 desc -> 月代发数量 desc` 排序并取详情候选
+9. 计算利润
+10. 输出 `listing_candidates`
 
 
 ### Output Priority
@@ -165,6 +169,225 @@ Output:
 Done When:
 
 - 所有后续流程都以品类词为起点
+
+
+## Current To-Do: 1688 图搜 + SKU 导出收尾
+
+### Current Progress
+
+- `1688` 主流程已经切到“首页输入图片 URL -> 以图搜结果页 -> 详情页 -> 插件导出 SKU”。
+- `image_url` 现在只接受合法的 `http/https` 图片 URL。
+- 非法 URL 或不支持的图片后缀会直接丢弃，不再继续图搜。
+- 1688 结果页排序规则已经明确并已接入代码：
+  `7天代发数量 desc -> 月代发数量 desc`
+- 详情候选目前固定取 `Top 3`。
+- 状态文件逻辑已经接入 [run_ali1688_slow_flow.py](/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py)。
+- 状态文件固定位置已经迁到 [storage_state.json](/Users/mac/PycharmProjects/mytools/xianyu-tools/state/ali1688/storage_state.json)，不再放 `tmp`。
+- 状态文件里的 cookies 会在启动时加载到浏览器上下文，结束时会回写最新状态。
+- 插件目录参数已经接入主脚本，当前默认扩展目录仍是项目内解压目录。
+- 1688 插件欢迎引导层的处理逻辑已经从之前成功样本抽回到脚本里，不再只靠页面文案试错。
+- 已确认 `.J_MIDDLEWARE_FRAME_WIDGET` 可能是多层叠加，必须逐层关闭到 `0`。
+- 已确认 `复制sku` 的真实触发链路来自插件，而不是 1688 原生页面 DOM。
+- 已确认工具栏 `copySku` 点击后，插件实际先走：
+  `sendMessageToBackground({name:"copy-sku", payload:{offerId}})`
+- 已确认真正打开弹窗的是插件事件：
+  `copy-sku-modal`
+- 已确认“复制 SKU 已打开”的稳定判定信号不是 `序号/复制导出` 文案，而是：
+  - `#consign-sku-fullscreen-drawer` 变为可见
+  - `#fullscreen-drawer-iframe` 的 `src` 去掉 `#hidden`
+- 这套 drawer 判定逻辑已经接回主脚本。
+- 当前脚本在工具栏点击失败时，已经增加插件事件兜底：
+  `window.__1688_EXTENSION?.events?.emit("copy-sku-modal", { offerId })`
+- 手工实测已经打通过一条完整链路：
+  `复制sku -> 序号左侧全选 -> 复制导出 -> 导出Excel`
+- 目标商品 `904776936832` 的手工链路已经成功下载 Excel。
+
+
+### Current Problems
+
+- 主脚本的“结构化逻辑”已经比较接近真实页面，但还没有用这版代码做一次稳定的端到端成功复跑。
+- `复制sku` 打开弹层这一步存在波动。
+  同一商品页上，有时点击工具栏后 drawer 会展开，有时保持隐藏态。
+- 之前失败的根因已经基本定位：
+  不是“按钮没点到”，而是插件弹层未从隐藏态切到展示态。
+- 之前脚本有一段错误判定：
+  把“是否出现 `序号/复制导出` 文案”当成成功标准。
+  这会误判，因为插件弹层内容不一定能直接从主页面文本读到。
+- 当前虽然已改成 drawer 判定，但还没在真实浏览器里验证“工具栏点击 + 事件兜底”这套组合是否足够稳定。
+- 状态文件能带上登录态，但真实运行时仍然可能触发风控；当前策略是接受风控，但必须保证风控或引导层最终能收口，不要卡死流程。
+- 插件扩展目录当前默认还指向 `tmp/1688-extension`。
+  这不是状态文件问题，但从项目长期结构看，后面可能需要迁到更稳定的位置。
+- 详情页导出链虽然已被手工验证，但主脚本还没有把“导出成功后的文件路径、失败时的页面状态、失败时的 HTML 快照”收口到足够稳定。
+
+
+### Verified Facts
+
+- 插件欢迎引导层是插件自己注入的，不是 1688 原生页面弹窗。
+- 插件源码已经确认存在专门的新手引导事件：
+  - `show-install-guide`
+  - `onboarding-mode-switch`
+- `show-install-guide` 是主动拉起“功能引导”的入口，不是页面自己推断出来的。
+- `onboarding-mode-switch` 是当前页面是否进入 onboarding 模式的运行态开关。
+- popup 里的“功能引导”按钮会显式触发：
+  `sendMessageToBackground({ name: "show-install-guide" })`
+- 这说明插件新手引导至少有两类入口：
+  - 手动入口：用户从 popup 主动点“功能引导”
+  - 自动入口：插件初始化时根据持久化状态决定是否进入 onboarding 模式
+- 插件源码里已经确认存在 3 个与 onboarding 直接相关的持久化/参数标识：
+  - `_1688_EXTENSION_ONBOARDING_FEATURE`
+  - `_1688_EXTENSION_SHOW_GUIDANCE_REASON`
+  - `pcPluginOnboardingFeature`
+- 当前最稳的源码结论是：
+  “正常只弹一次”主要不是靠页面 DOM，而是靠插件自身 `chrome.storage.local` 里的 onboarding 状态控制。
+- 其中：
+  - `_1688_EXTENSION_ONBOARDING_FEATURE`
+    更像“是否仍需要 onboarding / 当前 onboarding feature 状态”
+  - `_1688_EXTENSION_SHOW_GUIDANCE_REASON`
+    更像“本次为什么要弹出引导”
+  - `pcPluginOnboardingFeature`
+    更像 URL 参数级别的强制入口，可能绕过正常的“只弹一次”路径
+- `.J_MIDDLEWARE_FRAME_WIDGET` 的关闭逻辑在插件代码里已经证实：
+  点关闭图标后就是把对应层从 DOM 移除。
+- 失败样本里：
+  `#consign-sku-fullscreen-drawer` 是 `display: none`
+  且 iframe URL 带 `#hidden`
+- 成功样本里：
+  `#consign-sku-fullscreen-drawer` 可见
+  且 iframe URL 不带 `#hidden`
+- 因此后续所有自动化判定都必须优先看 drawer DOM 状态，不再优先看文案。
+- `复制导出` 这一步最终要走的是菜单里的 `导出Excel`，不是单纯复制到剪贴板。
+- 当前还没有从压缩 bundle 中精确定位到：
+  - 自动弹引导时，究竟哪段代码读取了 `_1688_EXTENSION_ONBOARDING_FEATURE`
+  - 点击 `我知道了` / `开始使用` 后，究竟哪段代码把“已看过引导”写回 storage
+- 因此，页面层反复关遮罩只能治标，真正的源头仍是插件内部 onboarding 状态。
+
+
+### Next Actions
+
+#### T1 Re-run The Real End-To-End Flow With The New Drawer Logic
+
+Purpose:
+
+- 用当前代码再次真实跑通：
+  `首页图搜 -> 结果页取 Top 3 -> 详情页 -> 复制sku -> 全选 -> 复制导出 -> 导出Excel`
+
+Action:
+
+- 使用固定状态文件
+- 使用插件扩展
+- 用当前已验证过的详情页和图片 URL 先做定点复跑
+- 先验证 `904776936832`
+- 再验证图搜选出来的真实候选详情页
+
+Output:
+
+- `summary.json`
+- 每个详情页的导出状态
+- 成功下载的 Excel 路径
+
+Done When:
+
+- 至少一个详情页通过主脚本稳定导出 Excel
+
+
+#### T2 Stabilize Copy SKU Open Detection
+
+Purpose:
+
+- 把 `复制sku` 的打开成功判断彻底稳定下来
+
+Action:
+
+- 以 `drawer visible + iframe src without #hidden` 作为唯一主判断
+- 工具栏点击失败时继续保留 `copy-sku-modal` 事件兜底
+- 失败时固定保存：
+  - 主页面 HTML
+  - drawer 对应 HTML 状态
+  - 关键截图
+
+Output:
+
+- `copy_sku_open_rule`
+- `copy_sku_failure_snapshot`
+
+Done When:
+
+- 不再依赖 `序号/复制导出` 文案作为成功标准
+
+
+#### T3 Stabilize Export Excel Step
+
+Purpose:
+
+- 把最后一段 `全选 -> 复制导出 -> 导出Excel` 收口
+
+Action:
+
+- 固定按 `序号` 左侧复选框做全选
+- 固定点击 `复制导出`
+- 固定选择 `导出Excel`
+- 等待浏览器下载完成并保存到输出目录
+
+Output:
+
+- `downloaded_excel`
+- `download_path`
+
+Done When:
+
+- 下载文件稳定落盘
+- `summary` 里能记录成功路径
+
+
+#### T4 Persist Failure Diagnostics
+
+Purpose:
+
+- 避免以后再重复人工回放同一类问题
+
+Action:
+
+- 导出失败时固定保存：
+  - 详情页 HTML
+  - drawer 可见态信息
+  - iframe src
+  - 截图
+  - overlay close history
+
+Output:
+
+- `failure_bundle`
+
+Done When:
+
+- 任一失败样本都能离线复盘“是遮罩问题、drawer 未展开，还是导出菜单未点击成功”
+
+
+#### T5 Finish Onboarding Source Trace
+
+Purpose:
+
+- 把插件新手引导“为什么弹、为什么只弹一次”的源码链补齐
+
+Action:
+
+- 定位 `show-install-guide` 的消费方
+- 定位 `_1688_EXTENSION_ONBOARDING_FEATURE` 的读取点
+- 定位 `_1688_EXTENSION_SHOW_GUIDANCE_REASON` 的读取点
+- 定位点击 `我知道了` / `开始使用` 后的 `chrome.storage.local.set/remove` 写回点
+- 验证 `pcPluginOnboardingFeature` 是否会强制重新进入 onboarding
+
+Output:
+
+- `onboarding_trigger_chain`
+- `onboarding_storage_rule`
+
+Done When:
+
+- 能明确区分：
+  - 手动打开引导
+  - 自动弹引导
+  - 只弹一次的持久化条件
 
 
 ##### P1-1.2 Add 超赞鱼小铺 Filter
@@ -333,6 +556,10 @@ Done When:
 - `image_url` 为空的 `hot_item` 直接丢弃，不进入 `Phase 2`
 - 每个 `hot_item` 第一版最多保留 `Top 5 source_items`
 - `Top 5 source_items` 第一版按 1688 图片搜索结果页原始顺序保留
+- 新增详情增强流程时，不在结果页附加筛选条件
+- 结果页需要提取 `7天代发数量` 与 `月代发数量`
+- 详情增强流程按 `7天代发数量 desc -> 月代发数量 desc` 取 `Top 3` 进入详情页
+- 详情增强流程需要导出每个候选详情页里的 SKU 信息，作为后续人工复核产物
 
 ### Tasks
 
@@ -359,24 +586,25 @@ Done When:
 - 能用 `image_url` 进入 1688 图片搜索结果页
 
 
-#### P2-2 Add 1688 Filters
+#### P2-2 Capture Dispatch Metrics From Result Page
 
 Purpose:
 
-- 固定货源筛选条件
+- 固定结果页排序依据所需字段
 
 Action:
 
-- 在图片搜索结果页固定筛选 `退货包运费`
-- 在图片搜索结果页固定筛选 `一件代发`
+- 从图片搜索结果页提取 `7天代发数量`
+- 从图片搜索结果页提取 `月代发数量`
+- 统一数量字段格式，转成可排序数值
 
 Output:
 
-- `ali1688_filter_rule`
+- `ali1688_dispatch_metric_rule`
 
 Done When:
 
-- 每次图片搜索结果页都附带两个固定筛选
+- 每条候选结果都能输出稳定可比较的代发数量字段
 
 
 #### P2-3 Resolve Hot Items To Sources
@@ -404,11 +632,86 @@ Done When:
 - 每个 `hot_item` 都能找到货源或明确记录无货源
 
 
+#### P2-4 Add Sales-Sorted Top3 Detail Expansion
+
+Purpose:
+
+- 在结果页筛选完成后，补充详情级别的 SKU 采集流程
+
+Action:
+
+- 从 1688 图片搜索结果页读取 `7天代发数量`
+- 从 1688 图片搜索结果页读取 `月代发数量`
+- 按 `7天代发数量` 倒序排序
+- 如 `7天代发数量` 相同，再按 `月代发数量` 倒序排序
+- 取排序后的 `Top 3`
+- 保留进入详情页前的候选快照
+- 输出待进入详情页的候选列表
+
+Output:
+
+- `detail_candidate_items`
+- `detail_candidate_snapshot`
+
+Done When:
+
+- 每个结果页都能稳定得到按 `7天代发数量 desc -> 月代发数量 desc` 排序后的 `Top 3` 候选
+
+Depends On:
+
+- 已进入 1688 图片搜索结果页
+- 已能提取结果页代发数量字段
+
+Risk:
+
+- 结果页 `7天代发数量` 与 `月代发数量` 字段可能有缺失或格式波动
+- 两个字段可能存在不同文案或单位缩写
+
+
+#### P2-5 Export SKU From Detail Pages Via Procurement Assistant
+
+Purpose:
+
+- 从 1688 详情页导出可直接复核的 SKU 信息
+
+Action:
+
+- 逐个打开 `detail_candidate_items`
+- 在详情页点击 `1688采购助手`
+- 点击 `复制SKU`
+- 等待 SKU 弹窗出现
+- 勾选序号左侧的全部 SKU
+- 点击 `复制导出`
+- 保存导出的 SKU 文件；若下载失败则至少保存弹窗文本快照和失败原因
+- 记录每个详情页的导出状态
+
+Output:
+
+- `sku_export_files`
+- `sku_export_summary`
+
+Done When:
+
+- 每个 `Top 3` 详情页都有成功导出的 SKU 文件，或有明确的失败记录和页面快照
+
+Depends On:
+
+- 已拿到按 `7天代发数量 desc -> 月代发数量 desc` 排序后的 `Top 3` 详情候选
+
+Risk:
+
+- `1688采购助手` 可能需要登录态或插件态
+- `复制导出` 可能触发浏览器下载权限、弹窗拦截或剪贴板权限问题
+- SKU 弹窗的全选控件可能不是标准 checkbox
+
+
 ### Phase Completion
 
 - 已有 1688 图片搜索适配层
-- 已固定 `退货包运费 + 一件代发` 筛选
+- 已能提取结果页 `7天代发数量` 与 `月代发数量`
 - 每个 `hot_item` 都有货源结果或无货源记录
+- 已能在结果页按 `7天代发数量 desc -> 月代发数量 desc` 取 `Top 3` 进入详情页
+- 已能从详情页通过 `1688采购助手` 导出 SKU 信息
 
 
 ## Phase 3: Profit Analysis

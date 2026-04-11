@@ -14,6 +14,8 @@ from xianyu_tools.source_resolution import (
     resolve_hot_items_to_ali1688_html,
 )
 
+from run_ali1688_slow_flow import _normalize_image_search_url
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(
@@ -48,7 +50,7 @@ def main() -> int:
     runs: list[dict[str, object]] = []
     for hot_item in hot_items:
         query = build_source_query_from_hot_item(hot_item)
-        image_url = hot_item.image_url or ""
+        image_url = _normalize_image_search_url(hot_item.image_url) or ""
         slug = _safe_slug(hot_item.hot_item_id)
         output_dir = summary_dir / f"{slug}_artifacts"
         summary_file = summary_dir / f"{slug}_summary.json"

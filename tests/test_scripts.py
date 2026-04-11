@@ -35,6 +35,412 @@ def test_run_ali1688_slow_flow_script_exists() -> None:
     assert path.exists()
 
 
+def test_run_ali1688_slow_flow_dispatch_metric_helpers() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    metrics = module._extract_dispatch_metrics_from_text("近7天代发 123 月代发 2.4万")
+    assert metrics == {"seven_day_dispatch_count": 123, "month_dispatch_count": 24000}
+    assert module._parse_dispatch_count("3.5k") == 3500
+
+
+def test_run_ali1688_slow_flow_normalize_image_search_url() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module._normalize_image_search_url("http://img.alicdn.com/demo.jpg") == "http://img.alicdn.com/demo.jpg"
+    assert module._normalize_image_search_url("https://img.alicdn.com/demo") == "https://img.alicdn.com/demo"
+    assert module._normalize_image_search_url("http://img.alicdn.com/demo.heic") is None
+    assert module._normalize_image_search_url("ftp://img.alicdn.com/demo.jpg") is None
+    assert module._normalize_image_search_url("http://img.alicdn.com/demo.gif") is None
+
+
+def test_run_ali1688_slow_flow_top_dispatch_candidates_sorting() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    rows = [
+        {"item_url": "https://detail.1688.com/offer/1.html", "seven_day_dispatch_count": 30, "month_dispatch_count": 400},
+        {"item_url": "https://detail.1688.com/offer/2.html", "seven_day_dispatch_count": 50, "month_dispatch_count": 100},
+        {"item_url": "https://detail.1688.com/offer/3.html", "seven_day_dispatch_count": 50, "month_dispatch_count": 300},
+        {"item_url": "", "seven_day_dispatch_count": 999, "month_dispatch_count": 999},
+    ]
+
+    top_rows = module._top_dispatch_candidates(rows, 3)
+    assert [row["item_url"] for row in top_rows] == [
+        "https://detail.1688.com/offer/3.html",
+        "https://detail.1688.com/offer/2.html",
+        "https://detail.1688.com/offer/1.html",
+    ]
+
+
+def test_run_ali1688_slow_flow_prepare_managed_state_file_copies_into_dedicated_path(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    source_state = tmp_path / "input_state.json"
+    source_payload = {"cookies": [{"name": "a", "value": "1", "domain": ".1688.com", "path": "/"}], "origins": []}
+    source_state.write_text(json.dumps(source_payload), encoding="utf-8")
+    managed_state = tmp_path / "managed" / "storage_state.json"
+
+    effective_path, synced = module._prepare_managed_state_file(
+        str(source_state),
+        managed_state_file=str(managed_state),
+    )
+
+    assert synced is True
+    assert effective_path == str(managed_state.resolve())
+    assert json.loads(managed_state.read_text(encoding="utf-8")) == source_payload
+
+
+def test_run_ali1688_slow_flow_prepare_managed_state_file_missing_default_is_soft(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    managed_state = tmp_path / "managed" / "storage_state.json"
+    effective_path, synced = module._prepare_managed_state_file(
+        str(managed_state),
+        managed_state_file=str(managed_state),
+    )
+
+    assert effective_path is None
+    assert synced is False
+
+
+def test_run_ali1688_slow_flow_prepare_managed_state_file_missing_custom_raises(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    missing_source = tmp_path / "missing.json"
+    managed_state = tmp_path / "managed" / "storage_state.json"
+
+    try:
+        module._prepare_managed_state_file(str(missing_source), managed_state_file=str(managed_state))
+    except FileNotFoundError as exc:
+        assert "state file not found" in str(exc)
+    else:
+        raise AssertionError("expected FileNotFoundError for explicit missing state file")
+
+
+def test_run_ali1688_slow_flow_append_extension_launch_args(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    extension_dir = tmp_path / "ext"
+    extension_dir.mkdir()
+    args = module._append_extension_launch_args(["--foo", "--disable-extensions"], str(extension_dir))
+
+    assert "--foo" in args
+    assert "--disable-extensions" not in args
+    assert f"--disable-extensions-except={extension_dir}" in args
+    assert f"--load-extension={extension_dir}" in args
+
+
+def test_run_ali1688_slow_flow_resolve_browser_channel_uses_chromium_for_extension(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    extension_dir = tmp_path / "ext"
+    extension_dir.mkdir()
+
+    assert module._resolve_browser_channel("chrome", str(extension_dir)) is None
+    assert module._resolve_browser_channel("msedge", str(extension_dir)) == "msedge"
+    assert module._resolve_browser_channel("chrome", "") == "chrome"
+
+
+def test_run_ali1688_slow_flow_overlay_close_click_point() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module._overlay_close_click_point({"x": 0.0, "y": 0.0, "width": 1400.0, "height": 720.0}) == (1378.0, 20.0)
+
+
+def test_run_ali1688_slow_flow_plugin_toolbar_selectors_cover_verified_nodes() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    selectors = module._plugin_toolbar_selectors()
+    assert "#market-mate-for-1688" in selectors
+    assert "#market-mate-for-1688-od" in selectors
+    assert ".goods-operation-panel-media" in selectors
+    assert ".goods-operation-hover.copy-sku" in selectors
+    assert "text=复制sku" in selectors
+
+
+def test_run_ali1688_slow_flow_sanitize_storage_state_cookies() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    cookies = [
+        {
+            "name": "_m_h5_tk",
+            "value": "token",
+            "domain": ".1688.com",
+            "path": "/",
+            "expires": 123.0,
+            "httpOnly": False,
+            "secure": True,
+            "sameSite": "None",
+            "partitionKey": "https://1688.com",
+            "_crHasCrossSiteAncestor": True,
+        }
+    ]
+    assert module._sanitize_storage_state_cookies(cookies) == [
+        {
+            "name": "_m_h5_tk",
+            "value": "token",
+            "domain": ".1688.com",
+            "path": "/",
+            "expires": 123.0,
+            "httpOnly": False,
+            "secure": True,
+            "sameSite": "None",
+        }
+    ]
+
+
+def test_run_ali1688_slow_flow_resolve_runtime_user_data_dir_for_chromium_extension(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    extension_dir = tmp_path / "ext"
+    extension_dir.mkdir()
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    resolved = module._resolve_runtime_user_data_dir(
+        "/tmp/original-profile",
+        None,
+        str(extension_dir),
+        output_dir,
+    )
+    assert resolved == str((output_dir / "_runtime_chromium_profile").resolve())
+
+    preserved = module._resolve_runtime_user_data_dir(
+        "/tmp/original-profile",
+        "chrome",
+        str(extension_dir),
+        output_dir,
+    )
+    assert preserved == "/tmp/original-profile"
+
+
+def test_run_ali1688_slow_flow_detail_offer_id_from_url() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert (
+        module._detail_offer_id_from_url("https://detail.1688.com/offer/904776936832.html?spm=a26352.b28411319/2508.0.0")
+        == "904776936832"
+    )
+    assert module._detail_offer_id_from_url("https://www.1688.com/") == ""
+
+
+def test_run_ali1688_slow_flow_copy_sku_drawer_opened_detection() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class FakeLocator:
+        def __init__(self, *, count: int = 1, visible: bool = True, attrs: dict[str, str] | None = None):
+            self._count = count
+            self._visible = visible
+            self._attrs = attrs or {}
+
+        @property
+        def first(self):
+            return self
+
+        async def count(self):
+            return self._count
+
+        async def is_visible(self):
+            return self._visible
+
+        async def get_attribute(self, name: str):
+            return self._attrs.get(name)
+
+    class FakePage:
+        def __init__(self, drawer: FakeLocator, iframe: FakeLocator):
+            self._drawer = drawer
+            self._iframe = iframe
+
+        def locator(self, selector: str):
+            if selector == "#consign-sku-fullscreen-drawer":
+                return self._drawer
+            if selector == "#fullscreen-drawer-iframe":
+                return self._iframe
+            raise AssertionError(f"unexpected selector: {selector}")
+
+    opened_page = FakePage(
+        FakeLocator(attrs={"style": ""}),
+        FakeLocator(attrs={"src": "https://air.1688.com/app/upkg-solution/od-panel/sku-panel.html?offerId=904776936832"}),
+    )
+    hidden_page = FakePage(
+        FakeLocator(attrs={"style": "display: none;"}),
+        FakeLocator(attrs={"src": "https://air.1688.com/app/upkg-solution/od-panel/sku-panel.html?offerId=904776936832#hidden"}),
+    )
+
+    import asyncio
+
+    assert asyncio.run(module._copy_sku_drawer_opened(opened_page)) is True
+    assert asyncio.run(module._copy_sku_drawer_opened(hidden_page)) is False
+
+
+def test_run_ali1688_slow_flow_copy_sku_drawer_state_shape() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class FakeLocator:
+        def __init__(self, *, count: int = 1, visible: bool = True, attrs: dict[str, str] | None = None):
+            self._count = count
+            self._visible = visible
+            self._attrs = attrs or {}
+
+        @property
+        def first(self):
+            return self
+
+        async def count(self):
+            return self._count
+
+        async def is_visible(self):
+            return self._visible
+
+        async def get_attribute(self, name: str):
+            return self._attrs.get(name)
+
+    class FakePage:
+        def __init__(self, drawer: FakeLocator, iframe: FakeLocator):
+            self._drawer = drawer
+            self._iframe = iframe
+
+        def locator(self, selector: str):
+            if selector == "#consign-sku-fullscreen-drawer":
+                return self._drawer
+            if selector == "#fullscreen-drawer-iframe":
+                return self._iframe
+            raise AssertionError(f"unexpected selector: {selector}")
+
+    page = FakePage(
+        FakeLocator(attrs={"style": ""}),
+        FakeLocator(attrs={"src": "https://air.1688.com/app/upkg-solution/od-panel/sku-panel.html?offerId=1"}),
+    )
+
+    import asyncio
+
+    state = asyncio.run(module._copy_sku_drawer_state(page))
+    assert state == {
+        "drawer_present": True,
+        "drawer_visible": True,
+        "drawer_style": "",
+        "iframe_present": True,
+        "iframe_src": "https://air.1688.com/app/upkg-solution/od-panel/sku-panel.html?offerId=1",
+        "iframe_hidden": False,
+        "opened": True,
+    }
+
+
+def test_run_ali1688_slow_flow_overlay_state_shape() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class FakeLocator:
+        def __init__(self, *, count: int = 0, visible: bool = False):
+            self._count = count
+            self._visible = visible
+
+        @property
+        def first(self):
+            return self
+
+        @property
+        def last(self):
+            return self
+
+        async def count(self):
+            return self._count
+
+        async def is_visible(self):
+            return self._visible
+
+    class FakePage:
+        def locator(self, selector: str):
+            if selector == ".J_MIDDLEWARE_FRAME_WIDGET:visible":
+                return FakeLocator(count=2, visible=True)
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        def get_by_text(self, text: str, exact: bool = False):
+            assert text == "我知道了"
+            assert exact is True
+            return FakeLocator(count=1, visible=True)
+
+    import asyncio
+
+    async def fake_toolbar_ready(page):
+        return True
+
+    original = module._plugin_toolbar_ready
+    module._plugin_toolbar_ready = fake_toolbar_ready
+    try:
+        state = asyncio.run(module._overlay_state(FakePage()))
+    finally:
+        module._plugin_toolbar_ready = original
+
+    assert state == {
+        "overlay_count": 2,
+        "ack_visible": True,
+        "toolbar_ready": True,
+    }
+
+
 def test_source_resolution_from_urls_script_exists() -> None:
     path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_source_resolution_from_urls.py")
     assert path.exists()
@@ -585,6 +991,11 @@ def test_export_pipeline_excel_outputs_workbook(tmp_path) -> None:
     assert "筛选总览" in workbook.sheetnames
     overview = workbook["筛选总览"]
     assert overview["A2"].value == "xy-001"
+    listing_sheet = workbook["最终上架候选"]
+    listing_headers = [cell.value for cell in listing_sheet[1]]
+    header_index = {value: index + 1 for index, value in enumerate(listing_headers)}
+    assert listing_sheet.cell(row=2, column=header_index["闲鱼价格"]).value == 299.0
+    assert listing_sheet.cell(row=2, column=header_index["1688价格"]).value == 120.0
 
 
 def test_run_category_pipeline_from_urls_writes_outputs(monkeypatch, capsys, tmp_path) -> None:

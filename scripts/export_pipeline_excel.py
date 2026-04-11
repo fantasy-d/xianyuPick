@@ -367,6 +367,8 @@ def _serialize_listing_candidate_row(
         "货源商品ID": row.get("source_item_id") or "",
         "1688商品名称": source_item.get("title") or "",
         "1688商品链接": source_item.get("item_url") or "",
+        "闲鱼价格": hot_item.get("price"),
+        "1688价格": source_item.get("price"),
         "预估利润": row.get("estimated_margin"),
         "毛利率": row.get("gross_margin_rate"),
         "成本利润率": row.get("cost_profit_rate"),
