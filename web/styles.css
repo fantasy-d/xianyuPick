@@ -51,7 +51,7 @@ body {
 
 /* --- 右侧主内容区 --- */
 .main-container { margin-left: 260px; flex: 1; padding: 40px; }
-.view-content { animation: fadeIn 0.4s ease-out; max-width: 1400px; margin: 0 auto; }
+.view-content { animation: fadeIn 0.4s ease-out; }
 header { margin-bottom: 30px; }
 header h1 { font-size: 1.8rem; font-weight: 800; }
 header p { color: var(--text-secondary); }
