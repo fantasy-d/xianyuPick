@@ -29,8 +29,6 @@ from xianyu_tools.xianyu_adapter.browser_transport import (
 # --- 常量定义 ---
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DETAIL_URL_PATTERN = re.compile(r"https?://detail\.1688\.com/offer/(?P<offer_id>\d+)\.html")
-SUPPORTED_IMAGE_SEARCH_SUFFIXES = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
-REJECTED_IMAGE_SEARCH_SUFFIXES = {".heic", ".heif"}
 
 # --- 核心工具函数 ---
 
@@ -42,11 +40,8 @@ async def _dump_page(page, output_dir: Path, name: str) -> None:
     except: pass
 
 def _sanitize_filename(name: str) -> str:
-    # 先处理 HTML 实体
     name = html.unescape(name)
-    # 替换特殊符号为正常连字符
     name = name.replace(">", "-").replace("&", "and")
-    # 移除非法字符
     res = re.sub(r'[\\/:*?"<>|]', '_', name).strip()
     return res[:60]
 
@@ -85,11 +80,9 @@ def _parse_captured_api_data(captured_responses: list[dict]) -> dict[str, object
     parsed_result = {"sku_details": [], "overall_stats": {}, "price_summary": None}
     for resp in captured_responses:
         data = resp.get("data", {})
-        
         info_map = _find_key_recursive(data, "skuInfoMap")
         if info_map:
             for attr_name, info in info_map.items():
-                # 处理 HTML 实体并格式化
                 clean_attr = html.unescape(str(attr_name)).replace(">", " - ")
                 parsed_result["sku_details"].append({
                     "attributes": clean_attr,
@@ -99,7 +92,6 @@ def _parse_captured_api_data(captured_responses: list[dict]) -> dict[str, object
                     "source": "api_skuInfoMap"
                 })
             if parsed_result["sku_details"]: break
-
         spec_list = _find_key_recursive(data, "specList")
         if spec_list and isinstance(spec_list, list) and not parsed_result["sku_details"]:
             for spec in spec_list:
@@ -121,8 +113,18 @@ def _normalize_image_search_url(image_url: str | None) -> str | None:
     return text
 
 async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, index: int) -> dict:
-    wait_time = random.uniform(5.0, 10.0)
-    print(f"Anti-risk: Sleeping {wait_time:.2f}s before item {index}...")
+    # --- 核心恢复性逻辑：断点检查 ---
+    safe_title = _sanitize_filename(str(item.get("title") or "item"))
+    offer_id = item.get("offer_id")
+    # 增加多种可能的后缀检查
+    for ext in [".xlsx", ".csv"]:
+        if (output_dir / f"{safe_title}_{offer_id}{ext}").exists():
+            print(f"Checkpoint Found: Skipping {offer_id} (Already exists)", flush=True)
+            return {"offer_id": offer_id, "title": item.get("title"), "status": "success"}
+
+    # --- 增强风控：拉长随机等待时间 ---
+    wait_time = random.uniform(10.0, 25.0) # 模拟人类阅读详情的时间
+    print(f"Anti-risk: Sleeping {wait_time:.2f}s before opening detail {index}...")
     await asyncio.sleep(wait_time)
 
     result = {"offer_id": item.get("offer_id"), "title": item.get("title"), "status": "failed"}
@@ -145,15 +147,24 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
     page.on("response", on_resp)
     try:
         print(f"Opening detail {index}: {item.get('item_url')}")
+        # 模拟自然点击效果：增加随机的 referrer 设置 (可选)
         await page.goto(item.get("item_url"), wait_until="domcontentloaded", timeout=60000)
-        await page.mouse.wheel(0, random.randint(200, 500))
-        await asyncio.sleep(random.uniform(10.0, 15.0))
+        
+        # 模拟人工滑动：不仅滑动一次，而是分段滑动
+        for _ in range(random.randint(2, 4)):
+            await page.mouse.wheel(0, random.randint(300, 700))
+            await asyncio.sleep(random.uniform(1.0, 3.0))
+
+        # 核心抓取等待：给足接口加载时间
+        await asyncio.sleep(random.uniform(12.0, 18.0))
 
         if captured:
             parsed = _parse_captured_api_data(captured)
-            safe_title = _sanitize_filename(str(item.get("title") or "item"))
             excel_path = output_dir / f"{safe_title}_{item.get('offer_id')}.xlsx"
             _generate_sku_excel_file(parsed, excel_path)
+            
+            # 同时生成一个 API 备份
+            (output_dir / f"api_raw_{offer_id}.json").write_text(json.dumps(captured, ensure_ascii=False))
             
             result["excel_path"] = str(excel_path.resolve())
             result["status"] = "success" if parsed["sku_details"] else "success_no_skus"
@@ -178,7 +189,6 @@ async def _run(args):
             state = json.loads(state_path.read_text())
             await context.add_cookies(state.get("cookies", []))
 
-        # 执行图搜
         img_url = _normalize_image_search_url(args.image_url)
         from urllib.parse import quote
         search_url = f"https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress={quote(img_url)}"
@@ -187,10 +197,14 @@ async def _run(args):
         page = await context.new_page()
         await page.goto(search_url, wait_until="domcontentloaded", timeout=60000)
         
+        # 增加结果页的模拟浏览
+        await asyncio.sleep(random.uniform(5.0, 10.0))
+        await page.mouse.wheel(0, 500)
+        
         try:
             await page.wait_for_selector(".common-offer-card, [class*='offer-card']", timeout=30000)
         except: pass
-        await asyncio.sleep(8)
+        await asyncio.sleep(random.uniform(8.0, 12.0))
         
         adapter = Ali1688SourceAdapter()
         html_content = await page.content()
@@ -203,6 +217,8 @@ async def _run(args):
         for i, c in enumerate(top_candidates, start=1):
             res = await _export_sku_from_detail_page(context, {"offer_id": c.source_item_id, "title": c.title, "item_url": c.item_url}, output_dir, i)
             sku_results.append(res)
+            # 每个详情页任务之间增加额外的 CD 冷却
+            await asyncio.sleep(random.uniform(3.0, 6.0))
             
         (output_dir / "summary.json").write_text(json.dumps(sku_results, ensure_ascii=False, indent=2))
         print(f"Pipeline finished. Results in {output_dir}")

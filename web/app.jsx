@@ -8,7 +8,12 @@ const App = () => {
     const [selectedItem, setSelectedItem] = useState(null); 
     const [sysStatus, setSysStatus] = useState({});
     const [newKeyword, setNewKeyword] = useState("");
-    const timerRef = useRef(null);
+
+    useEffect(() => {
+        const timer = setInterval(refreshData, 60000);
+        refreshData();
+        return () => clearInterval(timer);
+    }, []);
 
     const refreshData = async () => {
         if (document.hidden) return;
@@ -19,23 +24,6 @@ const App = () => {
             setSysStatus(await sResp.json());
         } catch (e) {}
     };
-
-    useEffect(() => {
-        const POLL_INTERVAL = 60000; 
-        const startPolling = () => {
-            if (!timerRef.current) {
-                refreshData();
-                timerRef.current = setInterval(refreshData, POLL_INTERVAL);
-            }
-        };
-        const stopPolling = () => {
-            if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
-        };
-        startPolling();
-        const handleVisibilityChange = () => document.hidden ? stopPolling() : startPolling();
-        document.addEventListener("visibilitychange", handleVisibilityChange);
-        return () => { stopPolling(); document.removeEventListener("visibilitychange", handleVisibilityChange); };
-    }, []);
 
     const createTask = async () => {
         if (!newKeyword) return;
@@ -59,163 +47,153 @@ const App = () => {
         }
     };
 
-    const enterItemDetail = (group) => {
-        setSelectedItem(group);
-        setActiveView("item_detail");
-    };
-
     const completedTasks = tasks.filter(t => t.status === '已完成');
 
     return (
-        <div className="container">
-            <div className="bg-gradient"></div>
-            
+        <React.Fragment>
+            {/* 1. PC 侧边栏 (由 CSS 控制在移动端隐藏) */}
+            <aside className="sidebar">
+                <div className="logo-area">选品中枢 PRO</div>
+                <ul className="nav-menu">
+                    <li className={`sidebar-item ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveView("dashboard")}>
+                        <i className="fas fa-chart-pie"></i><span>控制台概览</span>
+                    </li>
+                    <li className={`sidebar-item ${view === 'tasks' ? 'active' : ''}`} onClick={() => setActiveView("tasks")}>
+                        <i className="fas fa-tasks"></i><span>任务调度池</span>
+                    </li>
+                    <li className={`sidebar-item ${['results', 'item_detail'].includes(view) ? 'active' : ''}`} onClick={() => setActiveView("results")}>
+                        <i className="fas fa-database"></i><span>选品资产库</span>
+                    </li>
+                </ul>
+            </aside>
+
+            {/* 2. 移动端底部导航 (由 CSS 控制在 PC 端隐藏) */}
             <nav className="nav-bar">
                 <div className={`nav-item ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveView("dashboard")}>
-                    <i className="fas fa-compass"></i><span>探索</span>
+                    <i className="fas fa-chart-line"></i><span>概览</span>
                 </div>
                 <div className={`nav-item ${view === 'tasks' ? 'active' : ''}`} onClick={() => setActiveView("tasks")}>
-                    <i className="fas fa-bolt"></i><span>执行</span>
+                    <i className="fas fa-list-check"></i><span>任务</span>
                 </div>
                 <div className={`nav-item ${['results', 'item_detail'].includes(view) ? 'active' : ''}`} onClick={() => setActiveView("results")}>
-                    <i className="fas fa-gem"></i><span>宝库</span>
+                    <i className="fas fa-gem"></i><span>决策</span>
                 </div>
             </nav>
 
-            {/* 1. 探索中心 (Dashboard) */}
-            {view === "dashboard" && (
-                <div className="view-content animate-in">
-                    <div className="hero-stats">
-                        <div className="hero-title">选品中枢</div>
-                        <div className="hero-subtitle">全网热度分析 · 1688 深度溯源</div>
+            {/* 3. 主内容区 */}
+            <main className="main-container">
+                {view === "dashboard" && (
+                    <div className="view-content animate-in">
+                        <header><h1>系统中枢</h1><p>全自动选品调度管理系统</p></header>
+                        
                         <div className="stats-grid">
                             <div className="stat-card">
-                                <span className="label">1688 状态</span>
-                                <span className={`val ${sysStatus["1688_login"] === '有效' ? 'text-green' : 'text-red'}`}>
-                                    {sysStatus["1688_login"] === '有效' ? 'ONLINE' : 'OFFLINE'}
-                                </span>
+                                <span className="label">1688 节点</span>
+                                <span className={`val ${sysStatus["1688_login"] === '有效' ? 'text-green' : 'text-red'}`}>{sysStatus["1688_login"] || 'OFF'}</span>
                             </div>
-                            <div className="stat-card">
-                                <span className="label">已存选品</span>
-                                <span className="val">{completedTasks.length} 个</span>
+                            <div className="stat-card"><span className="label">资产库</span><span className="val">{completedTasks.length} 个品类</span></div>
+                            <div className="stat-card"><span className="label">活跃 Worker</span><span className="val">{sysStatus["active_workers"]}</span></div>
+                            <div className="stat-card"><span className="label">存储架构</span><span className="val">MySQL</span></div>
+                        </div>
+                        
+                        <div className="task-card" style={{marginTop: '20px'}}>
+                            <h3 style={{marginBottom: '15px'}}>新建深度挖掘任务</h3>
+                            <div style={{display: 'flex', gap: '10px'}}>
+                                <input value={newKeyword} onChange={e => setNewKeyword(e.target.value)} placeholder="输入品类词..." />
+                                <button className="pro-btn" style={{background:'#000', color:'#fff'}} onClick={createTask}>立即启动</button>
                             </div>
                         </div>
                     </div>
-                    <div className="console-card">
-                        <div className="search-glow">
-                            <input value={newKeyword} onChange={e => setNewKeyword(e.target.value)} placeholder="输入品类词..." />
-                            <button className="run-btn" onClick={createTask}><i className="fas fa-paper-plane"></i></button>
+                )}
+
+                {view === "tasks" && (
+                    <div className="view-content animate-in">
+                        <header><h1>任务流水线</h1></header>
+                        <div className="task-list">
+                            {tasks.map(t => (
+                                <div className={`task-card ${t.status}`} key={t.id} onClick={() => t.status === '已完成' && loadTaskResults(t)}>
+                                    <div className="task-title">{t.keyword}</div>
+                                    <div style={{fontSize: '0.8rem', color: '#666'}}>{t.msg}</div>
+                                    <div className="nano-progress"><div className="nano-bar" style={{width: `${t.progress}%`}}></div></div>
+                                    <div style={{display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem'}}>
+                                        <span>进度: {t.progress}%</span>
+                                        {t.status === '已完成' && <span style={{color: 'var(--primary)', fontWeight: 'bold'}}>查看详情 →</span>}
+                                    </div>
+                                </div>
+                            ))}
                         </div>
                     </div>
-                </div>
-            )}
+                )}
 
-            {/* 2. 执行队列 (Tasks) */}
-            {view === "tasks" && (
-                <div className="view-content animate-in">
-                    <header><h1 className="hero-title">执行队列</h1></header>
-                    <div className="task-list">
-                        {tasks.map(t => (
-                            <div className={`task-card ${t.status}`} key={t.id} onClick={() => t.status === '已完成' && loadTaskResults(t)}>
-                                <div className="task-header">
-                                    <div className="task-kw">{t.keyword}</div>
-                                    {t.status === '执行中' && <div className="pulse-icon"></div>}
-                                </div>
-                                <div className="task-msg" style={{fontSize: '0.8rem', color: '#64748B'}}>{t.msg}</div>
-                                <div className="nano-progress"><div className="nano-bar" style={{width: `${t.progress}%`}}></div></div>
-                                <div style={{display: 'flex', justifyContent: 'space-between', fontSize: '0.7rem', color: '#94A3B8'}}>
-                                    <span>进度: {t.progress}%</span>
-                                    {t.status === '已完成' ? <span style={{color: 'var(--primary)', fontWeight: 'bold'}}>查看详情 →</span> : <span>ID: {t.id}</span>}
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            )}
-
-            {/* 3. 选品宝库 (Results) */}
-            {view === "results" && (
-                <div className="view-content animate-in">
-                    {selectedTask ? (
-                        <>
-                            <header>
-                                <div>
-                                    <div style={{fontSize: '0.8rem', color: '#64748B', cursor: 'pointer'}} onClick={() => setSelectedTask(null)}>← 返回决策库</div>
-                                    <h1 className="hero-title">{selectedTask.keyword}</h1>
-                                </div>
-                                <button className="mini-btn" style={{background: 'var(--dark)', color: '#fff', border: 'none', padding: '10px 20px', borderRadius: '15px', fontWeight: 'bold'}} onClick={() => window.open(`/api/download/${selectedTask.id}`)}>导出 XLSX</button>
-                            </header>
-                            <div className="item-masonry">
-                                {detailedItems.map((group, i) => (
-                                    <div className="item-tile" key={i} onClick={() => enterItemDetail(group)}>
-                                        <img src={group.xianyu_item.image_url} referrerPolicy="no-referrer" />
-                                        <div className="tile-body">
-                                            <div className="tile-title">{group.xianyu_item.title}</div>
-                                            <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
-                                                <span className="tile-price">¥{group.xianyu_item.price}</span>
-                                                <span style={{fontSize: '0.65rem', color: '#94A3B8'}}>{group.sources.length}货源</span>
+                {view === "results" && (
+                    <div className="view-content animate-in">
+                        {selectedTask ? (
+                            <>
+                                <header>
+                                    <h1 onClick={() => setSelectedTask(null)} style={{cursor: 'pointer'}}>← {selectedTask.keyword}</h1>
+                                    <button className="pro-btn outline" onClick={() => window.open(`/api/download/${selectedTask.id}`)}>导出 XLSX</button>
+                                </header>
+                                <div className="item-list">
+                                    {detailedItems.map((group, i) => (
+                                        <div className="item-card-flat" key={i} onClick={() => {setSelectedItem(group); setActiveView("item_detail")}}>
+                                            <img src={group.xianyu_item.image_url} className="item-img-flat" referrerPolicy="no-referrer" />
+                                            <div className="tile-body">
+                                                <div className="tile-title" style={{fontWeight:'bold', fontSize:'0.9rem', marginBottom:'10px'}}>#{group.rank} {group.xianyu_item.title}</div>
+                                                <div className="tile-price">¥{group.xianyu_item.price}</div>
                                             </div>
                                         </div>
-                                    </div>
-                                ))}
-                            </div>
-                        </>
-                    ) : (
-                        <div>
-                            <header><h1 className="hero-title">选品资产库</h1></header>
+                                    ))}
+                                </div>
+                            </>
+                        ) : (
                             <div className="task-list">
+                                <header><h1>选品决策资产库</h1></header>
                                 {completedTasks.map(t => (
                                     <div className="task-card 已完成" key={t.id} onClick={() => loadTaskResults(t)}>
-                                        <div className="task-header">
-                                            <div className="task-kw">{t.keyword}</div>
-                                            <i className="fas fa-chevron-right" style={{color: '#E2E8F0'}}></i>
-                                        </div>
-                                        <div className="task-msg">调研日期: {t.created_at} · 10个闲鱼热品</div>
+                                        <div className="task-title">{t.keyword}</div>
+                                        <div style={{fontSize: '0.75rem', color: '#666'}}>调研完成日期: {t.created_at}</div>
                                     </div>
                                 ))}
                             </div>
-                        </div>
-                    )}
-                </div>
-            )}
-
-            {/* 4. 详情页 (Item Detail) */}
-            {view === "item_detail" && selectedItem && (
-                <div className="view-content animate-in">
-                    <div className="back-btn" onClick={() => setActiveView("results")}>
-                        <i className="fas fa-arrow-left"></i> 返回列表
+                        )}
                     </div>
-                    <div className="detail-hero-card">
-                        <img src={selectedItem.xianyu_item.image_url} className="hero-img-full" referrerPolicy="no-referrer" />
-                        <div className="hero-content">
-                            <h2 style={{fontSize: '1.1rem', fontWeight: 'bold', marginBottom: '15px'}}>{selectedItem.xianyu_item.title}</h2>
-                            <div style={{display: 'flex', gap: '25px'}}>
-                                <div><span style={{fontSize: '0.7rem', color: '#64748B'}}>想要</span><div style={{fontWeight: '800', fontSize: '1.1rem'}}>{selectedItem.xianyu_item.want_count}</div></div>
-                                <div><span style={{fontSize: '0.7rem', color: '#64748B'}}>售价</span><div style={{fontWeight: '800', fontSize: '1.1rem'}}>¥{selectedItem.xianyu_item.price}</div></div>
+                )}
+
+                {view === "item_detail" && selectedItem && (
+                    <div className="view-content animate-in">
+                        <div style={{fontSize: '0.9rem', color: 'var(--text-sec)', cursor: 'pointer', marginBottom: '20px'}} onClick={() => setActiveView("results")}>← 返回品类列表</div>
+                        <div className="task-card" style={{display: 'flex', gap: '20px', padding: '20px', background: '#fff', border: 'none'}}>
+                            <img src={selectedItem.xianyu_item.image_url} style={{width: '120px', height: '120px', borderRadius: '12px', objectFit: 'cover'}} referrerPolicy="no-referrer" />
+                            <div>
+                                <h2 style={{fontSize: '1rem', fontWeight: 'bold', marginBottom: '10px'}}>{selectedItem.xianyu_item.title}</h2>
+                                <div style={{display: 'flex', gap: '30px'}}>
+                                    <div><span style={{fontSize: '0.7rem', color: '#999'}}>售价</span><div style={{fontWeight: '800'}}>¥{selectedItem.xianyu_item.price}</div></div>
+                                    <div><span style={{fontSize: '0.7rem', color: '#999'}}>想要</span><div style={{fontWeight: '800'}}>{selectedItem.xianyu_item.want_count}</div></div>
+                                </div>
                             </div>
                         </div>
-                    </div>
-                    <div className="source-section">
-                        <h3 style={{marginBottom: '15px', fontSize: '1rem', fontWeight: 'bold'}}>1688 货源对比</h3>
-                        {selectedItem.sources.map((src, i) => {
-                            const margin = (selectedItem.xianyu_item.price - src.min_price - 20).toFixed(2);
-                            return (
-                                <div className="source-detail-row" key={i}>
-                                    <div style={{flex: 1, paddingRight: '15px'}}>
-                                        <a href={src.url} target="_blank" style={{textDecoration: 'none', color: 'inherit', fontWeight: 'bold', fontSize: '0.85rem', display: 'block', marginBottom: '5px'}}>{src.title}</a>
-                                        <span style={{fontSize: '0.7rem', color: '#64748B'}}>{src.sku_count} 个 SKU</span>
+                        <div style={{marginTop: '30px'}}>
+                            <h3 style={{fontSize: '0.95rem', marginBottom: '15px'}}>1688 深度货源对比</h3>
+                            {selectedItem.sources.map((src, i) => {
+                                const margin = (selectedItem.xianyu_item.price - src.min_price - 20).toFixed(2);
+                                return (
+                                    <div className="task-card" key={i} style={{padding: '15px', display: 'flex', justifyContent: 'space-between', alignItems: 'center'}}>
+                                        <div style={{flex: 1, paddingRight: '15px'}}>
+                                            <a href={src.url} target="_blank" style={{textDecoration: 'none', color: 'inherit', fontWeight: 'bold', fontSize: '0.85rem'}}>{src.title}</a>
+                                            <div style={{fontSize: '0.7rem', color: '#999', marginTop: '5px'}}>{src.sku_count} 个 SKU 规格</div>
+                                        </div>
+                                        <div style={{textAlign: 'right'}}>
+                                            <div style={{fontWeight: '800'}}>¥{src.min_price}</div>
+                                            <div style={{fontSize: '0.75rem', color: margin > 50 ? 'var(--success)' : 'var(--text-sec)', fontWeight: 'bold'}}>利: ¥{margin}</div>
+                                        </div>
                                     </div>
-                                    <div style={{textAlign: 'right', minWidth: '80px'}}>
-                                        <div style={{fontSize: '0.9rem', fontWeight: '800'}}>¥{src.min_price}</div>
-                                        <div style={{fontSize: '0.75rem', color: margin > 50 ? '#16A34A' : '#DC2626', fontWeight: 'bold'}}>利: ¥{margin}</div>
-                                    </div>
-                                </div>
-                            );
-                        })}
+                                );
+                            })}
+                        </div>
                     </div>
-                </div>
-            )}
-        </div>
+                )}
+            </main>
+        </React.Fragment>
     );
 };
 
