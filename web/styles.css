@@ -85,7 +85,7 @@ header p { color: var(--text-secondary); }
 
 .task-kw { font-weight: 700; font-size: 1.1rem; margin-bottom: 10px; }
 .task-msg { font-size: 0.85rem; color: var(--text-secondary); min-height: 1.5em; margin-bottom: 15px; }
-.nano-progress { height: 4px; background: #F1F5F9; border-radius: 2px; overflow: hidden; margin-top: 15px; }
+.nano-progress { height: 4px; background: #F1F5F9; border-radius: 2px; overflow: hidden; margin: 15px 0; }
 .nano-bar { height: 100%; background: var(--primary); transition: width 0.5s; }
 
 /* 结果页卡片 */
@@ -103,6 +103,7 @@ header p { color: var(--text-secondary); }
 .pro-btn { background: #fff; border: 1px solid var(--border); color: var(--text-main); padding: 8px 15px; border-radius: 8px; font-weight: 600; cursor: pointer; }
 .pro-btn.primary { background: #000; color: #fff; border-color: #000; }
 .pro-btn.danger { background: #FEF2F2; color: var(--danger); border-color: #FEE2E2; }
+.pro-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
 .text-green { color: var(--success); }
