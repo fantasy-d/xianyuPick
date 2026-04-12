@@ -35,14 +35,15 @@ class Task:
     @staticmethod
     def add(keyword: str):
         task_id = str(uuid.uuid4())[:8]
-        created_at = datetime.now()
-        date_folder = created_at.strftime("%Y%m%d")
-        root_dir = str(OUTPUTS_DIR / f"{sanitize_dir_name(keyword)}_{created_at.strftime('%Y%m%d')}")
+        now = datetime.now()
+        version = now.strftime("%Y%m%d") # 显式版本号
+        root_dir = str(OUTPUTS_DIR / f"{sanitize_dir_name(keyword)}_{version}")
         conn = get_db_conn(); cursor = conn.cursor()
-        cursor.execute("INSERT INTO tasks (id, keyword, status, progress, msg, created_at, root_dir) VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                     (task_id, keyword, "排队中", 0, "等待调度", created_at, root_dir))
+        cursor.execute("INSERT INTO tasks (id, keyword, status, progress, msg, created_at, root_dir, version) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+                     (task_id, keyword, "排队中", 0, "等待调度", now, root_dir, version))
         conn.commit(); conn.close()
         return task_id
+
 
 # --- 后台 Worker ---
 running_processes = {}
@@ -131,7 +132,7 @@ def get_task_details(task_id: str):
 @app.get("/api/tasks")
 def list_tasks():
     conn = get_db_conn(); cursor = conn.cursor()
-    cursor.execute("SELECT id, keyword, status, progress, msg, created_at FROM tasks ORDER BY created_at DESC")
+    cursor.execute("SELECT id, keyword, status, progress, msg, created_at, version FROM tasks ORDER BY created_at DESC")
     rows = cursor.fetchall(); conn.close()
     for r in rows:
         if isinstance(r['created_at'], datetime): r['created_at'] = r['created_at'].strftime("%Y-%m-%d %H:%M")
@@ -156,21 +157,33 @@ def pause_task(task_id: str):
 @app.post("/api/tasks/{task_id}/retry")
 def retry_task(task_id: str):
     conn = get_db_conn(); cursor = conn.cursor()
-    # 1. 获取当前状态
-    cursor.execute("SELECT status FROM tasks WHERE id = %s", (task_id,))
+    # 1. 获取原任务信息
+    cursor.execute("SELECT keyword, status, created_at FROM tasks WHERE id = %s", (task_id,))
     row = cursor.fetchone()
-
-    if row and row['status'] == '已完成':
-        # 情况 A：针对已完成任务的“重扫” -> 彻底重置
-        cursor.execute("DELETE FROM xianyu_items WHERE task_id = %s", (task_id,))
-        cursor.execute("DELETE FROM ali1688_sources WHERE task_id = %s", (task_id,))
-        cursor.execute("UPDATE tasks SET status = '排队中', msg = '准备重扫...', progress = 0, pgid = NULL, checkpoint = NULL WHERE id = %s", (task_id,))
+    
+    if not row: conn.close(); return {"error": "Not found"}
+    
+    # 判定日期是否为今天
+    is_today = row['created_at'].date() == datetime.now().date()
+    
+    if row['status'] == '已完成':
+        if is_today:
+            # 情况 A1：同日重扫 -> 彻底重置当前任务
+            cursor.execute("DELETE FROM xianyu_items WHERE task_id = %s", (task_id,))
+            cursor.execute("DELETE FROM ali1688_sources WHERE task_id = %s", (task_id,))
+            cursor.execute("UPDATE tasks SET status = '排队中', msg = '同日重扫中...', progress = 0, pgid = NULL, checkpoint = NULL WHERE id = %s", (task_id,))
+            conn.commit(); conn.close()
+            return {"status": "ok", "action": "overwritten_today"}
+        else:
+            # 情况 A2：异日重扫 -> 新建今日任务
+            conn.close()
+            new_id = Task.add(row['keyword'])
+            return {"status": "ok", "new_id": new_id, "action": "created_new_day"}
     else:
-        # 情况 B：针对暂停或失败任务的“恢复” -> 保留 Checkpoint
+        # 情况 B：断点恢复
         cursor.execute("UPDATE tasks SET status = '排队中', msg = '准备恢复...', pgid = NULL WHERE id = %s", (task_id,))
-
-    conn.commit(); conn.close()
-    return {"status": "ok"}
+        conn.commit(); conn.close()
+        return {"status": "ok", "action": "resumed"}
 
 
 @app.delete("/api/tasks/{task_id}")
