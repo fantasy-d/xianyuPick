@@ -77,7 +77,6 @@ async def pipeline_worker():
             log_file = Path(root_dir) / "task.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
             
-            # 确保使用正确的 Python 解释器
             python_path = sys.executable
             cmd = f"export PYTHONPATH=$PYTHONPATH:{BASE_DIR}/src && {python_path} scripts/run_full_pipeline.py --keyword '{keyword}' --task-id '{task_id}' > '{log_file}' 2>&1"
             
@@ -177,40 +176,99 @@ def retry_task(task_id: str):
 
 @app.delete("/api/tasks/{task_id}")
 def delete_task(task_id: str):
-    logger.info(f"Logical delete requested for task: {task_id}")
+    logger.info(f"Full delete requested for task: {task_id}")
     pause_task(task_id)
-    Task.update(task_id, is_deleted=1, pgid=None)
-    return {"status": "ok"}
+    conn = get_db_conn(); cursor = conn.cursor()
+    cursor.execute("SELECT root_dir FROM tasks WHERE id = %s", (task_id,))
+    row = cursor.fetchone()
+    if row and row['root_dir']:
+        folder_path = Path(row['root_dir'])
+        if folder_path.exists() and "outputs" in folder_path.parts:
+            try:
+                import shutil
+                shutil.rmtree(folder_path)
+                logger.info(f"Physical folder deleted: {folder_path}")
+            except Exception as e:
+                logger.error(f"Failed to delete folder {folder_path}: {e}")
+    Task.update(task_id, status="已删除", msg="任务及物理文件已清理", is_deleted=1, pgid=None)
+    conn.close(); return {"status": "ok"}
 
 @app.get("/api/task_details/{task_id}")
 def get_task_details(task_id: str):
     try:
         conn = get_db_conn(); cursor = conn.cursor()
+        # 1. 找到该任务下的所有闲鱼爆款
         cursor.execute("SELECT * FROM xianyu_items WHERE task_id = %s ORDER BY rank_index ASC", (task_id,))
         db_items = cursor.fetchall()
-        if db_items:
-            details = []
-            for item in db_items:
-                cursor.execute("SELECT * FROM ali1688_sources WHERE item_id = %s ORDER BY min_price ASC", (item['id'],))
-                sources = cursor.fetchall()
-                details.append({
-                    "rank": item['rank_index'],
-                    "xianyu_item": {"db_id": item['id'], "title": item['title'], "price": float(item['price']), "image_url": item['image_url'], "want_count": item['want_count'], "item_url": item['item_url']},
-                    "sources": [{
-                        "db_id": s['id'], 
-                        "title": s['title'], 
-                        "min_price": float(s['min_price']), 
-                        "sku_count": s['sku_count'], 
-                        "url": s['source_url'], 
-                        "images": json.loads(s['images'] or "[]"),
-                        "drop_reason": s['drop_reason']
-                    } for s in sources]
+        
+        details = []
+        for item in db_items:
+            item_db_id = item['id'] # 闲鱼商品的唯一主键
+            # 2. 根据该主键去 1688 货源表里捞数据
+            cursor.execute("SELECT * FROM ali1688_sources WHERE item_id = %s ORDER BY min_price ASC", (item_db_id,))
+            sources_rows = cursor.fetchall()
+            
+            sources_data = []
+            for s in sources_rows:
+                # 安全解析图片 JSON
+                try: imgs = json.loads(s['images']) if s['images'] else []
+                except: imgs = []
+                
+                sources_data.append({
+                    "db_id": s['id'],
+                    "title": s['title'],
+                    "min_price": float(s['min_price']) if s['min_price'] else 0,
+                    "sku_count": s['sku_count'],
+                    "url": s['source_url'],
+                    "images": imgs,
+                    "drop_reason": s['drop_reason']
                 })
-            conn.close(); return {"task_id": task_id, "details": details}
-        conn.close(); return {"details": []}
+            
+            details.append({
+                "rank": item['rank_index'],
+                "xianyu_item": {
+                    "db_id": item_db_id,
+                    "title": item['title'],
+                    "price": float(item['price']),
+                    "image_url": item['image_url'],
+                    "want_count": item['want_count'],
+                    "item_url": item['item_url']
+                },
+                "sources": sources_data
+            })
+            
+        conn.close()
+        return {"task_id": task_id, "details": details}
     except Exception as e:
         logger.error(f"Failed to fetch details for task {task_id}: {e}")
         return {"error": str(e)}
+
+@app.post("/api/publish/{source_id}")
+async def publish_to_xianyu(source_id: int):
+    logger.info(f"OpenAPI publish request for source_id: {source_id}")
+    conn = get_db_conn(); cursor = conn.cursor()
+    cursor.execute("SELECT * FROM ali1688_sources WHERE id = %s", (source_id,))
+    source = cursor.fetchone()
+    if not source: conn.close(); return {"error": "Source not found"}
+    images = json.loads(source['images'] or "[]")
+    item_data = {"title": source['title'], "description": f"【1688精选货源】\n{source['title']}\n品质保障，欢迎选购。", "price": float(source['min_price']) + 30, "images": images}
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    try:
+        publisher = PublisherV3()
+        result = publisher.publish_item(item_data)
+        pub_url = f"https://www.goofish.com/item?id={result.get('xianyu_item_id')}" if result.get('status') == 'success' else None
+        cursor.execute("INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url) VALUES (%s,%s,%s,%s,%s,%s)",
+                     (source['task_id'], source_id, result.get('xianyu_item_id'), result['status'], result.get('msg'), pub_url))
+        conn.commit(); conn.close(); return {**result, "published_url": pub_url}
+    except Exception as e:
+        logger.error(f"Publisher Error: {e}"); conn.close(); return {"status": "failed", "msg": str(e)}
+
+@app.get("/api/published_status/{source_id}")
+def get_published_status(source_id: int):
+    conn = get_db_conn(); cursor = conn.cursor()
+    cursor.execute("SELECT publish_status, published_url FROM xianyu_published_items WHERE source_db_id = %s ORDER BY created_at DESC LIMIT 1", (source_id,))
+    res = cursor.fetchone(); conn.close()
+    return res if res else {"publish_status": "none"}
 
 @app.get("/api/tasks/{task_id}/logs", response_class=PlainTextResponse)
 def get_logs(task_id: str):

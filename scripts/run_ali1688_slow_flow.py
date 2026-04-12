@@ -28,6 +28,13 @@ def _find_key_recursive(obj, target_key):
             if res: return res
     return None
 
+def _clean_image_url(url: str) -> str:
+    if not url: return ""
+    if url.startswith("//"): url = "https:" + url
+    url = re.sub(r'_\d+x\d+.*?\.jpg.*$', '.jpg', url)
+    url = re.sub(r'\.search\.jpg$', '.jpg', url)
+    return url
+
 def is_relevant(source_title, search_keyword):
     if not source_title: return False, "标题为空"
     s_title, t_kw = str(source_title).lower(), str(search_keyword).lower()
@@ -49,20 +56,15 @@ def _generate_sku_excel_file(parsed_data: dict, output_path: Path):
     except: pass
 
 async def _try_official_plugin_export(page, logger) -> list[str]:
-    """模拟插件点击导出高清图 (您发现的路径)"""
     try:
         btn = page.locator(".download-btn").first
         if await btn.is_visible():
-            logger.info("    [Plugin-Export] Plugin button found. Triggering...")
-            await btn.click(); await asyncio.sleep(2)
-            # 勾选主图
+            await btn.click(); await asyncio.sleep(random.uniform(2.0, 4.0))
             main_opt = page.get_by_text("主图", exact=False).first
             if await main_opt.is_visible(): await main_opt.click()
-            # 导出
             export_btn = page.get_by_text("导出", exact=False).or_(page.get_by_text("生成", exact=False)).first
             if await export_btn.is_visible():
-                await export_btn.click(); await asyncio.sleep(2)
-                # 从文本框拿链接
+                await export_btn.click(); await asyncio.sleep(random.uniform(2.0, 3.0))
                 links = await page.evaluate("""
                     () => {
                         const allText = Array.from(document.querySelectorAll('textarea, input')).map(el => el.value).join('\\n');
@@ -70,7 +72,7 @@ async def _try_official_plugin_export(page, logger) -> list[str]:
                         return [...new Set(urls)].filter(u => u.includes('alicdn.com'));
                     }
                 """)
-                return [u if u.startswith("http") else "https:" + u for u in links]
+                return [_clean_image_url(u) for u in links]
     except: pass
     return []
 
@@ -78,7 +80,6 @@ def _parse_captured_api_data(captured_responses: list[dict], logger):
     parsed_result = {"sku_details": [], "images": []}
     for resp in captured_responses:
         data = resp.get("data", {})
-        # SKU 提取
         for key in ["skuInfoMap", "skuProps"]:
             info_map = _find_key_recursive(data, key)
             if info_map and not parsed_result["sku_details"] and isinstance(info_map, dict):
@@ -90,7 +91,6 @@ def _parse_captured_api_data(captured_responses: list[dict], logger):
                         "spec_id": info.get("specId") or info.get("skuId"),
                         "source": f"api_{key}"
                     })
-        # 图片提取 (API 多路径兼容)
         for key in ["imageList", "images", "mainImages"]:
             image_list = _find_key_recursive(data, key)
             if image_list and isinstance(image_list, list) and not parsed_result["images"]:
@@ -98,9 +98,7 @@ def _parse_captured_api_data(captured_responses: list[dict], logger):
                     url = None
                     if isinstance(img, str): url = img
                     elif isinstance(img, dict): url = img.get("originalImageUri") or img.get("fullName") or img.get("url")
-                    if url:
-                        if url.startswith("//"): url = "https:" + url
-                        parsed_result["images"].append(url)
+                    if url: parsed_result["images"].append(_clean_image_url(url))
                 if parsed_result["images"]: break
     return parsed_result
 
@@ -108,6 +106,11 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
     safe_title = _sanitize_filename(item.get("title") or "item")
     offer_id = item.get("offer_id")
     
+    # 子任务内的局部冷却
+    wait_time = random.uniform(5.0, 12.0)
+    logger.info(f"    [Cooling] Wait {wait_time:.1f}s before processing Rank {index}...")
+    await asyncio.sleep(wait_time)
+
     captured = []
     async def on_resp(res):
         try:
@@ -126,25 +129,22 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
         url = f"https://detail.1688.com/offer/{offer_id}.html"
         logger.info(f"    [Step 2/4] Browser opening: {url}")
         await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        await page.evaluate("window.scrollTo(0, 800)"); await asyncio.sleep(3)
+        await page.evaluate("window.scrollTo(0, 800)"); await asyncio.sleep(random.uniform(3.0, 5.0))
         
-        # 1. 优先尝试插件路径
         final_images = await _try_official_plugin_export(page, logger)
-        
-        # 2. API 路径
         parsed = _parse_captured_api_data(captured, logger)
         if not final_images: final_images = parsed["images"]
         
-        # 3. DOM 兜底
         if not final_images:
             final_images = await page.evaluate("""
                 () => Array.from(document.querySelectorAll('.detail-gallery img'))
                     .map(img => img.src).filter(src => src.includes('alicdn.com'))
                     .map(s => s.startsWith('//') ? 'https:' + s : s).slice(0, 5)
             """)
+            final_images = [_clean_image_url(u) for u in final_images]
 
         if parsed["sku_details"] or final_images:
-            logger.info(f"    [Step 4/4] Success! Captured {len(final_images)} images.")
+            logger.info(f"    [Step 4/4] Success! Images: {len(final_images)}")
             if parsed["sku_details"]:
                 _generate_sku_excel_file(parsed, output_dir / f"{safe_title}_{offer_id}.xlsx")
             return {"status": "success", "images": final_images}
@@ -157,6 +157,11 @@ async def _run(args):
     logger = get_unified_logger("1688Worker", log_file=args.log_file)
     logger.info("="*60); logger.info(f"1688 SOURCING START")
     
+    # 核心：子进程全局启动冷却
+    global_wait = random.uniform(3.0, 6.0)
+    logger.info(f"[Cooling] Starting sub-process with {global_wait:.1f}s base wait...")
+    await asyncio.sleep(global_wait)
+
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=False, args=default_launch_args())
         context = await browser.new_context(**default_desktop_context_options())
@@ -166,7 +171,7 @@ async def _run(args):
         
         from urllib.parse import quote
         search_url = f"https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress={quote(args.image_url)}"
-        page = await context.new_page(); await page.goto(search_url, wait_until="domcontentloaded", timeout=60000); await asyncio.sleep(8)
+        page = await context.new_page(); await page.goto(search_url, wait_until="domcontentloaded", timeout=60000); await asyncio.sleep(random.uniform(8.0, 12.0))
         adapter = Ali1688SourceAdapter(); html_content = await page.content()
         candidates = adapter.search_from_html(html_content, limit=60)
         
