@@ -107,19 +107,23 @@ def get_task_details(task_id: str):
         for item in db_items:
             cursor.execute("SELECT * FROM ali1688_sources WHERE item_id = %s ORDER BY min_price ASC", (item['id'],))
             sources = cursor.fetchall()
+            # 格式对齐
             details.append({
                 "rank": item['rank_index'],
                 "xianyu_item": {
+                    "db_id": item['id'], # 透传 ID
                     "title": item['title'], "price": float(item['price']),
                     "image_url": item['image_url'], "want_count": item['want_count'],
-                    "item_url": item['item_url'] # 补上 URL
+                    "item_url": item['item_url']
                 },
                 "sources": [{
+                    "db_id": s['id'], # 透传 ID
                     "title": s['title'], "min_price": float(s['min_price']),
                     "sku_count": s['sku_count'], "url": s['source_url'],
-                    "drop_reason": s['drop_reason'] # 传给前端
+                    "drop_reason": s['drop_reason']
                 } for s in sources]
             })
+
         conn.close(); return {"task_id": task_id, "details": details}
     conn.close(); return {"details": []}
 
