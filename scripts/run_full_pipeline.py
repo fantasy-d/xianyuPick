@@ -128,7 +128,8 @@ async def main():
         item_dir = root_dir / f"Rank_{i}_{sanitize_dir_name(item.get('title', 'item'))}"
         item_dir.mkdir(parents=True, exist_ok=True)
         
-        cmd_1688 = f"export PYTHONPATH=$PYTHONPATH:{BASE_DIR}/src && {python_path} scripts/run_ali1688_slow_flow.py --image-url '{item.get('image_url')}' --output-dir '{item_dir}' --detail-top-n 10 --target-keyword '{item.get('title')}'"
+        # 传入任务原始 keyword 进行相关性过滤
+        cmd_1688 = f"export PYTHONPATH=$PYTHONPATH:{BASE_DIR}/src && {python_path} scripts/run_ali1688_slow_flow.py --image-url '{item.get('image_url')}' --output-dir '{item_dir}' --detail-top-n 10 --target-keyword '{keyword}'"
 
         # --- 资产入库：1688 货源 (含丢弃逻辑) ---
         if task_id and i in db_item_ids:

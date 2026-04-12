@@ -23,17 +23,36 @@ def _find_key_recursive(obj, target_key):
             if res: return res
     return None
 
-def is_relevant(source_title, target_keyword):
-    if not target_keyword: return True, ""
-    s_title, t_kw = str(source_title).lower(), str(target_keyword).lower()
-    clean_target = re.sub(r'[【】\[\]（）() ]', '', t_kw)
-    core_chars = clean_target[:6] 
-    matches = sum(1 for char in core_chars if char in s_title)
-    if matches >= 2: return True, ""
-    category_keywords = ["椅", "桌", "蚊帐", "纸", "垫", "柜", "包", "灯", "架", "机"]
-    for word in category_keywords:
-        if word in clean_target and word in s_title: return True, ""
-    return False, "标题不匹配"
+def is_relevant(source_title, search_keyword):
+    """相关性判定：规则初筛 -> AI 仲裁"""
+    if not search_keyword: return True, ""
+    
+    s_title = str(source_title).lower()
+    clean_keyword = re.sub(r'\s+', '', str(search_keyword)).lower()
+    
+    # --- 阶段 1：规则初筛 (命中则秒过) ---
+    # 只要字面上包含关键词核心，直接视为相关
+    if clean_keyword in s_title: return True, ""
+    core_parts = [clean_keyword[:2], clean_keyword[-2:], clean_keyword[1:3]]
+    for part in core_parts:
+        if len(part) >= 2 and part in s_title: return True, ""
+            
+    # --- 阶段 2：AI 仲裁 (只有规则判定不通过时，才请 AI 救活) ---
+    # 这能挽救那些语义相关但字面不匹配的货源 (如搜"椅子"出了"转椅")
+    print(f"  [AI Audit] Rule rejected, asking LLM to mediate: {source_title} vs {search_keyword}")
+    try:
+        from xianyu_tools.llm_util import ask_llm_relevance
+        ai_ok = ask_llm_relevance(source_title, search_keyword)
+        if ai_ok is True:
+            print(f"  [AI Audit] PASS: LLM found semantic match!")
+            return True, "" # AI 成功救活
+        elif ai_ok is False:
+            return False, f"AI判定不相关"
+    except Exception as e:
+        print(f"  [AI Audit] Failed to call LLM: {e}")
+
+    # 兜底：AI 没救活，维持规则判定
+    return False, f"不含关键词 '{clean_keyword}'"
 
 def _generate_sku_excel_file(parsed_data: dict, output_path: Path):
     try:

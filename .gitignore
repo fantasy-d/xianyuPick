@@ -17,3 +17,4 @@ xianyu_state.json
 .idea/
 .vscode/
 config/database.json
+config/llm.json
