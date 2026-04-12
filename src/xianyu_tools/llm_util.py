@@ -1,6 +1,7 @@
 import json
 import requests
 import os
+import sys
 from pathlib import Path
 
 # 记录每个配置项（Key）当前使用的模型索引
@@ -17,10 +18,18 @@ def load_llm_configs():
         print(f"Error loading llm.json: {e}")
         return []
 
-def ask_llm_relevance(source_title, search_keyword):
+def ask_llm_relevance(source_title, search_keyword, logger=None):
     """
-    模型级轮询判定：兼容单 model 字符串、单 model 列表、以及复数 models 列表
+    模型级轮询判定，支持外部 Logger 透传
     """
+    def log(msg, level="info"):
+        if logger:
+            if level == "info": logger.info(msg)
+            elif level == "error": logger.error(msg)
+            elif level == "warning": logger.warning(msg)
+        else:
+            print(msg, flush=True)
+
     configs = load_llm_configs()
     if not configs: return None
 
@@ -28,38 +37,29 @@ def ask_llm_relevance(source_title, search_keyword):
         api_key = cfg.get("api_key")
         base_url = cfg.get("base_url")
         
-        # 兼容性处理：尝试获取模型列表
         raw_model = cfg.get("model")
         raw_models = cfg.get("models")
-        
         models = []
-        if isinstance(raw_models, list):
-            models = raw_models
-        elif isinstance(raw_model, list):
-            models = raw_model # 命中您的配置情况
-        elif isinstance(raw_model, str):
-            models = [raw_model]
+        if isinstance(raw_models, list): models = raw_models
+        elif isinstance(raw_model, list): models = raw_model
+        elif isinstance(raw_model, str): models = [raw_model]
         
         if not api_key or not models: continue
-
         if cfg_idx not in _model_indices: _model_indices[cfg_idx] = 0
         
-        # 依次尝试该 Key 下的每一个模型
         for _ in range(len(models)):
             current_model = models[_model_indices[cfg_idx] % len(models)]
             _model_indices[cfg_idx] += 1
-            
-            # 严格确保 current_model 是字符串
             if not isinstance(current_model, str): continue
 
-            print(f"    [AI Poll] Using Key: {api_key[:8]}... with Model: {current_model}")
-            
-            prompt = f"""
-            你是一个电商选品专家。请判断下面的 1688 商品是否为用户真正想要找的“核心品类商品”。
-            用户搜索意图: "{search_keyword}"
-            1688 商品标题: "{source_title}"
-            判定准则: 1.是主品类返回 "YES"；2.是配件、周边或无关项返回 "NO"。只返回 YES/NO。
-            """
+            prompt = f"""你是一个电商选品专家。请判断下面的 1688 商品是否为用户真正想要找的“核心品类商品”。
+用户搜索意图: "{search_keyword}"
+1688 商品标题: "{source_title}"
+判定准则: 1.是主品类返回 "YES"；2.是配件、周边或无关项返回 "NO"。只返回 YES/NO。"""
+
+            log("-" * 20)
+            log(f"[AI Audit] Model: {current_model}")
+            log(f"[AI Input]: {search_keyword} -> {source_title}")
             
             try:
                 headers = { "Content-Type": "application/json", "Authorization": f"Bearer {api_key}" }
@@ -72,13 +72,16 @@ def ask_llm_relevance(source_title, search_keyword):
                 res_json = response.json()
                 
                 if 'error' in res_json:
-                    print(f"    [AI Poll] Model {current_model} Error: {res_json['error'].get('message')}. Trying next...")
+                    log(f"[AI Error] {res_json['error'].get('message')}", "error")
                     continue
 
-                result = res_json['choices'][0]['message']['content'].strip().upper()
-                return "YES" in result
+                raw_content = res_json['choices'][0]['message']['content'].strip()
+                log(f"[AI Result]: {raw_content}")
+                log("-" * 20)
+
+                return "YES" in raw_content.upper()
             except Exception as e:
-                print(f"    [AI Poll] Request Failed for {current_model}: {e}")
+                log(f"[AI Failed] {current_model}: {e}", "warning")
                 continue
                 
     return None 
