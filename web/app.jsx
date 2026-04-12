@@ -208,11 +208,16 @@ const App = () => {
                                 const isDropped = !!src.drop_reason;
                                 return (
                                     <div className={`task-card ${isDropped ? 'dropped' : ''}`} key={i} style={{display:'flex', justifyContent:'space-between', alignItems:'center', padding: '15px', marginBottom: '15px'}}>
-                                        <div style={{flex:1}}>
-                                            <a href={src.url} target="_blank" className={isDropped ? 'text-muted' : 'hover-link'} style={{textDecoration: isDropped ? 'line-through' : 'none', color:'inherit', fontWeight:'600', display: 'block', marginBottom: '5px'}}>{src.title}</a>
-                                            <div style={{display: 'flex', gap: '15px', alignItems: 'center'}}>
-                                                <span style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>{src.sku_count > 0 ? `${src.sku_count} 个 SKU 规格` : '仅列表页快照'}</span>
-                                                <span style={{fontSize: '0.7rem', color: 'var(--text-secondary)', background: '#F1F5F9', padding: '1px 6px', borderRadius: '4px'}}>ID: {src.db_id}</span>
+                                        <div style={{display:'flex', gap:'15px', alignItems:'center', flex: 1}}>
+                                            {src.images && src.images.length > 0 && (
+                                                <img src={src.images[0]} style={{width:'60px', height:'60px', borderRadius:'4px', objectFit:'cover'}} referrerPolicy="no-referrer" />
+                                            )}
+                                            <div style={{flex:1}}>
+                                                <a href={src.url} target="_blank" className={isDropped ? 'text-muted' : 'hover-link'} style={{textDecoration: isDropped ? 'line-through' : 'none', color:'inherit', fontWeight:'600', display: 'block', marginBottom: '5px'}}>{src.title}</a>
+                                                <div style={{display: 'flex', gap: '15px', alignItems: 'center'}}>
+                                                    <span style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>{src.sku_count > 0 ? `${src.sku_count} 个 SKU 规格` : '仅列表页快照'}</span>
+                                                    <span style={{fontSize: '0.7rem', color: 'var(--text-secondary)', background: '#F1F5F9', padding: '1px 6px', borderRadius: '4px'}}>ID: {src.db_id}</span>
+                                                </div>
                                             </div>
                                         </div>
                                         <div style={{textAlign:'right', paddingLeft:'20px', minWidth: '150px'}}>

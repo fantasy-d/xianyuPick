@@ -141,24 +141,26 @@ async def main():
             item_db_id = db_item_ids[i]
             _conn = get_db_conn(); _cursor = _conn.cursor()
             try:
-                _cursor.execute("DELETE FROM ali1688_sources WHERE item_id = %s", (item_db_id,))
-                summary_path = item_dir / "summary.json"
                 if summary_path.exists():
                     results = json.loads(summary_path.read_text())
                     for res in results:
+                        img_json = json.dumps(res.get("images", []), ensure_ascii=False)
                         if res.get("status") == "dropped":
-                            _cursor.execute("INSERT INTO ali1688_sources (item_id, task_id, title, offer_id, min_price, sku_count, source_url, drop_reason) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                                         (item_db_id, task_id, res['title'], res['offer_id'], res['min_price'], 0, res['item_url'], res['drop_reason']))
+                            _cursor.execute("INSERT INTO ali1688_sources (item_id, task_id, title, offer_id, min_price, sku_count, source_url, images, drop_reason) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)",
+                                         (item_db_id, task_id, res['title'], res['offer_id'], res['min_price'], 0, res['item_url'], img_json, res['drop_reason']))
                         else:
+                            # 读取详情价格
                             offer_id = res['offer_id']
                             xlsx = list(item_dir.glob(f"*_{offer_id}.xlsx"))
                             if xlsx:
                                 from openpyxl import load_workbook
                                 wb = load_workbook(filename=xlsx[0], read_only=True)
-                                prices = [float(row[1]) for row in wb.active.iter_rows(min_row=2, max_col=2, values_only=True) if row[1]]
+                                ws = wb.active
+                                prices = [float(row[1]) for row in ws.iter_rows(min_row=2, max_col=2, values_only=True) if row[1]]
                                 if prices:
-                                    _cursor.execute("INSERT INTO ali1688_sources (item_id, task_id, title, offer_id, min_price, sku_count, source_url) VALUES (%s,%s,%s,%s,%s,%s,%s)",
-                                                 (item_db_id, task_id, res['title'], offer_id, min(prices), len(prices), res['item_url']))
+                                    _cursor.execute("INSERT INTO ali1688_sources (item_id, task_id, title, offer_id, min_price, sku_count, source_url, images) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                                                 (item_db_id, task_id, res['title'], offer_id, min(prices), len(prices), res['item_url'], img_json))
+
                 _cursor.execute("UPDATE tasks SET checkpoint = %s WHERE id = %s", (json.dumps({"phase": 2, "processed_rank": i}), task_id))
                 _conn.commit()
             except Exception as e: logger.error(f"[DB] Sync Error: {e}")
