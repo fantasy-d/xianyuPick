@@ -99,8 +99,8 @@ async def main():
         db_items = cursor.fetchall()
         if not db_items:
             for i, item in enumerate(hot_items, start=1):
-                cursor.execute("INSERT INTO xianyu_items (task_id, rank_index, title, price, image_url, want_count) VALUES (%s, %s, %s, %s, %s, %s)",
-                             (task_id, i, item.get('title'), item.get('price'), item.get('image_url'), item.get('want_count')))
+                cursor.execute("INSERT INTO xianyu_items (task_id, rank_index, title, price, image_url, want_count, item_url) VALUES (%s, %s, %s, %s, %s, %s, %s)",
+                             (task_id, i, item.get('title'), item.get('price'), item.get('image_url'), item.get('want_count'), item.get('item_url')))
                 db_item_ids[i] = cursor.lastrowid
             conn.commit()
         else:

@@ -106,5 +106,6 @@ header p { color: var(--text-secondary); }
 .pro-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
 @keyframes fadeIn { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+.hover-link:hover { text-decoration: underline !important; color: var(--primary) !important; }
 .text-green { color: var(--success); }
 .text-red { color: var(--danger); }

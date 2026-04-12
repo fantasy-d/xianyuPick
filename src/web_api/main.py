@@ -109,7 +109,11 @@ def get_task_details(task_id: str):
             sources = cursor.fetchall()
             details.append({
                 "rank": item['rank_index'],
-                "xianyu_item": {"title": item['title'], "price": float(item['price']), "image_url": item['image_url'], "want_count": item['want_count']},
+                "xianyu_item": {
+                    "title": item['title'], "price": float(item['price']),
+                    "image_url": item['image_url'], "want_count": item['want_count'],
+                    "item_url": item['item_url'] # 补上 URL
+                },
                 "sources": [{"title": s['title'], "min_price": float(s['min_price']), "sku_count": s['sku_count'], "url": s['source_url']} for s in sources]
             })
         conn.close(); return {"task_id": task_id, "details": details}
