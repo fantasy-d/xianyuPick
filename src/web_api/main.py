@@ -114,7 +114,11 @@ def get_task_details(task_id: str):
                     "image_url": item['image_url'], "want_count": item['want_count'],
                     "item_url": item['item_url'] # 补上 URL
                 },
-                "sources": [{"title": s['title'], "min_price": float(s['min_price']), "sku_count": s['sku_count'], "url": s['source_url']} for s in sources]
+                "sources": [{
+                    "title": s['title'], "min_price": float(s['min_price']),
+                    "sku_count": s['sku_count'], "url": s['source_url'],
+                    "drop_reason": s['drop_reason'] # 传给前端
+                } for s in sources]
             })
         conn.close(); return {"task_id": task_id, "details": details}
     conn.close(); return {"details": []}
