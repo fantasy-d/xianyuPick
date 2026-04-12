@@ -214,10 +214,11 @@ const App = () => {
                                             )}
                                             <div style={{flex:1}}>
                                                 <a href={src.url} target="_blank" className={isDropped ? 'text-muted' : 'hover-link'} style={{textDecoration: isDropped ? 'line-through' : 'none', color:'inherit', fontWeight:'600', display: 'block', marginBottom: '5px'}}>{src.title}</a>
-                                                <div style={{display: 'flex', gap: '15px', alignItems: 'center'}}>
-                                                    <span style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>{src.sku_count > 0 ? `${src.sku_count} 个 SKU 规格` : '仅列表页快照'}</span>
+                                                <div style={{ display: 'flex', gap: '15px', alignItems: 'center' }}>
+                                                    <span style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>{src.sku_count > 0 ? `${src.sku_count} 个 SKU 规格` : '无 SKU 规格'}</span>
                                                     <span style={{fontSize: '0.7rem', color: 'var(--text-secondary)', background: '#F1F5F9', padding: '1px 6px', borderRadius: '4px'}}>ID: {src.db_id}</span>
                                                 </div>
+
                                             </div>
                                         </div>
                                         <div style={{textAlign:'right', paddingLeft:'20px', minWidth: '150px'}}>
