@@ -59,9 +59,24 @@ const App = () => {
     };
 
     useEffect(() => {
-        const timer = setInterval(refreshData, 60000);
-        refreshData();
-        return () => clearInterval(timer);
+        const POLL_INTERVAL = 60000; // 1分钟刷新
+        let timerId;
+
+        const handleVisibilityChange = () => {
+            if (document.hidden) {
+                clearInterval(timerId);
+            } else {
+                refreshData(); // 切回页面时立即刷新一次
+                timerId = setInterval(refreshData, POLL_INTERVAL);
+            }
+        };
+        
+        handleVisibilityChange();
+        document.addEventListener("visibilitychange", handleVisibilityChange);
+        return () => {
+            clearInterval(timerId);
+            document.removeEventListener("visibilitychange", handleVisibilityChange);
+        };
     }, []);
 
     const createTask = async () => { if (!newKeyword) return; await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keyword: newKeyword }) }); setNewKeyword(""); setActiveView("tasks"); refreshData(); };
