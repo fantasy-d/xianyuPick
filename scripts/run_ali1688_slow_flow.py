@@ -2,24 +2,15 @@
 import argparse, asyncio, json, html, random, re, sys, logging
 from pathlib import Path
 from playwright.async_api import async_playwright
+
+# --- 核心：导入统一日志工具 ---
+BASE_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BASE_DIR / "src"))
+from xianyu_tools.logging_util import get_unified_logger
 from xianyu_tools.source_adapter import Ali1688SourceAdapter
 from xianyu_tools.xianyu_adapter.browser_transport import (
     default_desktop_context_options, default_launch_args
 )
-
-def get_logger(output_dir, log_file_override=None):
-    if log_file_override: log_path = Path(log_file_override)
-    else: log_path = Path(output_dir) / "task.log"
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    logger = logging.getLogger("1688Worker")
-    logger.setLevel(logging.INFO)
-    if logger.handlers: logger.handlers.clear()
-    formatter = logging.Formatter('%(asctime)s [%(levelname)s] %(message)s')
-    fh = logging.FileHandler(log_path, mode='a', encoding='utf-8')
-    fh.setFormatter(formatter); logger.addHandler(fh)
-    sh = logging.StreamHandler(sys.stdout)
-    sh.setFormatter(formatter); logger.addHandler(sh)
-    return logger
 
 def _sanitize_filename(name: str) -> str:
     name = html.unescape(name).replace(">", "-").replace("&", "and")
@@ -118,7 +109,8 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
 
 async def _run(args):
     output_dir = Path(args.output_dir); output_dir.mkdir(parents=True, exist_ok=True)
-    logger = get_logger(output_dir, args.log_file)
+    # 使用统一 Logger 体系
+    logger = get_unified_logger("1688Worker", log_file=args.log_file)
     logger.info("="*60); logger.info(f"1688 SOURCING TASK START"); logger.info(f"Target Keyword: {args.target_keyword}")
     async with async_playwright() as pw:
         browser = await pw.chromium.launch(headless=False, args=default_launch_args())
@@ -147,7 +139,7 @@ async def _run(args):
             else:
                 logger.info(f"  [Rule Reject] Asking AI for mediation...")
                 from xianyu_tools.llm_util import ask_llm_relevance
-                if ask_llm_relevance(c.title, args.target_keyword, logger=logger): # 透传 logger
+                if ask_llm_relevance(c.title, args.target_keyword, external_logger=logger): # 透传统一 logger
                     logger.info("  [AI Rescue] PASS: Semantic match found. Proceeding to detail page.")
                     res = await _export_sku_from_detail_page(context, item_data, output_dir, i, logger)
                     item_data["status"] = res["status"]; item_data["drop_reason"] = None; sku_results.append(item_data)
