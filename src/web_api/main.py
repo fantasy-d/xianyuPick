@@ -21,9 +21,11 @@ CONFIG_PATH = BASE_DIR / "config" / "database.json"
 
 # --- 工具函数 ---
 def sanitize_dir_name(name: str) -> str:
-    # 确保此函数与 run_full_pipeline.py 中的版本一致
-    clean = re.sub(r'[\/:*?"<>|]', '_', str(name)).strip()
+    # 移除所有空白字符，并清理非法字符
+    clean = re.sub(r'\s+', '', str(name))
+    clean = re.sub(r'[\\/:*?"<>|]', '_', clean).strip()
     return clean[:30]
+
 
 # --- DB 基础 ---
 def load_db_config():
@@ -74,7 +76,7 @@ class Task:
         root_dir = str(OUTPUTS_DIR / f"{keyword}_{date_folder}")
         conn = get_db_conn()
         cursor = conn.cursor()
-        cursor.execute("INSERT INTO tasks VALUES (%s, %s, %s, %s, %s, %s, %s)",
+        cursor.execute("INSERT INTO tasks (id, keyword, status, progress, msg, created_at, root_dir) VALUES (%s, %s, %s, %s, %s, %s, %s)",
                      (task_id, keyword, "排队中", 0, "等待调度", created_at, root_dir))
         conn.commit()
         conn.close()
@@ -186,9 +188,25 @@ def get_task_details(task_id: str):
     task = cursor.fetchone()
     conn.close()
     if not task: return {"error": "Task not found"}
-    root_dir = Path(task["root_dir"])
+    # 解析 root_dir (处理可能的路径差异)
+    raw_path = task["root_dir"]
+    if not raw_path: return {"error": "No root_dir defined"}
+    
+    root_dir = Path(raw_path)
+    # 如果是相对路径，则相对于 BASE_DIR
+    if not root_dir.is_absolute():
+        root_dir = BASE_DIR / raw_path
+        
     xianyu_json = root_dir / "xianyu_hot_items.json"
-    if not xianyu_json.exists(): return {"details": []}
+    if not xianyu_json.exists():
+        # 尝试备选方案：检查 outputs 下的同名目录
+        alt_dir = BASE_DIR / "outputs" / root_dir.name
+        if alt_dir.exists():
+            root_dir = alt_dir
+            xianyu_json = root_dir / "xianyu_hot_items.json"
+
+    if not xianyu_json.exists():
+        return {"task": task, "details": [], "msg": f"Missing data file at {xianyu_json}"}
     
     items = json.loads(xianyu_json.read_text()).get("hot_items", [])
     details = []
