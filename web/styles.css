@@ -128,3 +128,16 @@ header p { color: var(--text-secondary); }
     z-index: 10;
 }
 .item-card { position: relative; } /* 确保列表页也有锚点 */
+
+/* 强制左下角版本号 */
+.ver-corner {
+    position: absolute !important;
+    bottom: 8px !important;
+    left: 12px !important;
+    font-size: 0.7rem !important;
+    color: #94A3B8 !important;
+    line-height: 1 !important;
+    margin: 0 !important;
+    user-select: text !important;
+    z-index: 10;
+}

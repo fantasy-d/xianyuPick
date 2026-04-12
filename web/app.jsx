@@ -73,7 +73,7 @@ const App = () => {
     const createTask = async () => { if (!newKeyword) return; await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keyword: newKeyword }) }); setNewKeyword(""); setActiveView("tasks"); refreshData(); };
     const pauseTask = (id) => { fetch(`/api/tasks/${id}/pause`, { method: "POST" }).then(refreshData); };
     const retryTask = (id) => { fetch(`/api/tasks/${id}/retry`, { method: "POST" }).then(refreshData); };
-    const deleteTask = (id) => { if (confirm("确定永久删除任务吗?")) fetch(`/api/tasks/${id}`, { method: "DELETE" }).then(refreshData); };
+    const deleteTask = (id) => { if (confirm("确定永久删除任务及物理数据吗?")) fetch(`/api/tasks/${id}`, { method: "DELETE" }).then(refreshData); };
     
     const loadTaskResults = async (task) => {
         const resp = await fetch(`/api/task_details/${task.id}`);
@@ -118,28 +118,73 @@ const App = () => {
                                 <div className="stat-card"><span className="label">同步频率</span><span className="val">60s</span></div>
                             </div>
                             <div className="task-card" style={{marginTop:'40px'}}><h3 style={{marginBottom:'20px'}}>新建深度扫描任务</h3><div style={{display: 'flex', gap: '15px'}}><input style={{flex:1, padding:'15px', borderRadius:'8px', border:'1px solid var(--border)'}} value={newKeyword} onChange={e => setNewKeyword(e.target.value)} placeholder="请输入要调研的商品品类关键词..." /><button className="pro-btn primary" style={{padding: '0 30px'}} onClick={createTask}>立即启动任务</button></div></div>
-                            {activeTasks.length > 0 && (<div className="task-card" style={{marginTop:'20px', cursor: 'pointer'}} onClick={() => setActiveView('tasks')}><h3 style={{marginBottom: '15px'}}>进行中任务 ({activeTasks.length})</h3>{activeTasks.slice(0, 3).map(t => (<div key={t.id} style={{display: 'flex', justifyContent: 'space-between', padding: '10px 0', borderTop: '1px solid var(--border)'}}><span style={{fontWeight: 500}}>{t.keyword}</span><span style={{color: 'var(--text-secondary)'}}>{t.status} ({t.progress}%)</span></div>))}<div style={{textAlign: 'center', marginTop: '15px', color: 'var(--primary)', fontWeight: 'bold'}}>点击跳转到任务队列查看全部 →</div></div>)}
+                            {activeTasks.length > 0 && (<div className="task-card" style={{marginTop:'20px', cursor: 'pointer'}} onClick={() => setActiveView('tasks')}>
+                                    <h3 style={{marginBottom: '15px'}}>进行中任务 ({activeTasks.length})</h3>
+                                    <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px'}}>
+                                        {activeTasks.slice(0, 4).map(t => (
+                                            <div key={t.id} style={{padding: '10px', border: '1px solid var(--border)', borderRadius: '8px'}}>
+                                                <div style={{fontWeight: 600, fontSize: '0.9rem'}}>{t.keyword}</div>
+                                                <div style={{color: 'var(--text-secondary)', fontSize: '0.8rem'}}>{t.status} ({t.progress}%)</div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                    <div style={{textAlign: 'center', marginTop: '15px', color: 'var(--primary)', fontWeight: 'bold'}}>点击跳转到任务队列查看全部 →</div>
+                                </div>)}
                         </div>
                     );
                  })() :
                  view === "tasks" ? (() => {
-                    const activeTasks = tasks.filter(t => t.status !== '已完成');
+                    const activeTasks = tasks.filter(t => t.status !== '已完成').sort((a, b) => a.created_at.localeCompare(b.created_at));
                     const completedTasks = tasks.filter(t => t.status === '已完成');
                     return (
                         <div className="view-content"><header><h1>任务队列详情</h1><p>左侧为活动任务，右侧为已完成的历史归档。</p></header><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '40px', alignItems: 'flex-start' }}>
                             {/* 左栏：执行队列 */}
-                            <div><h3 style={{ marginBottom: '20px' }}>执行队列</h3><div className="task-list">{activeTasks.map(t => (<div className={`task-card ${t.status}`} key={t.id}><div style={{ position: 'absolute', top: '20px', right: '20px', display: 'flex', gap: '8px' }}>{t.status === '执行中' ? <button className="pro-btn" onClick={(e) => { e.stopPropagation(); pauseTask(t.id); }}>暂停</button> : (t.status === '已暂停' || t.status === '失败') ? <button className="pro-btn primary" onClick={(e) => { e.stopPropagation(); retryTask(t.id); }}>恢复</button> : null}</div>
-                                <div style={{ paddingRight: '100px' }}>
-                                    <div style={{display:'flex', alignItems:'center', gap:'10px'}}><div className="task-kw">{t.keyword}</div><span style={{background:'#F1F5F9', color:'#64748B', fontSize:'0.7rem', padding:'2px 6px', borderRadius:'4px', fontWeight:'bold'}}>V.{t.version}</span></div>
-                                </div><div className="task-msg">{t.msg}</div><div className="nano-progress"><div className="nano-bar" style={{width: `${t.progress}%`}}></div></div><div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}><span style={{fontSize: '0.8rem', color: '#999'}}>ID: {t.id}</span><button className="pro-btn danger" onClick={(e) => { e.stopPropagation(); deleteTask(t.id); }}><i className="fas fa-trash"></i></button></div></div>))}{activeTasks.length === 0 && <div className="task-card" style={{textAlign: 'center', padding: '40px'}}>当前没有活动任务</div>}</div></div>
+                            <div><h3 style={{ marginBottom: '20px' }}>执行队列</h3><div className="task-list">{activeTasks.map(t => (
+                                <div className={`task-card ${t.status}`} key={t.id} style={{minHeight: '130px', display: 'flex', flexDirection: 'column', position: 'relative', justifyContent: 'space-between'}}>
+                                    <div style={{ position: 'absolute', top: '20px', right: '20px', display: 'flex', gap: '8px' }}>
+                                        {t.status === '执行中' ? <button className="pro-btn" onClick={(e) => { e.stopPropagation(); pauseTask(t.id); }}>暂停</button> : <button className="pro-btn primary" onClick={(e) => { e.stopPropagation(); retryTask(t.id); }}>恢复</button>}
+                                    </div>
+                                    <div style={{ paddingRight: '100px' }}><div className="task-kw">{t.keyword}</div><div className="task-msg">{t.msg}</div></div>
+                                    <div className="nano-progress"><div className="nano-bar" style={{width: `${t.progress}%`}}></div></div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '5px' }}>
+                                        <div style={{display: 'flex', gap: '15px', alignItems: 'center'}}>
+                                            <span style={{fontSize: '0.7rem', color: '#94A3B8', fontWeight: 'bold'}}>V.{t.version}</span>
+                                            <span style={{fontSize: '0.7rem', color: '#CBD5E1'}}>ID: {t.id}</span>
+                                        </div>
+                                        <button className="pro-btn danger" style={{minWidth: '80px', padding: '4px 15px'}} onClick={(e) => { e.stopPropagation(); deleteTask(t.id); }}><i className="fas fa-trash" style={{fontSize: '0.7rem'}}></i> 删除</button>
+                                    </div>
+                                </div>
+                            ))}{activeTasks.length === 0 && <div className="task-card" style={{textAlign: 'center', padding: '40px'}}>当前没有活动任务</div>}</div></div>
                             {/* 右栏：完成队列 */}
-                            <div><h3 style={{ marginBottom: '20px' }}>完成队列</h3><div className="task-list">{completedTasks.map(t => (<div className={`task-card ${t.status}`} key={t.id} onClick={() => loadTaskResults(t)} style={{ cursor: 'pointer' }}><div style={{ position: 'absolute', top: '20px', right: '20px', display: 'flex', gap: '8px' }}><button className="pro-btn" onClick={(e) => { e.stopPropagation(); retryTask(t.id); }}>重扫</button></div>
-                                <div style={{ paddingRight: '80px' }}>
-                                    <div style={{display:'flex', alignItems:'center', gap:'10px'}}><div className="task-kw">{t.keyword}</div><span style={{background:'#F1F5F9', color:'#64748B', fontSize:'0.7rem', padding:'2px 6px', borderRadius:'4px', fontWeight:'bold'}}>V.{t.version}</span></div>
-                                </div><div className="task-msg">创建于 {t.created_at}</div></div>))}</div></div></div></div>
+                            <div><h3 style={{ marginBottom: '20px' }}>完成队列</h3><div className="task-list">{completedTasks.map(t => (
+                                <div className={`task-card ${t.status}`} key={t.id} onClick={() => loadTaskResults(t)} style={{ cursor: 'pointer', minHeight: '130px', display: 'flex', flexDirection: 'column', position: 'relative', justifyContent: 'space-between' }}>
+                                    <div style={{ position: 'absolute', top: '20px', right: '20px' }}><button className="pro-btn" onClick={(e) => { e.stopPropagation(); retryTask(t.id); }}>重扫</button></div>
+                                    <div style={{paddingRight: '80px'}}><div className="task-kw">{t.keyword}</div><div className="task-msg">调研于 {t.created_at}</div></div>
+                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '15px' }}>
+                                        <div style={{display: 'flex', gap: '15px', alignItems: 'center'}}>
+                                            <span style={{fontSize: '0.7rem', color: '#94A3B8', fontWeight: 'bold'}}>V.{t.version}</span>
+                                            <span style={{fontSize: '0.7rem', color: '#CBD5E1'}}>ID: {t.id}</span>
+                                        </div>
+                                        <button className="pro-btn danger" style={{minWidth: '80px', padding: '4px 15px'}} onClick={(e) => { e.stopPropagation(); deleteTask(t.id); }}><i className="fas fa-trash" style={{fontSize: '0.7rem'}}></i> 删除</button>
+                                    </div>
+                                </div>
+                            ))}</div></div></div></div>
                     )
                  })() :
-                 view === "results" ? ( selectedTask ? ( <> <header style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}><div><h1 onClick={() => setSelectedTask(null)} style={{cursor: 'pointer'}}>← {selectedTask.keyword} 深度报告</h1></div><button className="pro-btn primary" onClick={() => window.open(`/api/download/${selectedTask.id}`)}>导出 XLSX</button></header><div className="item-grid">{detailedItems.length > 0 ? detailedItems.map((group) => (<div className="item-card" key={group.rank} onClick={() => enterItemDetail(group)}><img src={group.xianyu_item?.image_url} referrerPolicy="no-referrer" /><div className="tile-body"><div className="tile-title">#{group.rank} {group.xianyu_item?.title}</div><div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px'}}><span className="tile-price">¥{group.xianyu_item?.price}</span><span style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>{group.sources?.length || 0} 个货源</span></div><div className="id-corner">ID: {group.xianyu_item?.db_id}</div></div></div>)) : (<div className="task-card" style={{gridColumn: '1/-1', textAlign: 'center', padding: '100px'}}><p>该任务尚未产生详情数据。</p></div>)}</div></> ) : (<div><header><h1>选品决策资产库</h1></header><div className="task-list">{completedTasks.map(t => (<div className="task-card 已完成" key={t.id} onClick={() => loadTaskResults(t)} style={{cursor: 'pointer'}}><div style={{display:'flex', alignItems:'center', gap:'15px'}}><div className="task-kw">{t.keyword}</div><span style={{background:'#F1F5F9', color:'#64748B', fontSize:'0.7rem', padding:'2px 6px', borderRadius:'4px', fontWeight:'bold'}}>VERSION: {t.version}</span></div><div className="task-msg">调研日期: {t.created_at}</div></div>))}</div></div>) ) :
+                 view === "results" ? ( selectedTask ? ( <> <header style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}><div><h1 onClick={() => setSelectedTask(null)} style={{cursor: 'pointer'}}>← {selectedTask.keyword} 深度报告</h1></div><button className="pro-btn primary" onClick={() => window.open(`/api/download/${selectedTask.id}`)}>导出 XLSX</button></header><div className="item-grid">{detailedItems.length > 0 ? detailedItems.map((group) => (<div className="item-card" key={group.rank} onClick={() => enterItemDetail(group)}><img src={group.xianyu_item?.image_url} referrerPolicy="no-referrer" /><div className="tile-body"><div className="tile-title">#{group.rank} {group.xianyu_item?.title}</div><div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px'}}><span className="tile-price">¥{group.xianyu_item?.price}</span><span style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>{group.sources?.length || 0} 个货源</span></div><div className="id-corner">ID: {group.xianyu_item?.db_id}</div></div></div>)) : (<div className="task-card" style={{gridColumn: '1/-1', textAlign: 'center', padding: '100px'}}><p>该任务尚未产生详情数据。</p></div>)}</div></> ) : (<div><header><h1>选品决策资产库</h1><p>查看已完成深度调研的品类资产。</p></header>
+                                    <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px'}}>
+                                        {completedTasks.map(t => (
+                                            <div className="task-card 已完成" key={t.id} style={{position: 'relative', minHeight: '120px', display: 'flex', flexDirection: 'column', justifyContent: 'center', margin: 0, padding: '20px'}} onClick={() => loadTaskResults(t)}>
+                                                <div className="task-kw" style={{textAlign: 'center', fontSize: '1.2rem', marginBottom: '10px', width: '100%'}}>{t.keyword}</div>
+                                                <div className="task-msg" style={{textAlign: 'left', fontSize: '0.8rem', width: '100%'}}>调研于 {t.created_at}</div>
+                                                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', position:'absolute', bottom:'10px', left:'20px', right:'20px', pointerEvents:'none'}}>
+                                                    <span style={{fontSize:'0.7rem', color:'#94A3B8', fontWeight:'bold'}}>V.{t.version}</span>
+                                                    <span style={{fontSize:'0.7rem', color:'#CBD5E1'}}>ID: {t.id}</span>
+                                                </div>
+                                            </div>
+                                        ))}
+                                    </div>
+                                </div>) ) :
                  view === "item_detail" && selectedItem ? ( <div className="view-content"><div onClick={() => setActiveView("results")} style={{cursor: 'pointer', marginBottom: '30px', color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: '500'}}><i className="fas fa-arrow-left"></i> 返回 "{selectedTask.keyword}" 报告</div>
                         <div className="task-card" style={{padding: '30px', marginBottom: '40px', position: 'relative', display: 'block'}}>
                             <div style={{display: 'flex', gap: '30px', alignItems: 'center'}}>
