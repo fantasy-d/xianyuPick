@@ -42,6 +42,220 @@ const LogViewer = ({ tasks }) => {
     );
 };
 
+// --- 发布至闲鱼按钮组件 ---
+const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult }) => {
+    const [status, setStatus] = useState('idle'); // idle | publishing | done | failed
+    const [pubResult, setPubResult] = useState(null);
+    const [showModal, setShowModal] = useState(false);
+    const [editTitle, setEditTitle] = useState('');
+    const [editPrice, setEditPrice] = useState('');
+    const [skus, setSkus] = useState([]);
+    const [loadingSkus, setLoadingSkus] = useState(false);
+
+    // 挂载时查询历史发布状态
+    useEffect(() => {
+        fetch(`/api/published_status/${src.db_id}`)
+            .then(r => r.json())
+            .then(res => {
+                if (res.publish_status === 'success') {
+                    setStatus('done');
+                    setPubResult(res);
+                }
+            })
+            .catch(() => {});
+    }, [src.db_id]);
+
+    // 联动外部批量发布状态
+    useEffect(() => {
+        if (batchStatus) {
+            setStatus(batchStatus);
+        }
+        if (batchResult) {
+            setPubResult(batchResult);
+        }
+    }, [batchStatus, batchResult]);
+
+    const openModal = async () => {
+        setEditTitle(src.title.slice(0, 60));
+        setEditPrice((parseFloat(src.min_price) + 30).toFixed(2));
+        setSkus([]);
+        setLoadingSkus(true);
+        setShowModal(true);
+        try {
+            const res = await fetch(`/api/source_skus/${src.db_id}`).then(r => r.json());
+            if (res.skus && res.skus.length > 0) {
+                // 初始化每个规格的默认闲鱼价格 (进价 + 30) 并将库存最大限制在 9999
+                const initializedSkus = res.skus.map(s => ({
+                    ...s,
+                    xianyu_price: (parseFloat(s.price) + 30).toFixed(2),
+                    stock: Math.min(9999, parseInt(s.stock) || 1)
+                }));
+                setSkus(initializedSkus);
+            }
+        } catch (e) {
+            console.error("加载SKU失败:", e);
+        } finally {
+            setLoadingSkus(false);
+        }
+    };
+
+    const doPublish = async () => {
+        setShowModal(false);
+        setStatus('publishing');
+        try {
+            const payload = { title: editTitle };
+            if (skus.length > 1) {
+                payload.sku_items = skus.map(s => ({
+                    sku_text: s.sku_text,
+                    price: parseFloat(s.xianyu_price),
+                    stock: parseInt(s.stock) || 1
+                }));
+
+                // 自动组装单轴绑定规格图 sku_images
+                const skuImages = [];
+                skus.forEach(s => {
+                    if (s.image) {
+                        const firstAttr = s.sku_text.split(';')[0];
+                        skuImages.push({
+                            src: s.image,
+                            width: 800,
+                            height: 800,
+                            sku_text: firstAttr
+                        });
+                    }
+                });
+                if (skuImages.length > 0) {
+                    payload.sku_images = skuImages;
+                }
+            } else if (skus.length === 1) {
+                payload.price = parseFloat(skus[0].xianyu_price);
+            } else {
+                payload.price = parseFloat(editPrice);
+            }
+
+            const res = await fetch(`/api/publish/${src.db_id}`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            }).then(r => r.json());
+            setPubResult(res);
+            setStatus(res.status === 'success' ? 'done' : 'failed');
+        } catch (e) {
+            setPubResult({ msg: '网络错误，请稍后重试' });
+            setStatus('failed');
+        }
+    };
+
+    const btnStyle = { padding: '6px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontSize: '0.8rem', fontWeight: '600', marginTop: '8px' };
+
+    return (
+        <div>
+            {status === 'done' && (
+                <a href={pubResult?.published_url} target="_blank" rel="noreferrer"
+                   style={{ ...btnStyle, display: 'inline-block', background: '#10B98120', color: '#10B981', textDecoration: 'none' }}>
+                    ✅ 已发布
+                </a>
+            )}
+            {status === 'publishing' && (
+                <span style={{ ...btnStyle, display: 'inline-block', background: '#3B82F620', color: '#3B82F6' }}>🔄 发布中...</span>
+            )}
+            {status === 'failed' && (
+                <div>
+                    <span style={{ fontSize: '0.75rem', color: '#EF4444' }}>❌ {pubResult?.msg || '发布失败'}</span>
+                    <button style={{ ...btnStyle, background: '#EF444420', color: '#EF4444', marginLeft: '8px' }} onClick={openModal}>重试</button>
+                </div>
+            )}
+            {status === 'idle' && (
+                <button style={{ ...btnStyle, background: 'var(--primary)', color: '#fff' }} onClick={openModal}>
+                    发布至闲鱼 →
+                </button>
+            )}
+
+            {showModal && (
+                <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.6)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}
+                     onClick={() => setShowModal(false)}>
+                    <div style={{ background: 'var(--card-bg)', borderRadius: '16px', padding: '32px', width: '500px', maxWidth: '90vw', boxShadow: '0 20px 60px rgba(0,0,0,0.4)' }}
+                         onClick={e => e.stopPropagation()}>
+                        <h3 style={{ marginBottom: '20px', fontSize: '1.1rem' }}>📦 发布预览</h3>
+
+                        {/* 图片预览 */}
+                        {src.images && src.images.length > 0 && (
+                            <div style={{ display: 'flex', gap: '8px', marginBottom: '20px', flexWrap: 'wrap' }}>
+                                {src.images.slice(0, 5).map((img, idx) => (
+                                    <img key={idx} src={img} referrerPolicy="no-referrer"
+                                         style={{ width: '72px', height: '72px', borderRadius: '8px', objectFit: 'cover', border: '1px solid var(--border)' }} />
+                                ))}
+                            </div>
+                        )}
+
+                        {/* 标题编辑 */}
+                        <div style={{ marginBottom: '16px' }}>
+                            <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '6px' }}>标题（最多60字）</label>
+                            <input value={editTitle} onChange={e => setEditTitle(e.target.value.slice(0, 60))}
+                                   style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', boxSizing: 'border-box' }} />
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textAlign: 'right', marginTop: '4px' }}>{editTitle.length}/60</div>
+                        </div>
+
+                        {/* 售价与多规格编辑 */}
+                        {loadingSkus ? (
+                            <div style={{ marginBottom: '24px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
+                                🔄 正在加载规格规格配置信息...
+                            </div>
+                        ) : skus.length > 0 ? (
+                            <div style={{ marginBottom: '24px' }}>
+                                <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '10px' }}>
+                                    规格售价与库存配置（进价加价后默认 +30 元）
+                                </label>
+                                <div style={{ maxHeight: '180px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: '8px', padding: '12px' }}>
+                                    {skus.map((s, idx) => (
+                                        <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px', borderBottom: idx < skus.length - 1 ? '1px solid var(--border)' : 'none', paddingBottom: '10px' }}>
+                                            {s.image && (
+                                                <img src={s.image} referrerPolicy="no-referrer"
+                                                     style={{ width: '28px', height: '28px', borderRadius: '4px', objectFit: 'cover', border: '1px solid var(--border)' }} />
+                                            )}
+                                            <span style={{ fontSize: '0.8rem', flex: 1, wordBreak: 'break-all' }}>{s.sku_text}</span>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', width: '145px' }}>
+                                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>进¥{s.price}→</span>
+                                                <input type="number" min="0" step="0.5" value={s.xianyu_price}
+                                                       onChange={e => {
+                                                           const val = e.target.value;
+                                                           setSkus(prev => prev.map((item, i) => i === idx ? { ...item, xianyu_price: val } : item));
+                                                       }}
+                                                       style={{ width: '70px', padding: '6px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', fontSize: '0.8rem' }} />
+                                            </div>
+                                            <div style={{ display: 'flex', alignItems: 'center', gap: '5px', width: '85px' }}>
+                                                <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>库存</span>
+                                                <input type="number" min="1" max="9999" value={s.stock}
+                                                       onChange={e => {
+                                                           const val = Math.min(9999, parseInt(e.target.value) || 1);
+                                                           setSkus(prev => prev.map((item, i) => i === idx ? { ...item, stock: val } : item));
+                                                       }}
+                                                       style={{ width: '45px', padding: '6px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', fontSize: '0.8rem' }} />
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        ) : (
+                            /* 售价编辑（单规格） */
+                            <div style={{ marginBottom: '24px' }}>
+                                <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '6px' }}>售价（元）<span style={{ color: 'var(--text-secondary)', fontWeight: 'normal' }}>1688进价 ¥{src.min_price}，加价后默认 ¥{(parseFloat(src.min_price)+30).toFixed(2)}</span></label>
+                                <input type="number" min="0" step="0.5" value={editPrice} onChange={e => setEditPrice(e.target.value)}
+                                       style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', boxSizing: 'border-box' }} />
+                            </div>
+                        )}
+
+                        <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
+                            <button style={{ ...btnStyle, background: 'var(--border)', color: 'var(--text)' }} onClick={() => setShowModal(false)}>取消</button>
+                            <button style={{ ...btnStyle, background: 'var(--primary)', color: '#fff' }} onClick={doPublish} disabled={loadingSkus}>确认发布</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+        </div>
+    );
+};
+
 const App = () => {
     const [view, setActiveView] = useState("dashboard"); 
     const [tasks, setTasks] = useState([]);
@@ -51,6 +265,27 @@ const App = () => {
     const [sourcePage, setSourcePage] = useState(1);
     const [sysStatus, setSysStatus] = useState({});
     const [newKeyword, setNewKeyword] = useState("");
+
+    const [selectedIds, setSelectedIds] = useState([]);
+    const [batchPublishing, setBatchPublishing] = useState(false);
+    const [batchStatusMap, setBatchStatusMap] = useState({});
+    const [batchResultMap, setBatchResultMap] = useState({});
+
+    // 当切换商品详情时，自动重置批量状态，并默认勾选全部未丢弃的货源
+    useEffect(() => {
+        if (selectedItem) {
+            const activeIds = (selectedItem.sources || [])
+                .filter(src => !src.drop_reason)
+                .map(src => src.db_id);
+            setSelectedIds(activeIds);
+            setBatchStatusMap({});
+            setBatchResultMap({});
+        } else {
+            setSelectedIds([]);
+            setBatchStatusMap({});
+            setBatchResultMap({});
+        }
+    }, [selectedItem]);
 
     const refreshData = () => {
         if (document.hidden) return;
@@ -75,6 +310,80 @@ const App = () => {
     const retryTask = (id) => { fetch(`/api/tasks/${id}/retry`, { method: "POST" }).then(refreshData); };
     const deleteTask = (id) => { if (confirm("确定永久逻辑删除该任务吗?")) fetch(`/api/tasks/${id}`, { method: "DELETE" }).then(refreshData); };
     
+    const doBatchPublish = async () => {
+        if (selectedIds.length === 0) {
+            alert("请先选择要批量发布的货源");
+            return;
+        }
+        setBatchPublishing(true);
+        
+        for (const dbId of selectedIds) {
+            if (batchStatusMap[dbId] === 'done') {
+                continue;
+            }
+            
+            setBatchStatusMap(prev => ({ ...prev, [dbId]: 'publishing' }));
+            
+            try {
+                const resSkus = await fetch(`/api/source_skus/${dbId}`).then(r => r.json());
+                const src = selectedItem.sources.find(s => s.db_id === dbId);
+                if (!src) continue;
+                
+                const payload = { title: src.title.slice(0, 60) };
+                
+                if (resSkus.skus && resSkus.skus.length > 1) {
+                    payload.sku_items = resSkus.skus.map(s => ({
+                        sku_text: s.sku_text,
+                        price: parseFloat((parseFloat(s.price) + 30).toFixed(2)),
+                        stock: Math.min(9999, parseInt(s.stock) || 1)
+                    }));
+                    
+                    const skuImages = [];
+                    resSkus.skus.forEach(s => {
+                        if (s.image) {
+                            const firstAttr = s.sku_text.split(';')[0];
+                            skuImages.push({
+                                src: s.image,
+                                width: 800,
+                                height: 800,
+                                sku_text: firstAttr
+                            });
+                        }
+                    });
+                    if (skuImages.length > 0) {
+                        payload.sku_images = skuImages;
+                    }
+                } else if (resSkus.skus && resSkus.skus.length === 1) {
+                    payload.price = parseFloat((parseFloat(resSkus.skus[0].price) + 30).toFixed(2));
+                } else {
+                    payload.price = parseFloat((parseFloat(src.min_price) + 30).toFixed(2));
+                }
+                
+                const resPub = await fetch(`/api/publish/${dbId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                }).then(r => r.json());
+                
+                if (resPub.status === 'success') {
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'done' }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: resPub }));
+                } else {
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: resPub }));
+                }
+            } catch (e) {
+                console.error(`批量发布货源 ${dbId} 失败:`, e);
+                setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                setBatchResultMap(prev => ({ ...prev, [dbId]: { msg: '网络或连接出错' } }));
+            }
+            
+            await new Promise(r => setTimeout(r, 1000));
+        }
+        
+        setBatchPublishing(false);
+    };
+
     const loadTaskResults = async (task) => {
         const resp = await fetch(`/api/task_details/${task.id}`);
         const data = await resp.json();
@@ -202,13 +511,57 @@ const App = () => {
                             <div className="id-corner">ID: {selectedItem.xianyu_item?.db_id}</div>
                         </div>
                         <div>
-                            <header><h3 style={{marginBottom: '20px'}}>1688 货源深度对比表 ({selectedItem.sources?.length || 0} 条)</h3></header>
+                            <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '15px' }}>
+                                <h3 style={{ margin: 0 }}>1688 货源深度对比表 ({selectedItem.sources?.length || 0} 条)</h3>
+                                {selectedItem.sources?.filter(s => !s.drop_reason).length > 0 && (
+                                    <div style={{ display: 'flex', gap: '15px', alignItems: 'center' }}>
+                                        <label style={{ fontSize: '0.85rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px', color: 'var(--text-secondary)' }}>
+                                            <input 
+                                                type="checkbox" 
+                                                checked={selectedItem.sources.filter(s => !s.drop_reason).length > 0 && selectedItem.sources.filter(s => !s.drop_reason).every(s => selectedIds.includes(s.db_id))}
+                                                onChange={(e) => {
+                                                    if (e.target.checked) {
+                                                        setSelectedIds(selectedItem.sources.filter(s => !s.drop_reason).map(s => s.db_id));
+                                                    } else {
+                                                        setSelectedIds([]);
+                                                    }
+                                                }}
+                                                style={{ cursor: 'pointer' }}
+                                            />
+                                            全选未丢弃
+                                        </label>
+                                        <button 
+                                            className="pro-btn primary" 
+                                            disabled={batchPublishing || selectedIds.length === 0} 
+                                            onClick={doBatchPublish}
+                                            style={{ padding: '6px 16px', fontSize: '0.8rem' }}
+                                        >
+                                            {batchPublishing ? "🔄 批量发布中..." : `🚀 批量发布所选 (${selectedIds.length})`}
+                                        </button>
+                                    </div>
+                                )}
+                            </header>
                             {paginatedSources.map((src, i) => { 
                                 const margin = (selectedItem.xianyu_item?.price - src.min_price - 20).toFixed(2); 
                                 const isDropped = !!src.drop_reason;
+                                const isChecked = selectedIds.includes(src.db_id);
                                 return (
                                     <div className={`task-card ${isDropped ? 'dropped' : ''}`} key={i} style={{display:'flex', justifyContent:'space-between', alignItems:'center', padding: '15px', marginBottom: '15px'}}>
                                         <div style={{display:'flex', gap:'15px', alignItems:'center', flex: 1}}>
+                                            {!isDropped && (
+                                                <input 
+                                                    type="checkbox" 
+                                                    checked={isChecked}
+                                                    onChange={(e) => {
+                                                        if (e.target.checked) {
+                                                            setSelectedIds(prev => [...prev, src.db_id]);
+                                                        } else {
+                                                            setSelectedIds(prev => prev.filter(id => id !== src.db_id));
+                                                        }
+                                                    }}
+                                                    style={{ width: '18px', height: '18px', cursor: 'pointer', marginRight: '5px' }}
+                                                />
+                                            )}
                                             {src.images && src.images.length > 0 && (
                                                 <img src={src.images[0]} style={{width:'60px', height:'60px', borderRadius:'4px', objectFit:'cover'}} referrerPolicy="no-referrer" />
                                             )}
@@ -221,8 +574,21 @@ const App = () => {
 
                                             </div>
                                         </div>
-                                        <div style={{textAlign:'right', paddingLeft:'20px', minWidth: '150px'}}>
-                                            {isDropped ? ( <span className="drop-badge">已丢弃: {src.drop_reason}</span> ) : ( <> <div style={{fontSize:'1.2rem', fontWeight:'700'}}>¥{src.min_price}</div> <div style={{fontSize:'0.9rem', color: margin > 50 ? 'var(--success)' : 'var(--danger)', fontWeight:'bold'}}>利润: ¥{margin}</div> </> )}
+                                        <div style={{textAlign:'right', paddingLeft:'20px', minWidth: '170px'}}>
+                                            {isDropped ? (
+                                                <span className="drop-badge">已丢弃: {src.drop_reason}</span>
+                                            ) : (
+                                                <>
+                                                    <div style={{fontSize:'1.2rem', fontWeight:'700'}}>¥{src.min_price}</div>
+                                                    <div style={{fontSize:'0.9rem', color: margin > 50 ? 'var(--success)' : 'var(--danger)', fontWeight:'bold'}}>利润: ¥{margin}</div>
+                                                    <PublishButton 
+                                                        src={src} 
+                                                        xianyuPrice={selectedItem.xianyu_item?.price} 
+                                                        batchStatus={batchStatusMap[src.db_id]}
+                                                        batchResult={batchResultMap[src.db_id]}
+                                                    />
+                                                </>
+                                            )}
                                         </div>
                                     </div>
                                 );

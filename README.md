@@ -1,5 +1,8 @@
 # xianyu-tools
 
+gemini --resume                           │
+│  a39eef35-af98-41f9-b32b-aeee5a3696d5
+
 一个面向选品的自动化工具链。
 
 ## 🚀 H5 可视化管理系统 (推荐)
@@ -117,6 +120,13 @@ PYTHONPATH=src python3 scripts/run_keyword_pipeline.py \
   最终上架候选判定。
 - [export_pipeline_excel.py](/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/export_pipeline_excel.py)
   导出中文 Excel。
+
+### 关键设计文档
+
+- [xianguanjia_openapi_guide.md](/Users/mac/PycharmProjects/mytools/xianyu-tools/docs/xianguanjia_openapi_guide.md)
+  闲管家开放平台（Goofish OpenAPI）接口规范及本项目的多规格 SKU 自愈、自动分类匹配规则。
+- [source_adapter_contract.md](/Users/mac/PycharmProjects/mytools/xianyu-tools/docs/source_adapter_contract.md)
+  货源适配器契约规范。
 
 ### 关键目录
 

@@ -26,6 +26,13 @@ def sanitize_dir_name(name: str) -> str:
     clean = re.sub(r'\s+', '', str(name))
     return re.sub(r'[\\/:*?"<>|]', '_', clean).strip()[:60]
 
+def _clean_html_span(text: str) -> str:
+    if not text: return ""
+    text = re.sub(r'<span[^>]*?>.*?</span>', '', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'<[^>]+>', '', text)
+    parts = [p.strip() for p in text.split(";") if p.strip()]
+    return ";".join(parts)
+
 # --- 任务模型 ---
 class Task:
     @staticmethod
@@ -243,15 +250,109 @@ def get_task_details(task_id: str):
         logger.error(f"Failed to fetch details for task {task_id}: {e}")
         return {"error": str(e)}
 
+@app.get("/api/source_skus/{source_id}")
+def get_source_skus(source_id: int):
+    logger.info(f"Fetching SKU list for source_id: {source_id}")
+    try:
+        conn = get_db_conn(); cursor = conn.cursor()
+        cursor.execute("SELECT * FROM ali1688_sources WHERE id = %s", (source_id,))
+        source = cursor.fetchone()
+        if not source:
+            conn.close()
+            return {"skus": []}
+            
+        task_id = source['task_id']
+        item_id = source['item_id']
+        offer_id = source['offer_id']
+        
+        cursor.execute("SELECT rank_index, title FROM xianyu_items WHERE id = %s", (item_id,))
+        item = cursor.fetchone()
+        if not item:
+            conn.close()
+            return {"skus": []}
+            
+        rank = item['rank_index']
+        item_title = item['title']
+        
+        cursor.execute("SELECT root_dir FROM tasks WHERE id = %s", (task_id,))
+        task = cursor.fetchone()
+        root_dir_db = task['root_dir'] if task else None
+        conn.close()
+        
+        skus = []
+        if root_dir_db:
+            root_path = Path(root_dir_db)
+            if not root_path.is_absolute():
+                root_path = BASE_DIR / root_path
+                
+            clean_title = sanitize_dir_name(item_title)
+            dir_name = f"Rank_{rank}_{clean_title}"
+            source_dir = root_path / dir_name
+            
+            # 兼容相对路径回退
+            if not source_dir.exists():
+                rel_path = Path(root_dir_db).name
+                source_dir = BASE_DIR / "outputs" / rel_path / dir_name
+                
+            if source_dir.exists():
+                xlsx_files = list(source_dir.glob(f"*_{offer_id}.xlsx"))
+                if xlsx_files:
+                    from openpyxl import load_workbook
+                    wb = load_workbook(filename=xlsx_files[0], read_only=True)
+                    ws = wb.active
+                    rows = list(ws.iter_rows(values_only=True))
+                    if len(rows) > 1:
+                        for r in rows[1:]:
+                            if not r or len(r) < 2 or r[0] is None:
+                                continue
+                            img_val = str(r[4]) if len(r) > 4 and r[4] is not None else ""
+                            is_valid_img = img_val.startswith("http") or img_val.startswith("//") or "alicdn.com" in img_val
+                            skus.append({
+                                "sku_text": _clean_html_span(str(r[0])),
+                                "price": float(r[1]) if r[1] is not None else 0.0,
+                                "stock": int(r[2]) if r[2] is not None else 0,
+                                "spec_id": str(r[3]) if len(r) > 3 and r[3] is not None else "",
+                                "image": img_val if is_valid_img else ""
+                            })
+        return {"skus": skus}
+    except Exception as e:
+        logger.error(f"Failed to fetch SKU for source {source_id}: {e}")
+        return {"error": str(e), "skus": []}
+
 @app.post("/api/publish/{source_id}")
-async def publish_to_xianyu(source_id: int):
-    logger.info(f"OpenAPI publish request for source_id: {source_id}")
+async def publish_to_xianyu(source_id: int, req: dict = {}):
+    logger.info(f"OpenAPI publish request for source_id: {source_id}, custom={req}")
     conn = get_db_conn(); cursor = conn.cursor()
     cursor.execute("SELECT * FROM ali1688_sources WHERE id = %s", (source_id,))
     source = cursor.fetchone()
     if not source: conn.close(); return {"error": "Source not found"}
     images = json.loads(source['images'] or "[]")
-    item_data = {"title": source['title'], "description": f"【1688精选货源】\n{source['title']}\n品质保障，欢迎选购。", "price": float(source['min_price']) + 30, "images": images}
+
+    # 支持前端传入自定义标题和价格，否则使用默认值
+    custom_title = req.get("title") or source['title']
+    
+    sku_items = req.get("sku_items")
+    if sku_items:
+        # 如果有多规格，主商品价格自动校准为多规格中的最低价
+        final_price = min(float(item['price']) for item in sku_items)
+    else:
+        custom_price = req.get("price")
+        if custom_price is not None:
+            final_price = float(custom_price)
+        else:
+            final_price = float(source['min_price']) + 30
+
+    item_data = {
+        "title": custom_title[:60],
+        "description": f"【精选货源】\n{custom_title}\n品质保障，欢迎选购。",
+        "price": final_price,
+        "images": images,
+    }
+    sku_images = req.get("sku_images")
+    if sku_items:
+        item_data["sku_items"] = sku_items
+    if sku_images:
+        item_data["sku_images"] = sku_images
     from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
     try:
         publisher = PublisherV3()

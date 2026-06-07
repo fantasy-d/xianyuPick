@@ -12,9 +12,278 @@ from xianyu_tools.xianyu_adapter.browser_transport import (
     default_desktop_context_options, default_launch_args
 )
 
+try:
+    import pyautogui
+except ImportError:
+    pyautogui = None
+
+
 def _sanitize_filename(name: str) -> str:
     name = html.unescape(name).replace(">", "-").replace("&", "and")
     return re.sub(r'[\\/:*?"<>|]', '_', name).strip()[:60]
+
+DEFAULT_ALI1688_STATE_FILE = "state/ali1688/storage_state.json"
+DEFAULT_ALI1688_USER_DATA_DIR = str(
+    (Path(__file__).resolve().parents[1] / "profiles" / "ali1688_chrome_profile").resolve()
+)
+DEFAULT_ALI1688_EXTENSION_DIR = "tmp/1688-extension"
+
+
+def _append_extension_launch_args(args: list[str], extension_dir: str) -> list[str]:
+    new_args = [a for a in args if a != "--disable-extensions"]
+    ext_path = str(Path(extension_dir).resolve())
+    if f"--disable-extensions-except={ext_path}" not in new_args:
+        new_args.append(f"--disable-extensions-except={ext_path}")
+    if f"--load-extension={ext_path}" not in new_args:
+        new_args.append(f"--load-extension={ext_path}")
+    return new_args
+
+
+def _resolve_browser_channel(channel: str, extension_dir: str) -> str | None:
+    if extension_dir:
+        if channel == "chrome":
+            return None
+    return channel
+
+
+def _resolve_runtime_user_data_dir(original_user_data_dir: str, channel: str | None, extension_dir: str, output_dir: Path) -> str:
+    if channel is None and extension_dir:
+        return str((output_dir / "_runtime_chromium_profile").resolve())
+    return original_user_data_dir
+
+
+def _sanitize_storage_state_cookies(cookies: list[dict]) -> list[dict]:
+    allowed_fields = {"name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite"}
+    clean_list = []
+    for c in cookies:
+        item = {k: v for k, v in c.items() if k in allowed_fields}
+        if "sameSite" in item and item["sameSite"] not in ["Strict", "Lax", "None"]:
+            del item["sameSite"]
+        clean_list.append(item)
+    return clean_list
+
+
+def _prepare_managed_state_file(source_state: str, managed_state_file: str) -> tuple[str | None, bool]:
+    source_path = Path(source_state)
+    target_path = Path(managed_state_file)
+    
+    if not source_path.exists():
+        if source_state != managed_state_file:
+            raise FileNotFoundError(f"state file not found at {source_state}")
+        return None, False
+        
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+        return str(target_path.resolve()), True
+    except Exception:
+        return None, False
+
+
+async def _apply_state_file_cookies(context, state_file: str | Path) -> None:
+    state_path = Path(state_file)
+    if state_path.exists():
+        try:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            cookies = state.get("cookies", [])
+            clean_cookies = _sanitize_storage_state_cookies(cookies)
+            await context.add_cookies(clean_cookies)
+        except Exception:
+            pass
+
+
+async def _export_context_state(context, state_file: str | Path) -> None:
+    state_path = Path(state_file)
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = await context.storage_state()
+        if "cookies" in state:
+            state["cookies"] = _sanitize_storage_state_cookies(state["cookies"])
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _overlay_close_click_point(rect: dict) -> tuple[float, float]:
+    x = rect.get("x", 0.0)
+    y = rect.get("y", 0.0)
+    w = rect.get("width", 0.0)
+    h = rect.get("height", 0.0)
+    return x + w - 22.0, y + 20.0
+
+
+def _plugin_toolbar_selectors() -> list[str]:
+    return [
+        "#market-mate-for-1688",
+        "#market-mate-for-1688-od",
+        ".goods-operation-panel-media",
+        ".goods-operation-hover.copy-sku",
+        "text=复制sku",
+    ]
+
+
+async def _plugin_toolbar_ready(page) -> bool:
+    selectors = _plugin_toolbar_selectors()
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _copy_sku_drawer_opened(page) -> bool:
+    try:
+        drawer = page.locator("#consign-sku-fullscreen-drawer").first
+        iframe = page.locator("#fullscreen-drawer-iframe").first
+        if await drawer.count() > 0 and await drawer.is_visible():
+            src = await iframe.get_attribute("src")
+            if src and "#hidden" not in src:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+async def _copy_sku_drawer_state(page) -> dict:
+    try:
+        drawer = page.locator("#consign-sku-fullscreen-drawer").first
+        iframe = page.locator("#fullscreen-drawer-iframe").first
+        drawer_present = await drawer.count() > 0
+        drawer_visible = await drawer.is_visible() if drawer_present else False
+        drawer_style = await drawer.get_attribute("style") if drawer_present else None
+        iframe_present = await iframe.count() > 0
+        iframe_src = await iframe.get_attribute("src") if iframe_present else None
+        iframe_hidden = "#hidden" in iframe_src if iframe_src else True
+        opened = drawer_visible and not iframe_hidden
+    except Exception:
+        drawer_present = drawer_visible = iframe_present = False
+        drawer_style = iframe_src = None
+        iframe_hidden = opened = False
+    return {
+        "drawer_present": drawer_present,
+        "drawer_visible": drawer_visible,
+        "drawer_style": drawer_style,
+        "iframe_present": iframe_present,
+        "iframe_src": iframe_src,
+        "iframe_hidden": iframe_hidden,
+        "opened": opened,
+    }
+
+
+async def _overlay_state(page) -> dict:
+    try:
+        overlay_loc = page.locator(".J_MIDDLEWARE_FRAME_WIDGET:visible")
+        overlay_count = await overlay_loc.count()
+        ack_loc = page.get_by_text("我知道了", exact=True)
+        ack_visible = False
+        if await ack_loc.count() > 0:
+            ack_visible = await ack_loc.first.is_visible()
+        toolbar_ready = await _plugin_toolbar_ready(page)
+    except Exception:
+        overlay_count = 0
+        ack_visible = toolbar_ready = False
+    return {
+        "overlay_count": overlay_count,
+        "ack_visible": ack_visible,
+        "toolbar_ready": toolbar_ready,
+    }
+
+
+async def _clear_extension_onboarding_state(context) -> None:
+    for sw in context.service_workers:
+        try:
+            await asyncio.wait_for(sw.evaluate("""
+                () => {
+                    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                        chrome.storage.local.set({
+                            '_1688_EXTENSION_ONBOARDING_FEATURE': 'done',
+                            '_1688_EXTENSION_SHOW_GUIDANCE_REASON': 'none'
+                        }, () => {
+                            console.log('Onboarding state cleared');
+                        });
+                    }
+                }
+            """), timeout=2.0)
+        except Exception:
+            pass
+
+
+def _parse_dispatch_count(val_str: str) -> int:
+    if not val_str:
+        return 0
+    val_str = val_str.strip()
+    
+    match = re.match(r'^([\d\.]+)\s*([万kK]?)$', val_str)
+    if not match:
+        num_match = re.search(r'([\d\.]+)', val_str)
+        if not num_match:
+            return 0
+        num = float(num_match.group(1))
+        unit = ""
+        if "万" in val_str:
+            unit = "万"
+        elif "k" in val_str or "K" in val_str:
+            unit = "k"
+    else:
+        num = float(match.group(1))
+        unit = match.group(2)
+        
+    if unit == "万":
+        return int(num * 10000)
+    elif unit in ["k", "K"]:
+        return int(num * 1000)
+    return int(num)
+
+
+def _extract_dispatch_metrics_from_text(text: str) -> dict:
+    seven_day = 0
+    month = 0
+    if text:
+        match_7 = re.search(r'(?:7天|近7天)代发\s*([\d\.]+(?:万|k|K)?)', text)
+        if match_7:
+            seven_day = _parse_dispatch_count(match_7.group(1))
+        match_m = re.search(r'(?:月代发|月成交|月代发量|月\s*代发)\s*([\d\.]+(?:万|k|K)?)', text)
+        if match_m:
+            month = _parse_dispatch_count(match_m.group(1))
+    return {
+        "seven_day_dispatch_count": seven_day,
+        "month_dispatch_count": month,
+    }
+
+
+def _normalize_image_search_url(url: str) -> str | None:
+    if not url or not isinstance(url, str):
+        return None
+    url_lower = url.lower()
+    if not (url_lower.startswith("http://") or url_lower.startswith("https://")):
+        return None
+    parsed_path = url.split("?")[0]
+    if parsed_path.lower().endswith(".heic") or parsed_path.lower().endswith(".gif"):
+        return None
+    return url
+
+
+def _top_dispatch_candidates(rows: list, limit: int) -> list:
+    valid_rows = [r for r in rows if r.get("item_url")]
+    
+    def sort_key(r):
+        return (r.get("seven_day_dispatch_count", 0) or 0, r.get("month_dispatch_count", 0) or 0)
+        
+    valid_rows.sort(key=sort_key, reverse=True)
+    return valid_rows[:limit]
+
+
+def _detail_offer_id_from_url(url: str) -> str:
+    if not url:
+        return ""
+    match = re.search(r'/offer/(\d+)\.html', url)
+    if match:
+        return match.group(1)
+    return ""
+
 
 def _find_key_recursive(obj, target_key):
     if isinstance(obj, dict):
@@ -30,26 +299,38 @@ def _find_key_recursive(obj, target_key):
 
 def _clean_image_url(url: str) -> str:
     """
-    1688 专用清洗逻辑：
-    1. 必须包含 .jpg_.webp 格式，否则丢弃
-    2. 将 .jpg_.webp 及其后续后缀清洗为 .jpg
+    1688 高清大图清洗逻辑：
+    1. 过滤掉所有视频文件和视频帧、封面图片资源（包含video、.mp4等特征）
+    2. 允许任何合法的阿里 CDN 图片或常见图像后缀直接通过
+    3. 使用正则过滤掉缩略图的裁剪尺寸并还原为原始大图
+    4. 过滤掉所有不以合法图片后缀结尾的非图资源链接
     """
     if not url or not isinstance(url, str): return ""
     
-    # 转换为小写进行匹配，但保留原大小写用于最终 URL
-    url_lower = url.lower()
-    
-    # 核心准则：非 .jpg_.webp 的直接丢弃
-    if ".jpg_.webp" not in url_lower:
-        return ""
-
     # 补全协议
     if url.startswith("//"): url = "https:" + url
+    elif not url.startswith("http"): url = "https://" + url
 
-    # 精准清洗：将 .jpg_.webp 开始直到末尾的部分替换为 .jpg
-    # 例如：...image.jpg_.webp_300x300.jpg -> ...image.jpg
-    url = re.sub(r'\.jpg_\.webp.*$', '.jpg', url, flags=re.IGNORECASE)
+    url_lower = url.lower()
+    # 视频过滤：包含 video 关键字或视频文件类型，直接丢弃
+    video_keywords = ["video", ".mp4", ".avi", ".mov", ".flv", "/video"]
+    if any(kw in url_lower for kw in video_keywords):
+        return ""
+
+    # 基础过滤：必须为阿里 CDN 图片或常见的图片后缀
+    if "alicdn.com" not in url_lower and not any(ext in url_lower for ext in [".jpg", ".jpeg", ".png"]):
+        return ""
+
+    # 清除 1688 / 淘宝 CDN 常见的缩略图和压缩后缀
+    # 比如：.jpg_300x300.jpg -> .jpg
+    #      .png_.webp -> .png
+    #      .jpeg_q90.jpg -> .jpeg
+    url = re.sub(r'\.([a-zA-Z]+)_[^/\\]+$', r'.\1', url)
     
+    # 最终验证：必须是以常见的图片扩展名结尾
+    if not any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png"]):
+        return ""
+        
     return url
 
 def _sanitize_cookies(cookies):
@@ -73,15 +354,24 @@ def is_relevant(source_title, search_keyword):
         if len(part) >= 2 and part in s_title: return True, ""
     return False, f"不含关键词 '{clean_keyword}'"
 
+
+def _clean_html_span(text: str) -> str:
+    if not text: return ""
+    text = re.sub(r'<span[^>]*?>.*?</span>', '', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'<[^>]+>', '', text)
+    parts = [p.strip() for p in text.split(";") if p.strip()]
+    return ";".join(parts)
+
 def _generate_sku_excel_file(parsed_data: dict, output_path: Path):
     try:
         from openpyxl import Workbook
         wb = Workbook(); ws = wb.active; ws.title = "SKU详情"
-        ws.append(["规格名称", "价格", "库存", "SpecId", "数据来源"])
+        ws.append(["规格名称", "价格", "库存", "SpecId", "规格图片", "数据来源"])
         for sku in parsed_data.get("sku_details", []):
-            ws.append([sku.get("attributes"), sku.get("price"), sku.get("stock"), sku.get("spec_id"), sku.get("source")])
+            ws.append([sku.get("attributes"), sku.get("price"), sku.get("stock"), sku.get("spec_id"), sku.get("image"), sku.get("source")])
         wb.save(output_path)
     except: pass
+
 
 def _parse_captured_api_data(captured_responses: list[dict], logger):
     parsed_result = {"sku_details": [], "images": []}
@@ -93,7 +383,7 @@ def _parse_captured_api_data(captured_responses: list[dict], logger):
             if info_map and not parsed_result["sku_details"] and isinstance(info_map, dict):
                 for attr_name, info in info_map.items():
                     parsed_result["sku_details"].append({
-                        "attributes": html.unescape(str(attr_name)).replace(">", " - "),
+                        "attributes": _clean_html_span(html.unescape(str(attr_name))).replace(">", " - "),
                         "price": info.get("discountPrice") or info.get("price"),
                         "stock": info.get("canBookCount"),
                         "spec_id": info.get("specId")
@@ -112,6 +402,586 @@ def _parse_captured_api_data(captured_responses: list[dict], logger):
                 if parsed_result["images"]: break
     return parsed_result
 
+async def _clean_page_overlays(page, logger):
+    for i in range(5):
+        try:
+            # 尝试主动查找并关闭常见的新手引导/确认弹窗按钮
+            for btn_text in ["我知道了", "我知道啦", "跳过", "下一步", "关闭"]:
+                try:
+                    btn = page.get_by_text(btn_text).first
+                    if await btn.count() > 0 and await btn.is_visible():
+                        logger.info(f"    [Overlay] Clicking onboarding guide button: {btn_text}")
+                        await btn.click()
+                        await asyncio.sleep(1)
+                except Exception:
+                    pass
+
+            state = await _overlay_state(page)
+            if state["overlay_count"] == 0 and not state["ack_visible"]:
+                # 再通过注入JS移除任何残留的新手指引蒙层
+                try:
+                    await page.evaluate("""
+                        () => {
+                            const selectors = ['.next-guide-mask', '.guide-mask', '[class*="guide-mask"]', '[class*="next-guide"]', '.introjs-overlay', '.introjs-helperLayer'];
+                            selectors.forEach(sel => {
+                                document.querySelectorAll(sel).forEach(el => el.remove());
+                            });
+                        }
+                    """)
+                except Exception:
+                    pass
+                break
+            
+            logger.info(f"    [Overlay] Found {state['overlay_count']} overlays, ack_visible: {state['ack_visible']}. Cleaning...")
+            
+            if state["ack_visible"]:
+                ack_btn = page.get_by_text("我知道了", exact=True).first
+                if await ack_btn.is_visible():
+                    await ack_btn.click()
+                    await asyncio.sleep(1)
+                    continue
+                    
+            overlay_loc = page.locator(".J_MIDDLEWARE_FRAME_WIDGET:visible").first
+            if await overlay_loc.count() > 0:
+                rect = await overlay_loc.bounding_box()
+                if rect:
+                    cx, cy = _overlay_close_click_point(rect)
+                    await page.mouse.click(cx, cy)
+                    await asyncio.sleep(1)
+                    continue
+        except Exception as oe:
+            logger.warning(f"    [Overlay] Clean error: {oe}")
+            break
+
+
+def _log_slider_step(logger, payload: dict):
+    if logger:
+        logger.info(f"    [Slider] {payload.get('step')}: {json.dumps(payload, ensure_ascii=False)}")
+    else:
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
+async def _drag_slider_track(locator) -> bool:
+    handle = await locator.element_handle()
+    if handle is None:
+        return False
+    geometry = await handle.evaluate(
+        """
+        (node) => {
+          const handleRect = node.getBoundingClientRect();
+          const trackNode = node.closest('.nc_scale') || node.parentElement;
+          const trackRect = trackNode ? trackNode.getBoundingClientRect() : handleRect;
+          return {
+            handle: {x: handleRect.x, y: handleRect.y, width: handleRect.width, height: handleRect.height},
+            track: {x: trackRect.x, y: trackRect.y, width: trackRect.width, height: trackRect.height},
+          };
+        }
+        """
+    )
+    if not geometry:
+        return False
+    handle_rect = geometry["handle"]
+    track = geometry["track"]
+    if track["width"] <= 0 or track["height"] <= 0 or handle_rect["width"] <= 0 or handle_rect["height"] <= 0:
+        return False
+    page = locator.page
+    start_x = handle_rect["x"] + handle_rect["width"] / 2
+    start_y = handle_rect["y"] + handle_rect["height"] / 2
+    end_x = track["x"] + track["width"] - handle_rect["width"] / 2 - 2
+    y = start_y
+    rng = random.Random()
+    original_timeout = page.context._impl_obj._timeout_settings.default_timeout()
+    page.set_default_timeout(5000)
+    await page.mouse.move(start_x - rng.uniform(3, 7), start_y + rng.uniform(-0.5, 0.5))
+    await asyncio.sleep(rng.uniform(0.01, 0.02))
+    await page.mouse.move(start_x, start_y, steps=4)
+    await asyncio.sleep(rng.uniform(0.005, 0.01))
+    await page.mouse.down()
+    await asyncio.sleep(rng.uniform(0.002, 0.006))
+
+    current_x = start_x
+    total_distance = max(1.0, end_x - start_x)
+    progress_points = [0.05, 0.1, 0.16, 0.23, 0.31, 0.4, 0.5, 0.6, 0.69, 0.77, 0.84, 0.9, 0.95, 0.98, 1.0]
+    for progress in progress_points:
+        target_x = start_x + total_distance * progress
+        target_x = max(current_x + 1, min(end_x + 3, target_x))
+        target_y = y + rng.uniform(-1.1, 1.1)
+        steps = rng.randint(10, 16)
+        await page.mouse.move(target_x, target_y, steps=steps)
+        current_x = target_x
+
+    overshoot_x = min(end_x + rng.uniform(0.8, 1.8), track["x"] + track["width"] - handle_rect["width"] / 2)
+    await page.mouse.move(overshoot_x, y + rng.uniform(-0.8, 0.8), steps=rng.randint(12, 18))
+    await page.mouse.move(end_x - rng.uniform(0.1, 0.5), y + rng.uniform(-0.6, 0.6), steps=rng.randint(12, 18))
+    await asyncio.sleep(rng.uniform(0.01, 0.02))
+    await page.mouse.up()
+    page.set_default_timeout(original_timeout)
+    return True
+
+
+async def _frame_viewport_offset(frame, page) -> tuple[float, float]:
+    if frame == page.main_frame:
+        return 0.0, 0.0
+    frame_element = await frame.frame_element()
+    box = await frame_element.bounding_box()
+    if not box:
+        return 0.0, 0.0
+    return float(box["x"]), float(box["y"])
+
+
+async def _drag_slider_system_mouse(page, frame, locator, logger=None) -> bool:
+    if pyautogui is None:
+        _log_slider_step(logger, {"step": "pyautogui_not_available"})
+        return False
+    await locator.wait_for(state="visible", timeout=5000)
+    handle = await locator.element_handle()
+    if handle is None:
+        return False
+    await asyncio.sleep(0.2)
+    handle = await locator.element_handle()
+    if handle is None:
+        return False
+    geometry = await handle.evaluate(
+        """
+        (node) => {
+          const handleRect = node.getBoundingClientRect();
+          const trackNode = node.closest('.nc_scale') || node.parentElement;
+          const trackRect = trackNode ? trackNode.getBoundingClientRect() : handleRect;
+          return {
+            handle: {x: handleRect.x, y: handleRect.y, width: handleRect.width, height: handleRect.height},
+            track: {x: trackRect.x, y: trackRect.y, width: trackRect.width, height: trackRect.height},
+          };
+        }
+        """
+    )
+    viewport = await page.evaluate(
+        """
+        () => ({
+          screenX: window.screenX ?? window.screenLeft ?? 0,
+          screenY: window.screenY ?? window.screenTop ?? 0,
+          outerWidth: window.outerWidth || 0,
+          outerHeight: window.outerHeight || 0,
+          innerWidth: window.innerWidth || 0,
+          innerHeight: window.innerHeight || 0,
+        })
+        """
+    )
+    if not geometry or not viewport:
+        return False
+    frame_offset_x, frame_offset_y = await _frame_viewport_offset(frame, page)
+    handle_rect = geometry["handle"]
+    track = geometry["track"]
+    border_x = max(0.0, (viewport["outerWidth"] - viewport["innerWidth"]) / 2)
+    chrome_y = max(0.0, viewport["outerHeight"] - viewport["innerHeight"] - border_x)
+    origin_x = viewport["screenX"] + border_x
+    origin_y = viewport["screenY"] + chrome_y
+
+    start_x = origin_x + frame_offset_x + handle_rect["x"] + handle_rect["width"] / 2
+    start_y = origin_y + frame_offset_y + handle_rect["y"] + handle_rect["height"] / 2
+    track_end_x = origin_x + frame_offset_x + track["x"] + track["width"] - handle_rect["width"] / 2 - 2
+    end_x = track_end_x + max(handle_rect["width"] * 1.6, 36.0)
+    base_y = start_y
+
+    rng = random.Random()
+    pyautogui.moveTo(start_x, base_y, duration=0.04)
+    pyautogui.mouseDown()
+    total_distance = end_x - start_x
+    move_steps = max(90, int(abs(total_distance) / 3.0))
+    for index in range(1, move_steps + 1):
+        progress = index / move_steps
+        eased = progress * progress
+        target_x = start_x + total_distance * eased
+        target_y = base_y + rng.uniform(-0.35, 0.35)
+        pyautogui.moveTo(target_x, target_y, duration=0)
+    await asyncio.sleep(0.02)
+
+    released = False
+    try:
+        for _ in range(60):
+            if not await _slider_still_present(page):
+                pyautogui.mouseUp()
+                released = True
+                return True
+            pyautogui.moveTo(end_x + rng.uniform(3.0, 7.0), base_y + rng.uniform(-0.3, 0.3), duration=0)
+            await asyncio.sleep(0.02)
+        return False
+    finally:
+        if not released:
+            pyautogui.mouseUp()
+
+
+async def _read_slider_geometry(locator, frame, page) -> dict | None:
+    handle = await locator.element_handle()
+    if handle is None:
+        return None
+    geometry = await handle.evaluate(
+        """
+        (node) => {
+          const handleRect = node.getBoundingClientRect();
+          const trackNode = node.closest('.nc_scale') || node.parentElement;
+          const wrapperNode = node.closest('.nc_wrapper') || trackNode?.parentElement || null;
+          const trackRect = trackNode ? trackNode.getBoundingClientRect() : handleRect;
+          const wrapperRect = wrapperNode ? wrapperNode.getBoundingClientRect() : trackRect;
+          return {
+            handle: {x: handleRect.x, y: handleRect.y, width: handleRect.width, height: handleRect.height},
+            track: {x: trackRect.x, y: trackRect.y, width: trackRect.width, height: trackRect.height},
+            wrapper: {x: wrapperRect.x, y: wrapperRect.y, width: wrapperRect.width, height: wrapperRect.height},
+          };
+        }
+        """
+    )
+    viewport = await page.evaluate(
+        """
+        () => ({
+          screenX: window.screenX ?? window.screenLeft ?? 0,
+          screenY: window.screenY ?? window.screenTop ?? 0,
+          outerWidth: window.outerWidth || 0,
+          outerHeight: window.outerHeight || 0,
+          innerWidth: window.innerWidth || 0,
+          innerHeight: window.innerHeight || 0,
+          devicePixelRatio: window.devicePixelRatio || 1,
+          url: location.href,
+          title: document.title,
+        })
+        """
+    )
+    frame_offset_x, frame_offset_y = await _frame_viewport_offset(frame, page)
+    return {"geometry": geometry, "viewport": viewport, "frame_offset": {"x": frame_offset_x, "y": frame_offset_y}}
+
+
+async def _find_slider_control(frame):
+    selectors = [
+        ".btn_slide",
+        ".nc_1_n1z",
+        ".nc_scale .btn_slide",
+        "[class*='btn_slide']",
+        "[class*='nc_1_n1z']",
+    ]
+    for selector in selectors:
+        locator = frame.locator(selector).first
+        try:
+            if await locator.count() and await locator.is_visible():
+                return locator
+        except Exception:
+            continue
+    return None
+
+
+async def _find_slider_frame_box(frame):
+    selectors = [
+        "#nc_1_wrapper",
+        ".nc_wrapper",
+        ".nc_scale",
+        "#nocaptcha",
+    ]
+    for selector in selectors:
+        locator = frame.locator(selector).first
+        try:
+            if await locator.count() and await locator.is_visible():
+                return locator
+        except Exception:
+            continue
+    return None
+
+
+async def _click_slider_frame(locator) -> None:
+    handle = await locator.element_handle()
+    if handle is None:
+        return
+    rect = await handle.evaluate(
+        """
+        (node) => {
+          let current = node;
+          while (current) {
+            const r = current.getBoundingClientRect();
+            if (r.width >= 180 && r.height >= 24) {
+              return {x: r.x, y: r.y, width: r.width, height: r.height};
+            }
+            current = current.parentElement;
+          }
+          const r = node.getBoundingClientRect();
+          return {x: r.x, y: r.y, width: r.width, height: r.height};
+        }
+        """
+    )
+    if not rect or rect["width"] <= 0 or rect["height"] <= 0:
+        return
+    x = rect["x"] + rect["width"] / 2
+    y = rect["y"] + rect["height"] / 2
+    await locator.page.mouse.click(x, y)
+
+
+async def _slider_verification_passed(page) -> bool:
+    if await _slider_still_present(page):
+        return False
+    try:
+        title = await page.title()
+    except Exception:
+        return False
+    return "验证码拦截" not in title
+
+
+async def _read_slider_hidden_state(page) -> dict[str, str]:
+    state: dict[str, str] = {}
+    field_ids = ["nc-session-id", "nc-sig", "x5step", "x5secdata", "ajax", "nc_app_key"]
+    for frame in list(page.frames):
+        for field_id in field_ids:
+            try:
+                value = await frame.locator(f"#{field_id}").input_value(timeout=300)
+                state[field_id] = value
+            except Exception:
+                continue
+        if state:
+            break
+    return state
+
+
+async def _read_slider_visual_state(page) -> dict[str, dict[str, str]]:
+    selectors = {
+        "wrapper": "#nc_1_wrapper",
+        "track": "#nc_1_n1t",
+        "handle": "#nc_1_n1z",
+        "bg": "#nc_1__bg",
+        "text": "#nc_1__scale_text",
+        "error": ".errloading",
+    }
+    snapshot: dict[str, dict[str, str]] = {}
+    for frame in list(page.frames):
+        frame_snapshot: dict[str, dict[str, str]] = {}
+        for key, selector in selectors.items():
+            locator = frame.locator(selector).first
+            if not await locator.count():
+                continue
+            try:
+                state = await locator.evaluate(
+                    """
+                    (node) => ({
+                      className: node.className || '',
+                      style: node.getAttribute('style') || '',
+                      text: (node.innerText || node.textContent || '').trim().slice(0, 120),
+                    })
+                    """
+                )
+                frame_snapshot[key] = state
+            except Exception:
+                continue
+        if frame_snapshot:
+            return frame_snapshot
+    return snapshot
+
+
+async def _slider_still_present(page) -> bool:
+    for frame in list(page.frames):
+        try:
+            locator = frame.locator(".errloading, .nc_scale, .btn_slide, .nc_1_n1z, #nc_1_wrapper").first
+            if await locator.count() and await locator.is_visible():
+                return True
+        except Exception:
+            continue
+    return False
+
+
+async def _search_input_locator(page):
+    selectors = [
+        "input.ali-search-input",
+        "input#alisearch-input",
+        "input[name='keywords']",
+        "input[type='search']",
+        "input[placeholder*='搜索']",
+    ]
+    for selector in selectors:
+        locator = page.locator(selector).first
+        try:
+            if await locator.count():
+                return locator
+        except Exception:
+            continue
+    return None
+
+
+def _looks_like_login_url(url: str) -> bool:
+    """检查 URL 是否是登录页（同步函数，不可用 async，否则调用处不加 await 会变成 truthy coroutine）"""
+    lowered = url.lower()
+    return any(token in lowered for token in ["login.taobao.com", "login.1688.com", "member/modify_evolve"])
+
+
+def _looks_like_captcha_page(url: str, title: str) -> bool:
+    """检查当前页是否为验证码拦截页"""
+    url_l = url.lower()
+    captcha_url_tokens = ["_____tmd_____/punish", "punish", "sec.taobao.com", "login.taobao.com", "login.1688.com"]
+    captcha_title_tokens = ["验证码", "安全验证", "访问被拒绝", "拦截"]
+    if any(t in url_l for t in captcha_url_tokens):
+        return True
+    if any(t in title for t in captcha_title_tokens):
+        return True
+    return False
+
+
+async def _wait_for_search_or_slider(page, timeout_seconds: float = 8.0) -> str:
+    """等待页面进入搜索框、滑块或登录页状态之一。
+    注意：_looks_like_login_url 必须是同步调用，不能 await。"""
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    while asyncio.get_running_loop().time() < deadline:
+        cur_url = page.url
+        if _looks_like_login_url(cur_url):
+            return "login"
+        if await _slider_still_present(page):
+            return "slider"
+        if await _search_input_locator(page) is not None:
+            return "search"
+        await asyncio.sleep(0.2)
+    return "unknown"
+
+
+async def _clear_home_slider(page, stage: str = "home", logger=None) -> bool:
+    for attempt in range(1, 4):
+        try:
+            frames = list(page.frames)
+        except Exception:
+            return False
+        for frame in frames:
+            frame_box = await _find_slider_frame_box(frame)
+            slider = await _find_slider_control(frame)
+            if frame_box is None and slider is None:
+                continue
+            try:
+                if slider is None and frame_box is not None:
+                    await _click_slider_frame(frame_box)
+                    _log_slider_step(logger, {"step": "slider_retry_click", "attempt": attempt, "frame_url": frame.url})
+                    await asyncio.sleep(0.4)
+                    slider = await _find_slider_control(frame)
+                if slider is None:
+                    continue
+                slider_identity = await slider.evaluate("node => node.className || node.id || node.tagName")
+                geometry = await _read_slider_geometry(slider, frame, page)
+                if geometry is not None:
+                    handle_x = geometry["geometry"]["handle"]["x"]
+                    track_x = geometry["geometry"]["track"]["x"]
+                    if handle_x - track_x > 40 and frame_box is not None:
+                        await _click_slider_frame(frame_box)
+                        _log_slider_step(logger, {
+                            "step": "slider_pre_reset",
+                            "attempt": attempt,
+                            "frame_url": frame.url,
+                            "handle_x": handle_x,
+                            "track_x": track_x,
+                        })
+                        await asyncio.sleep(0.5)
+                        slider = await _find_slider_control(frame)
+                        if slider is None:
+                            continue
+                        slider_identity = await slider.evaluate("node => node.className || node.id || node.tagName")
+                        geometry = await _read_slider_geometry(slider, frame, page)
+
+                drag_success = False
+                if pyautogui is not None:
+                    drag_success = await _drag_slider_system_mouse(page, frame, slider, logger=logger)
+                
+                if not drag_success:
+                    _log_slider_step(logger, {"step": "falling_back_to_playwright_drag"})
+                    drag_success = await _drag_slider_track(slider)
+
+                if drag_success:
+                    _log_slider_step(logger, {
+                        "step": "slider_dragged",
+                        "attempt": attempt,
+                        "mode": "system_mouse" if drag_success and pyautogui is not None else "playwright_track",
+                        "selector": slider_identity,
+                        "frame_url": frame.url,
+                    })
+                    await asyncio.sleep(0.8)
+                    hidden_state = await _read_slider_hidden_state(page)
+                    visual_state = await _read_slider_visual_state(page)
+                    _log_slider_step(logger, {"step": "slider_hidden_state", "attempt": attempt, "state": hidden_state})
+                    _log_slider_step(logger, {"step": "slider_visual_state", "attempt": attempt, "state": visual_state})
+                    passed = await _slider_verification_passed(page)
+                    _log_slider_step(logger, {"step": "slider_verify", "attempt": attempt, "passed": passed})
+                    if passed:
+                        return True
+                    if frame_box is not None:
+                        await _click_slider_frame(frame_box)
+                        _log_slider_step(logger, {"step": "slider_retry_click", "attempt": attempt, "frame_url": frame.url})
+                        await asyncio.sleep(0.4)
+            except Exception as exc:
+                _log_slider_step(logger, {
+                    "step": "slider_drag_error",
+                    "attempt": attempt,
+                    "frame_url": frame.url,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+        await asyncio.sleep(0.8)
+    return False
+
+
+async def _clear_slider_if_present(page, stage: str, logger=None) -> bool:
+    """检测并清除滑块验证。对于验证码拦截页，直接尝试解滑块而不是立即放弃。"""
+    state = await _wait_for_search_or_slider(page)
+    _log_slider_step(logger, {"step": "slider_stage_state", "stage": stage, "state": state})
+    if state == "search":
+        _log_slider_step(logger, {"step": "slider_not_present", "stage": stage})
+        return True
+    if state == "login":
+        # 真正的登录页（URL 含 login.taobao.com 等），无法自动处理
+        _log_slider_step(logger, {"step": "login_redirect_detected", "stage": stage, "url": page.url})
+        return False
+    # state == "slider" 或 "unknown"：尝试清除滑块
+    passed = await _clear_home_slider(page, stage=stage, logger=logger)
+    _log_slider_step(logger, {"step": "slider_stage_ready", "stage": stage, "passed": passed})
+    return passed
+
+
+async def _ensure_page_navigated_safe(page, url: str, logger, timeout: int = 30000) -> bool:
+    logger.info(f"    [Session] Navigating to: {url}")
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+        await asyncio.sleep(2)
+    except Exception as e:
+        logger.warning(f"    [Session] Initial navigation warning: {e}")
+
+    for attempt in range(45):  # 最多等待 90 秒
+        cur_url = page.url
+        cur_title = await page.title() or ""
+        
+        is_blocked = _looks_like_captcha_page(cur_url, cur_title)
+        
+        if not is_blocked:
+            return True
+            
+        logger.warning(f"    [Session] [Blocked] Captcha or login redirect detected! URL: {cur_url}, Title: {cur_title}")
+        
+        # 先清理采购助手欢迎页/新手引导弹窗，它们可能遮住验证码滑块
+        try:
+            logger.info("    [Session] Dismissing any procurement assistant welcome popups before slider detection...")
+            await _clean_page_overlays(page, logger)
+            await asyncio.sleep(0.5)
+        except Exception as pe:
+            logger.warning(f"    [Session] Popup dismiss error (non-fatal): {pe}")
+
+        # 尝试自动滑动解锁（先检测当前页是否有滑块）
+        try:
+            slider_present = await _slider_still_present(page)
+            if slider_present:
+                logger.info("    [Session] Slider detected on captcha page. Attempting to drag...")
+                passed = await _clear_home_slider(page, stage="navigation", logger=logger)
+                if passed:
+                    logger.info("    [Session] Slider cleared! Waiting for redirect...")
+                    await asyncio.sleep(3)
+                    continue
+                else:
+                    logger.warning("    [Session] Slider drag failed. Will wait for manual resolve...")
+            else:
+                logger.warning("    [Session] No slider detected on captcha page. Waiting for manual resolve...")
+        except Exception as se:
+            logger.error(f"    [Session] Auto slider clearing encountered error: {se}")
+
+        logger.warning("    [Action Required] Please solve the captcha or scan code to log in manually in the browser window!")
+        await asyncio.sleep(2)
+        
+    logger.error("    [Session] Timeout waiting for verification bypass.")
+    return False
+
+
+
 async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, index: int, logger):
     safe_title = _sanitize_filename(item.get("title") or "item")
     offer_id = item.get("offer_id")
@@ -125,92 +995,455 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
                 captured.append({"url": res.url, "data": json.loads(text)})
         except: pass
 
-    page = await context.new_page(); page.on("response", on_resp)
+    page = await context.new_page()
+    page.on("response", on_resp)
+    
+    physical_success = False
+    excel_file = output_dir / f"{safe_title}_{offer_id}.xlsx"
+    
     try:
         url = f"https://detail.1688.com/offer/{offer_id}.html"
-        logger.info(f"    [Step 2/4] Browser opening: {url}")
-        await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-        await page.evaluate("window.scrollTo(0, 500)"); await asyncio.sleep(5)
+        logger.info(f"    [Step 2/4] Navigating to detail page: {url}")
+            
+        success = await _ensure_page_navigated_safe(page, url, logger, timeout=60000)
+        if not success:
+            logger.error(f"    [Session] Detail page navigation failed Rank {index}")
+            return {"status": "failed", "images": []}
 
-        # 精准 DOM 提取
-        final_images = await page.evaluate("""
-            () => {
-                const list = [];
-                const gallery = document.querySelector('.module-od-picture-gallery, .detail-gallery, .od-gallery-list-wapper');
-                if (gallery) {
-                    gallery.querySelectorAll('img').forEach(img => {
-                        let src = img.getAttribute('data-lazyload-src') || img.getAttribute('src') || img.src;
-                        if (src && src.includes('alicdn.com')) list.push(src);
-                    });
+        # 等待页面渲染（JS 执行、图片懒加载触发）
+        await page.evaluate("window.scrollTo(0, 400)")
+        await asyncio.sleep(3)
+
+        # 清除可能弹出的新手引导/欢迎弹窗
+        await _clean_page_overlays(page, logger)
+
+        # ── 核心：直接取完整渲染后的 HTML，用 Scrapling 解析 ──
+        logger.info("    [HTML] Fetching rendered page HTML for Scrapling parsing...")
+        html_content = await page.content()
+
+        parsed_html = Ali1688SourceAdapter.extract_detail_sku_and_images(html_content)
+        logger.info(f"    [HTML] Scrapling parsed: {len(parsed_html['sku_details'])} SKU entries, {len(parsed_html['images'])} images")
+
+        # ── 补充：从 JS 运行时直接读取 SKU（比 HTML 正则更可靠）──
+        js_sku: list = []
+        js_images: list = []
+        try:
+            js_data = await page.evaluate("""
+                () => {
+                    const result = {sku: [], images: []};
+                    // 1. 尝试各种全局变量
+                    const candidates = [
+                        window.__INIT_DATA__,
+                        window.detailData,
+                        window.__GLOBAL_DATA__,
+                        window.context?.result?.data,
+                    ];
+                    for (const root of candidates) {
+                        if (!root || typeof root !== 'object') continue;
+                        // 递归搜索 skuInfoMap
+                        function findKey(obj, key, depth) {
+                            if (depth > 8 || !obj || typeof obj !== 'object') return null;
+                            if (obj[key] !== undefined) return obj[key];
+                            for (const v of Object.values(obj)) {
+                                const found = findKey(v, key, depth + 1);
+                                if (found !== null && found !== undefined) return found;
+                            }
+                            return null;
+                        }
+                        
+                        function cleanSpan(valStr) {
+                            if (!valStr || typeof valStr !== 'string') return valStr;
+                            let temp = valStr.replace(/<span[^>]*?>.*?<\/span>/gi, '');
+                            temp = temp.replace(/<[^>]+>/g, '');
+                            const parts = temp.split(';').map(p => p.trim()).filter(Boolean);
+                            return parts.join(';');
+                        }
+                        
+                        // 提取规格属性图片映射
+                        const skuProps = findKey(root, 'skuProps', 0);
+                        const propImages = {};
+                        if (Array.isArray(skuProps)) {
+                            for (const prop of skuProps) {
+                                if (Array.isArray(prop.value)) {
+                                    for (const val of prop.value) {
+                                        if (val.name && val.imageUrl) {
+                                            const cleanedValName = cleanSpan(val.name);
+                                            propImages[cleanedValName] = val.imageUrl;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        function matchImage(attributes) {
+                            if (!attributes) return null;
+                            const cleanedAttrs = cleanSpan(attributes);
+                            const attrParts = cleanedAttrs.split(';');
+                            for (const part of attrParts) {
+                                const valName = part.includes(':') ? part.split(':')[1] : part;
+                                if (propImages[valName.trim()]) return propImages[valName.trim()];
+                            }
+                            return null;
+                        }
+
+                        // SKU map
+                        const skuMap = findKey(root, 'skuInfoMap', 0);
+                        if (skuMap && typeof skuMap === 'object' && Object.keys(skuMap).length > 0) {
+                            for (const [name, info] of Object.entries(skuMap)) {
+                                result.sku.push({
+                                    attributes: cleanSpan(name),
+                                    price: info.discountPrice || info.price || null,
+                                    stock: info.canBookCount || null,
+                                    spec_id: info.specId || null,
+                                    image: matchImage(name),
+                                    source: 'js_runtime_skuInfoMap'
+                                });
+                            }
+                            break;
+                        }
+                        // skuList / skuInfos
+                        const skuList = findKey(root, 'skuInfos', 0) || findKey(root, 'skuList', 0);
+                        if (Array.isArray(skuList) && skuList.length > 0) {
+                            for (const sku of skuList) {
+                                const attrs = sku.attributes || sku.specName || sku.skuName || '';
+                                result.sku.push({
+                                    attributes: cleanSpan(attrs),
+                                    price: sku.discountPrice || sku.price || null,
+                                    stock: sku.canBookCount || sku.stock || null,
+                                    spec_id: sku.specId || sku.skuId || null,
+                                    image: matchImage(attrs),
+                                    source: 'js_runtime_skuList'
+                                });
+                            }
+                            break;
+                        }
+                        // 图片
+                        const imgList = findKey(root, 'imageList', 0);
+                        if (Array.isArray(imgList)) {
+                            for (const img of imgList) {
+                                const u = (typeof img === 'string') ? img
+                                    : img.fullPathImageURI || img.originalImageUri || img.url || '';
+                                if (u && u.includes('alicdn.com')) result.images.push(u);
+                            }
+                        }
+                    }
+                    return result;
                 }
-                try {
-                    const ctx = window.context?.result?.data || {};
-                    const imgs = ctx.offerDetail?.imageList || [];
-                    imgs.forEach(i => list.push(i.fullPathImageURI || i.originalImageUri || i.imageURI));
-                } catch(e) {}
-                return [...new Set(list)];
-            }
-        """)
-        
-        parsed = _parse_captured_api_data(captured, logger)
-        all_found = final_images + parsed["images"]
-        clean_final = list(dict.fromkeys([_clean_image_url(u) for u in all_found if u]))
+            """)
+            js_sku = js_data.get("sku", [])
+            js_images = js_data.get("images", [])
+            logger.info(f"    [JS] Runtime extracted: {len(js_sku)} SKU entries, {len(js_images)} images")
+        except Exception as je:
+            logger.warning(f"    [JS] Runtime eval error (non-fatal): {je}")
+
+        # mtop API 拦截数据作为兜底补充
+        parsed_api = _parse_captured_api_data(captured, logger)
+
+        # 合并 SKU：优先 JS 运行时 > HTML 解析 > API 拦截
+        sku_details = js_sku or parsed_html["sku_details"] or parsed_api["sku_details"]
+
+        # 合并图片：DOM 求值 + HTML 解析 + JS 运行时 + API 拦截（四层）
+        dom_images: list = []
+        try:
+            dom_images = await page.evaluate("""
+                () => {
+                    const list = [];
+                    const gallery = document.querySelector(
+                        '.module-od-picture-gallery, .detail-gallery, .od-gallery-list-wapper'
+                    );
+                    if (gallery) {
+                        gallery.querySelectorAll('img').forEach(img => {
+                            let src = img.getAttribute('data-lazyload-src') || img.getAttribute('src') || img.src;
+                            if (src && src.includes('alicdn.com')) list.push(src);
+                        });
+                    }
+                    return [...new Set(list)];
+                }
+            """)
+        except Exception as de:
+            logger.warning(f"    [HTML] DOM image eval error (non-fatal): {de}")
+
+        all_images = dom_images + parsed_html["images"] + js_images + parsed_api["images"]
+        clean_final = list(dict.fromkeys([_clean_image_url(u) for u in all_images if u]))
         clean_final = list(filter(None, clean_final))[:9]
 
-        if parsed["sku_details"] or clean_final:
-            logger.info(f"    [Step 4/4] Success! Images: {len(clean_final)}")
-            if parsed["sku_details"]:
-                _generate_sku_excel_file(parsed, output_dir / f"{safe_title}_{offer_id}.xlsx")
+        # 生成 SKU Excel
+        if sku_details:
+            for sku in sku_details:
+                if sku.get("attributes"):
+                    sku["attributes"] = _clean_html_span(sku["attributes"])
+            logger.info(f"    [HTML] Generating SKU Excel from {len(sku_details)} entries...")
+            _generate_sku_excel_file({"sku_details": sku_details}, excel_file)
+
+        if excel_file.exists() or clean_final:
+            logger.info(f"    [Step 4/4] Success! Excel: {excel_file.exists()}, Images: {len(clean_final)}")
             return {"status": "success", "images": clean_final}
-    except Exception as e: logger.error(f"    [Browser Error] Rank {index}: {e}")
-    finally: await page.close()
+            
+    except Exception as e:
+        logger.error(f"    [Browser Error] Rank {index}: {e}")
+    finally:
+        await page.close()
+        
     return {"status": "failed", "images": []}
 
+
 async def _run(args):
-    output_dir = Path(args.output_dir); output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = Path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
     logger = get_unified_logger("1688Worker", log_file=args.log_file)
+    
+    input_state = args.state_file
+    managed_state = DEFAULT_ALI1688_STATE_FILE
+    effective_state_path, synced = _prepare_managed_state_file(input_state, managed_state)
+    if synced:
+        logger.info(f"[Auth] Synced input state {input_state} to managed state {effective_state_path}")
+    else:
+        logger.info(f"[Auth] Using managed state {managed_state} (synced=False)")
+
+    state_file_to_save = effective_state_path or managed_state
+
     async with async_playwright() as pw:
-        browser = await pw.chromium.launch(headless=True, args=default_launch_args())
-        context = await browser.new_context(**default_desktop_context_options())
-        state_path = Path(args.state_file)
-        if state_path.exists():
-            state = json.loads(state_path.read_text())
-            # 核心修复：直接使用本地的清洗逻辑，不再引用外部模块
-            clean_cookies = _sanitize_cookies(state.get("cookies", []))
-            await context.add_cookies(clean_cookies)
-            logger.info(f"[Auth] Injected {len(clean_cookies)} sanitized cookies.")
+        options = default_desktop_context_options()
+        options["user_agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-        from urllib.parse import quote
-        search_url = f"https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress={quote(args.image_url)}"
-        page = await context.new_page(); await page.goto(search_url, wait_until="domcontentloaded", timeout=60000); await asyncio.sleep(8)
-        adapter = Ali1688SourceAdapter(); html_content = await page.content()
-        candidates = adapter.search_from_html(html_content, limit=60)
+        # 已去掉浏览器扩展依赖（SKU 改用 JS 运行时提取），直接 headless 启动
+        headless_args = [
+            *default_launch_args(),
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+        ]
+        logger.info("[Browser] Launching headless Chromium (no extension required)")
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=headless_args,
+        )
+        context = await browser.new_context(**options)
+
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined })")
+
+        # 注入全局新手引导弹窗自动关闭脚本（MutationObserver 持续监听）
+        await context.add_init_script("""
+        (function() {
+            const GUIDE_CLOSE_TEXTS = ['我知道了', '我知道啦', '跳过', '关闭', '跳过引导', '跳过新手引导', '完成'];
+            const GUIDE_SELECTORS = [
+                '.next-guide-mask', '.guide-mask', '[class*="guide-mask"]',
+                '[class*="next-guide"]', '.introjs-overlay', '.introjs-helperLayer',
+                '.introjs-tooltipReferenceLayer',
+            ];
+
+            function tryDismissGuide() {
+                // 1. 点击关闭按钮
+                for (const text of GUIDE_CLOSE_TEXTS) {
+                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                    let node;
+                    while ((node = walker.nextNode())) {
+                        if (node.nodeValue && node.nodeValue.trim() === text) {
+                            const el = node.parentElement;
+                            if (el && el.offsetParent !== null) {
+                                try { el.click(); } catch(e) {}
+                                break;
+                            }
+                        }
+                    }
+                }
+                // 2. 移除残留蒙层 DOM
+                for (const sel of GUIDE_SELECTORS) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        try { el.remove(); } catch(e) {}
+                    });
+                }
+            }
+
+            // 首次执行
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', tryDismissGuide);
+            } else {
+                tryDismissGuide();
+            }
+
+            // 持续监听 DOM 变化
+            const observer = new MutationObserver(() => { tryDismissGuide(); });
+            observer.observe(document.documentElement, { childList: true, subtree: true });
+        })();
+        """)
+
+        if state_file_to_save and Path(state_file_to_save).exists():
+            await _apply_state_file_cookies(context, state_file_to_save)
+            logger.info(f"[Auth] Injected cookies from {state_file_to_save}")
+        await _clear_extension_onboarding_state(context)
+
+        # 1. 下载远程图片到本地临时目录
+        import urllib.request
+        temp_img_path = output_dir / "temp_search.jpg"
+        logger.info(f"[Search] Downloading remote image for physical upload: {args.image_url}")
+        try:
+            req = urllib.request.Request(
+                args.image_url, 
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
+            )
+            with urllib.request.urlopen(req, timeout=15) as response:
+                temp_img_path.write_bytes(response.read())
+            logger.info(f"[Search] Remote image successfully downloaded to {temp_img_path}")
+        except Exception as dl_err:
+            logger.error(f"[Search] Image download failed: {dl_err}")
+            await context.close()
+            return
+
+        # 2. 导航至 1688 主页进行全域安全会话激活
+        logger.info("[Search] Pre-warming browser context by visiting 1688 homepage...")
+        page = await context.new_page()
+        success = await _ensure_page_navigated_safe(page, "https://www.1688.com", logger, timeout=60000)
+        if not success:
+            logger.error("[Search] Failed to pre-warm on 1688 homepage.")
+            await context.close()
+            return
+        await asyncio.sleep(4)
+
+        # 3. 导航至以图搜主页（空参数，有 Referer 且已同步 cookie，安全）
+        search_home_url = "https://s.1688.com/youyuan/index.htm"
+        success = await _ensure_page_navigated_safe(page, search_home_url, logger, timeout=60000)
+        if not success:
+            logger.error("[Search] Failed to open image search home page.")
+            await context.close()
+            return
+        await asyncio.sleep(3)
+
+        # 3. 定位文件输入框并模拟上传
+        upload_success = False
+        try:
+            logger.info("[Search] Locating file input elements...")
+            # 匹配 input type="file" 或 accept 包含 image 的节点
+            input_loc = page.locator('input[type="file"], input[accept*="image"], .upload-btn input').first
+            if await input_loc.count() > 0:
+                await input_loc.set_input_files(str(temp_img_path))
+                logger.info("[Search] File selected and uploaded physically. Waiting for auto-redirection...")
+                # 等待 URL 发生改变，跳转到结果页面
+                await page.wait_for_url(lambda url: "imageAddress=" in url or "tab=imageSearch" in url, timeout=25000)
+                logger.info(f"[Search] Successfully redirected to results page: {page.url}")
+                await asyncio.sleep(5)
+                upload_success = True
+            else:
+                logger.warning("[Search] No upload input element found on the home page.")
+        except Exception as upload_err:
+            logger.error(f"[Search] Physical upload failed or redirection timeout: {upload_err}")
+
+        # 4. 兜底方案：如果物理上传失败，则直连以图搜 URL
+        if not upload_success:
+            from urllib.parse import quote
+            search_url = f"https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress={quote(args.image_url)}"
+            logger.warning(f"[Search] Falling back to direct URL visit: {search_url}")
+            success = await _ensure_page_navigated_safe(page, search_url, logger, timeout=60000)
+            if not success:
+                logger.error("[Search] Direct URL fallback failed. Captcha unsolved.")
+                await context.close()
+                return
+            await asyncio.sleep(8)
         
-        sku_results = []
-        for i, c in enumerate(candidates[:args.detail_top_n * 2], start=1):
-            if len(sku_results) >= args.detail_top_n: break
+        from xianyu_tools.source_adapter.ali1688 import Ali1688CaptchaError, Ali1688PayloadError
+        adapter = Ali1688SourceAdapter()
+        candidates = []
+        parse_success = False
+        
+        for attempt in range(1, 4):  # 最多尝试 3 次
+            html_content = await page.content()
+            try:
+                # 判断是否是验证码页面或惩罚页面
+                if adapter._is_captcha_page(html_content) or "哎呦喂" in html_content or "空空如也" in html_content:
+                    raise Ali1688CaptchaError("Captcha or soft-block (empty page) detected in HTML content")
+                
+                candidates = adapter.search_from_html(html_content, limit=60)
+                if not candidates:
+                    raise Ali1688PayloadError("Search result set is empty")
+                
+                parse_success = True
+                break
+            except Exception as e:
+                logger.warning(f"[Search] Attempt {attempt} failed to parse search results: {e}")
+                if attempt == 3:
+                    err_file = output_dir / "search_page_error.html"
+                    try:
+                        err_file.write_text(html_content, encoding="utf-8")
+                        logger.error(f"[Search] Dumped failed page to {err_file}")
+                    except Exception as dump_err:
+                        logger.error(f"[Search] Failed to dump: {dump_err}")
+                    raise e
+                
+                logger.warning("[Search] Possible bot detection. Attempting recovery and safety pre-warm...")
+                # 重新导航，并阻塞等待用户滑块自愈
+                nav_success = await _ensure_page_navigated_safe(page, search_url, logger, timeout=45000)
+                if not nav_success:
+                    logger.error(f"[Search] Recovery navigation failed in attempt {attempt}")
+                await asyncio.sleep(5)
+                
+        await page.close()
+        
+        import html as py_html
+        parsed_candidates = []
+        for c in candidates:
+            dispatch_text = ""
+            offer_id = c.source_item_id
+            if offer_id:
+                pos = html_content.find(offer_id)
+                if pos != -1:
+                    chunk = html_content[max(0, pos - 500): min(len(html_content), pos + 2500)]
+                    dispatch_text = py_html.unescape(chunk)
+            
+            metrics = _extract_dispatch_metrics_from_text(dispatch_text)
+            parsed_candidates.append({
+                "offer_id": offer_id,
+                "title": c.title,
+                "item_url": c.item_url,
+                "price": c.price,
+                "seven_day_dispatch_count": metrics["seven_day_dispatch_count"],
+                "month_dispatch_count": metrics["month_dispatch_count"],
+            })
+            
+        top_candidates = _top_dispatch_candidates(parsed_candidates, args.detail_top_n)
+        logger.info(f"[Search] Found {len(candidates)} candidates, sorted & filtered to Top {len(top_candidates)}")
 
-            # 核心增强：Candidate 之间的硬冷却日志
+        sku_results = []
+        for i, c in enumerate(top_candidates, start=1):
             if i > 1:
                 inter_wait = random.uniform(5.0, 10.0)
-                logger.info(f"    [Cooling] Safety pause for {inter_wait:.1f}s before next candidate...")
+                logger.info(f"    [Cooling] Safety pause for {inter_wait:.1f}s before Rank {i}...")
                 await asyncio.sleep(inter_wait)
 
-            item_data = {"offer_id": c.source_item_id, "title": c.title, "item_url": c.item_url, "min_price": c.price, "sku_count": 0, "status": "pending", "drop_reason": None, "images": []}
+            item_data = {
+                "offer_id": c["offer_id"],
+                "title": c["title"],
+                "item_url": c["item_url"],
+                "min_price": c["price"],
+                "sku_count": 0,
+                "status": "pending",
+                "drop_reason": None,
+                "images": []
+            }
 
             res = await _export_sku_from_detail_page(context, item_data, output_dir, i, logger)
-            item_data["status"] = res["status"]; item_data["images"] = res.get("images", [])
+            item_data["status"] = res["status"]
+            item_data["images"] = res.get("images", [])
             sku_results.append(item_data)
             
         (output_dir / "summary.json").write_text(json.dumps(sku_results, ensure_ascii=False, indent=2))
-        await browser.close()
+        
+        if state_file_to_save:
+            await _export_context_state(context, state_file_to_save)
+            logger.info(f"[Auth] Context state exported to {state_file_to_save}")
+            
+        await context.close()
+
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--image-url", required=True); parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--image-url", required=True)
+    parser.add_argument("--output-dir", required=True)
     parser.add_argument("--state-file", default="state/ali1688/storage_state.json")
-    parser.add_argument("--detail-top-n", type=int, default=10); parser.add_argument("--target-keyword", required=False); parser.add_argument("--log-file", required=False)
-    args = parser.parse_args(); asyncio.run(_run(args))
+    parser.add_argument("--detail-top-n", type=int, default=10)
+    parser.add_argument("--target-keyword", required=False)
+    parser.add_argument("--log-file", required=False)
+    args = parser.parse_args()
+    asyncio.run(_run(args))
+
 
 if __name__ == "__main__":
     main()
