@@ -38,8 +38,7 @@ class PublisherV3:
                 
         # 否则去调接口拉取
         payload = {
-            "item_biz_type": 2,
-            "sp_biz_type": 2
+            "item_biz_type": 2
         }
         timestamp = int(time.time())
         try:
@@ -66,21 +65,23 @@ class PublisherV3:
             
         return []
 
-    def _match_category(self, title: str) -> str:
+    def _match_category(self, title: str) -> tuple:
         """
         根据商品标题在已有的类目列表中进行模糊匹配。
         匹配规则：
         - 查找所有其名称 (channel_cat_name) 在标题中出现过的类目。
         - 如果找到了匹配项，按照类目名称长度降序排列，优先选择名字最长（即最精确）的分类。
-        - 如果未找到任何匹配，返回 openapi.json 中的默认 channel_cat_id。
+        - 返回 (channel_cat_id, sp_biz_type) 元组。
+        - 如果未找到任何匹配，返回默认分类和对应的 sp_biz_type。
         """
         default_cat = self.defaults.get("channel_cat_id")
+        default_sp = self.defaults.get("sp_biz_type", 2)
         if not title:
-            return default_cat
+            return default_cat, default_sp
             
         categories = self._load_categories()
         if not categories:
-            return default_cat
+            return default_cat, default_sp
             
         # 标准化标题：转小写，去除空格
         clean_title = title.lower().replace(" ", "")
@@ -98,19 +99,20 @@ class PublisherV3:
                 for sub in sub_names:
                     sub = sub.strip()
                     if sub and sub in clean_title:
-                        matches.append((cat.get("channel_cat_id"), len(sub)))
+                        matches.append((cat.get("channel_cat_id"), cat.get("sp_biz_type", default_sp), len(sub)))
             else:
                 if cat_name_lower in clean_title:
-                    matches.append((cat.get("channel_cat_id"), len(cat_name_lower)))
+                    matches.append((cat.get("channel_cat_id"), cat.get("sp_biz_type", default_sp), len(cat_name_lower)))
                     
         if matches:
             # 按照匹配名字的长度降序排列，取长度最长的一个
-            matches.sort(key=lambda x: x[1], reverse=True)
+            matches.sort(key=lambda x: x[2], reverse=True)
             matched_id = matches[0][0]
-            logger.info(f"Matched category for title '{title[:15]}...': {matched_id}")
-            return matched_id
+            matched_sp = matches[0][1]
+            logger.info(f"Matched category for title '{title[:15]}...': ID={matched_id}, sp_biz_type={matched_sp}")
+            return matched_id, matched_sp
             
-        return default_cat
+        return default_cat, default_sp
 
     def _format_sku_text(self, text: str) -> str:
         """将规格属性标准化为 '属性名:属性值;属性名2:属性值2' 格式，并限制每项在 1-20 字内"""
@@ -120,6 +122,9 @@ class PublisherV3:
         # 剥离可能夹带的 <span> 标签及 HTML 垃圾内容
         text = re.sub(r'<span[^>]*?>.*?</span>', '', text, flags=re.IGNORECASE | re.DOTALL)
         text = re.sub(r'<[^>]+>', '', text)
+        import html
+        text = html.unescape(text)
+        text = text.replace(">", ";")
         parts = text.split(";")
         formatted_parts = []
         for idx, part in enumerate(parts):
@@ -152,6 +157,10 @@ class PublisherV3:
         raw_text = re.sub(r'<span[^>]*?>.*?</span>', '', raw_text, flags=re.IGNORECASE | re.DOTALL)
         raw_text = re.sub(r'<[^>]+>', '', raw_text)
         
+        import html
+        raw_text = html.unescape(raw_text)
+        raw_text = raw_text.replace(">", ";")
+        
         # 2. 将中文冒号和分号标准化为英文
         raw_text = raw_text.replace("；", ";").replace("：", ":")
         
@@ -166,7 +175,7 @@ class PublisherV3:
         # 4. 如果有 valid_dimensions，则需要根据其提取并重构
         parts = raw_text.split(";")
         kv_pairs = {}
-        for part in parts:
+        for idx, part in enumerate(parts):
             part = part.strip()
             if not part:
                 continue
@@ -174,7 +183,7 @@ class PublisherV3:
                 k, v = part.split(":", 1)
                 k, v = k.strip()[:4], v.strip()
             else:
-                k, v = "规格", part.strip()
+                k, v = f"规格{idx+1}" if len(parts) > 1 else "规格", part.strip()
             kv_pairs[k] = v
             
         rebuilt_parts = []
@@ -189,6 +198,62 @@ class PublisherV3:
             rebuilt_parts.append(f"{dim}:{val[:20]}")
             
         return ";".join(rebuilt_parts)
+
+    def _align_image_sku_text(self, img_raw_text: str, first_dim: str) -> str:
+        """
+        根据有效公共维度的第一维名对齐规格图片的属性文本。
+        规格图片的属性文本只能有一维（即和第一维完全一致，如 '颜色:黑色'）。
+        """
+        if not img_raw_text:
+            return f"{first_dim}:默认"
+            
+        import re
+        # 1. 剥离 <span> 等 HTML 垃圾内容
+        img_raw_text = re.sub(r'<span[^>]*?>.*?</span>', '', img_raw_text, flags=re.IGNORECASE | re.DOTALL)
+        img_raw_text = re.sub(r'<[^>]+>', '', img_raw_text)
+        
+        import html
+        img_raw_text = html.unescape(img_raw_text)
+        img_raw_text = img_raw_text.replace(">", ";")
+        
+        # 2. 将中文冒号和分号标准化为英文
+        img_raw_text = img_raw_text.replace("；", ";").replace("：", ":")
+        
+        # 3. 提取值
+        parts = img_raw_text.split(";")
+        val = None
+        for idx, part in enumerate(parts):
+            part = part.strip()
+            if not part:
+                continue
+            if ":" in part:
+                k, v = part.split(":", 1)
+                k, v = k.strip()[:4], v.strip()
+                if k == first_dim or k == "规格" or k.startswith("规格"):
+                    val = v
+                    break
+            else:
+                k = f"规格{idx+1}" if len(parts) > 1 else "规格"
+                if k == first_dim:
+                    val = part.strip()
+                    break
+                
+        if val is None:
+            if parts:
+                first_part = parts[0].strip()
+                if ":" in first_part:
+                    val = first_part.split(":", 1)[1].strip()
+                else:
+                    val = first_part
+            else:
+                val = "默认"
+                
+        # 4. 清洗特殊字符并限制长度为 20 字
+        val = val.replace(":", "-").replace(";", "-").strip()
+        if not val:
+            val = "默认"
+            
+        return f"{first_dim}:{val[:20]}"
 
     def prepare_item_payload(self, source_data: Dict[str, Any]) -> Dict[str, Any]:
         """准备商品的创建 Payload，执行 SKU 自愈对齐、降级、字符清洗以及自动分类匹配"""
@@ -209,10 +274,12 @@ class PublisherV3:
 
         price_fen = int(float(source_data['price']) * 100)
         
+        cat_id, sp_biz_type = self._match_category(source_data.get('title'))
+        
         payload = {
             "item_biz_type": self.defaults.get("item_biz_type", 2),
-            "sp_biz_type": self.defaults.get("sp_biz_type", 2),
-            "channel_cat_id": self._match_category(source_data.get('title')),
+            "sp_biz_type": sp_biz_type,
+            "channel_cat_id": cat_id,
             "price": price_fen,
             "original_price": price_fen + 5000,
             "express_fee": self.defaults.get("express_fee", 0),
@@ -234,6 +301,7 @@ class PublisherV3:
         if len(sku_items_raw) >= 2:
             # 阶段 1：全局属性扫描，提取频次 >= 50% 的公共维度 (最多 2 个)
             import re
+            import html
             dimension_counts = {}
             temp_parsed = []
             for item in sku_items_raw:
@@ -243,18 +311,21 @@ class PublisherV3:
                 # 清除 HTML
                 raw_text = re.sub(r'<span[^>]*?>.*?</span>', '', raw_text, flags=re.IGNORECASE | re.DOTALL)
                 raw_text = re.sub(r'<[^>]+>', '', raw_text)
+                
+                raw_text = html.unescape(raw_text)
+                raw_text = raw_text.replace(">", ";")
                 raw_text = raw_text.replace("；", ";").replace("：", ":")
                 
                 parts = raw_text.split(";")
                 item_dims = []
-                for part in parts:
+                for idx, part in enumerate(parts):
                     part = part.strip()
                     if not part:
                         continue
                     if ":" in part:
                         k = part.split(":", 1)[0].strip()[:4]
                     else:
-                        k = "规格"
+                        k = f"规格{idx+1}" if len(parts) > 1 else "规格"
                     if k not in item_dims:
                         item_dims.append(k)
                         dimension_counts[k] = dimension_counts.get(k, 0) + 1
@@ -267,11 +338,11 @@ class PublisherV3:
             ordered_dims_seen = []
             for item, raw_text in temp_parsed:
                 parts = raw_text.split(";")
-                for part in parts:
+                for idx, part in enumerate(parts):
                     part = part.strip()
                     if not part:
                         continue
-                    k = part.split(":", 1)[0].strip()[:4] if ":" in part else "规格"
+                    k = part.split(":", 1)[0].strip()[:4] if ":" in part else (f"规格{idx+1}" if len(parts) > 1 else "规格")
                     if k not in ordered_dims_seen:
                         ordered_dims_seen.append(k)
 
@@ -323,7 +394,10 @@ class PublisherV3:
                             if src.startswith("//"): src = "https:" + src
                             elif not src.startswith("http"): src = "https://" + src
                             
-                            img_sku_text = self._align_sku_text(img['sku_text'], valid_dimensions)
+                            if valid_dimensions:
+                                img_sku_text = self._align_image_sku_text(img['sku_text'], valid_dimensions[0])
+                            else:
+                                img_sku_text = self._align_sku_text(img['sku_text'], [])
                             if img_sku_text in seen_img_skus:
                                 continue
                             seen_img_skus.add(img_sku_text)

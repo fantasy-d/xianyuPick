@@ -202,7 +202,8 @@ def test_publisher_v3_publish_item_deduplicates_conflict_skus(monkeypatch) -> No
     
     assert "sku_images" in last_payload
     assert len(last_payload["sku_images"]) == 2
-    assert last_payload["sku_images"][0]["sku_text"] == "颜色:红色;尺码:M"
+    assert last_payload["sku_images"][0]["sku_text"] == "颜色:红色"
+    assert last_payload["sku_images"][1]["sku_text"] == "颜色:蓝色"
 
     # 场景 2：3 维度商品，去重后仅剩下 1 个规格，触发二次降级退化
     three_dim_degraded_data = {
@@ -361,19 +362,19 @@ def test_publisher_v3_match_category_fuzzy_matches_title() -> None:
             
         def _load_categories(self):
             return [
-                {"channel_cat_id": "cat_towel", "channel_cat_name": "面巾纸/湿巾"},
-                {"channel_cat_id": "cat_shoes", "channel_cat_name": "男士帆布鞋"},
-                {"channel_cat_id": "cat_tang", "channel_cat_name": "男士唐装"},
+                {"channel_cat_id": "cat_towel", "channel_cat_name": "面巾纸/湿巾", "sp_biz_type": 21},
+                {"channel_cat_id": "cat_shoes", "channel_cat_name": "男士帆布鞋", "sp_biz_type": 2},
+                {"channel_cat_id": "cat_tang", "channel_cat_name": "男士唐装", "sp_biz_type": 2},
             ]
             
     pub = DummyPublisher()
     
     # 1. 匹配到复合词中的一部分
-    assert pub._match_category("维达面巾纸100抽") == "cat_towel"
+    assert pub._match_category("维达面巾纸100抽") == ("cat_towel", 21)
     # 2. 匹配到完整词
-    assert pub._match_category("潮流男士唐装短袖") == "cat_tang"
-    # 3. 没有匹配到时，回退到 default_id
-    assert pub._match_category("未知的无分类商品") == "default_id"
+    assert pub._match_category("潮流男士唐装短袖") == ("cat_tang", 2)
+    # 3. 没有匹配到时，回退到 default_id 和默认 sp_biz_type
+    assert pub._match_category("未知的无分类商品") == ("default_id", 2)
 
 
 def test_publisher_v3_publish_items_batch(monkeypatch) -> None:
@@ -442,6 +443,111 @@ def test_publisher_v3_publish_items_batch(monkeypatch) -> None:
     assert len(last_batch_payload["product_data"]) == 3
     assert last_batch_payload["product_data"][0]["item_key"] == "pub-111-0"
     assert last_batch_payload["product_data"][0]["publish_shop"][0]["title"] == "测试商品1"
+
+
+def test_publisher_v3_align_image_sku_text(monkeypatch) -> None:
+    mock_config = {
+        "base_url": "https://open.goofish.pro",
+        "appid": "mock_appid",
+        "app_secret": "mock_secret",
+        "default_config": {
+            "user_name": "test_user",
+            "province": "上海",
+            "city": "上海",
+            "district": "浦东",
+            "channel_cat_id": "default_cat"
+        }
+    }
+    
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(Path, "read_text", lambda self, encoding=None: json.dumps(mock_config))
+    
+    pub = PublisherV3()
+    
+    # 场景 1：多维度输入，提取并对齐第一维度
+    res1 = pub._align_image_sku_text("颜色:黑色;尺码:XL", "颜色")
+    assert res1 == "颜色:黑色"
+    
+    # 场景 2：第一维不在首位，提取第一维度
+    res2 = pub._align_image_sku_text("尺码:XL;颜色:白色", "颜色")
+    assert res2 == "颜色:白色"
+    
+    # 场景 3：图片属性只有纯值（无冒号）
+    res3 = pub._align_image_sku_text("红色", "颜色")
+    assert res3 == "颜色:红色"
+    
+    # 场景 4：空文本
+    res4 = pub._align_image_sku_text("", "颜色")
+    assert res4 == "颜色:默认"
+    
+    # 场景 5：敏感字符和超长字符处理
+    res5 = pub._align_image_sku_text("颜色:超级无敌爆款炫酷七彩粉;尺码:L", "颜色")
+    assert res5 == "颜色:超级无敌爆款炫酷七彩粉"
+    
+    res6 = pub._align_image_sku_text("颜色:非常非常非常非常非常非常非常非常非常非常长;尺码:L", "颜色")
+    assert res6 == "颜色:非常非常非常非常非常非常非常非常非常非常"
+
+
+def test_publisher_v3_escaped_html_and_gt_split(monkeypatch) -> None:
+    mock_config = {
+        "base_url": "https://open.goofish.pro",
+        "appid": "mock_appid",
+        "app_secret": "mock_secret",
+        "default_config": {
+            "user_name": "test_user",
+            "province": "上海",
+            "city": "上海",
+            "district": "浦东",
+            "channel_cat_id": "default_cat"
+        }
+    }
+    
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(Path, "read_text", lambda self, encoding=None: json.dumps(mock_config))
+    
+    pub = PublisherV3()
+    
+    # 模拟包含 &gt; 的多维超长 SKU，前缀有些许不同（不同的款式/图案）
+    source_data = {
+        "title": "测试蚊帐",
+        "images": ["https://example.com/main.jpg"],
+        "price": 100.0,
+        "sku_items": [
+            {
+                "sku_text": "双开门-全底【三只熊】加密帐纱+手机袋+充电口&gt;【加粗加高烤漆支架】1.5m*1.9米*高1.7米",
+                "price": 110.0,
+                "stock": 50
+            },
+            {
+                "sku_text": "双开门-全底【兔子粉】加密帐纱+手机袋+充电口&gt;【加粗加高烤漆支架】1.8m*2.0米*高1.7米",
+                "price": 112.0,
+                "stock": 60
+            },
+            {
+                "sku_text": "单买防尘顶【没支架没账纱】&gt;【加粗加高烤漆支架】1.5m*2.0米*高1.7米",
+                "price": 56.0,
+                "stock": 70
+            }
+        ]
+    }
+    
+    payload = pub.prepare_item_payload(source_data)
+    
+    # 校验：应该保留为多规格，没有退化为一口价
+    assert "sku_items" in payload
+    assert len(payload["sku_items"]) == 3
+    
+    # 校验：规格1和规格2被成功解析对齐且分别进行了 20 字符截断
+    expected_sku1 = "规格1:双开门-全底【三只熊】加密帐纱+手机袋+;规格2:【加粗加高烤漆支架】1.5m*1.9米*"
+    assert payload["sku_items"][0]["sku_text"] == expected_sku1
+    
+    expected_sku2 = "规格1:双开门-全底【兔子粉】加密帐纱+手机袋+;规格2:【加粗加高烤漆支架】1.8m*2.0米*"
+    assert payload["sku_items"][1]["sku_text"] == expected_sku2
+
+    expected_sku3 = "规格1:单买防尘顶【没支架没账纱】;规格2:【加粗加高烤漆支架】1.5m*2.0米*"
+    assert payload["sku_items"][2]["sku_text"] == expected_sku3
+
+
 
 
 

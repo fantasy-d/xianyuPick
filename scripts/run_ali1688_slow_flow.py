@@ -362,16 +362,6 @@ def _clean_html_span(text: str) -> str:
     parts = [p.strip() for p in text.split(";") if p.strip()]
     return ";".join(parts)
 
-def _generate_sku_excel_file(parsed_data: dict, output_path: Path):
-    try:
-        from openpyxl import Workbook
-        wb = Workbook(); ws = wb.active; ws.title = "SKU详情"
-        ws.append(["规格名称", "价格", "库存", "SpecId", "规格图片", "数据来源"])
-        for sku in parsed_data.get("sku_details", []):
-            ws.append([sku.get("attributes"), sku.get("price"), sku.get("stock"), sku.get("spec_id"), sku.get("image"), sku.get("source")])
-        wb.save(output_path)
-    except: pass
-
 
 def _parse_captured_api_data(captured_responses: list[dict], logger):
     parsed_result = {"sku_details": [], "images": []}
@@ -999,7 +989,6 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
     page.on("response", on_resp)
     
     physical_success = False
-    excel_file = output_dir / f"{safe_title}_{offer_id}.xlsx"
     
     try:
         url = f"https://detail.1688.com/offer/{offer_id}.html"
@@ -1020,6 +1009,14 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
         # ── 核心：直接取完整渲染后的 HTML，用 Scrapling 解析 ──
         logger.info("    [HTML] Fetching rendered page HTML for Scrapling parsing...")
         html_content = await page.content()
+
+        # 保存原始 HTML 到本地 detail_{offer_id}.html
+        html_file = output_dir / f"detail_{offer_id}.html"
+        try:
+            html_file.write_text(html_content, encoding="utf-8")
+            logger.info(f"    [HTML] Saved raw page HTML to {html_file}")
+        except Exception as html_err:
+            logger.warning(f"    [HTML] Failed to save raw HTML (non-fatal): {html_err}")
 
         parsed_html = Ali1688SourceAdapter.extract_detail_sku_and_images(html_content)
         logger.info(f"    [HTML] Scrapling parsed: {len(parsed_html['sku_details'])} SKU entries, {len(parsed_html['images'])} images")
@@ -1167,24 +1164,22 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
         clean_final = list(dict.fromkeys([_clean_image_url(u) for u in all_images if u]))
         clean_final = list(filter(None, clean_final))[:9]
 
-        # 生成 SKU Excel
+        # 清洗 SKU 规格属性
         if sku_details:
             for sku in sku_details:
                 if sku.get("attributes"):
                     sku["attributes"] = _clean_html_span(sku["attributes"])
-            logger.info(f"    [HTML] Generating SKU Excel from {len(sku_details)} entries...")
-            _generate_sku_excel_file({"sku_details": sku_details}, excel_file)
 
-        if excel_file.exists() or clean_final:
-            logger.info(f"    [Step 4/4] Success! Excel: {excel_file.exists()}, Images: {len(clean_final)}")
-            return {"status": "success", "images": clean_final}
+        if sku_details or clean_final:
+            logger.info(f"    [Step 4/4] Success! Extracted SKUs: {len(sku_details)}, Images: {len(clean_final)}")
+            return {"status": "success", "images": clean_final, "sku_details": sku_details}
             
     except Exception as e:
         logger.error(f"    [Browser Error] Rank {index}: {e}")
     finally:
         await page.close()
         
-    return {"status": "failed", "images": []}
+    return {"status": "failed", "images": [], "sku_details": []}
 
 
 async def _run(args):
@@ -1422,6 +1417,8 @@ async def _run(args):
             res = await _export_sku_from_detail_page(context, item_data, output_dir, i, logger)
             item_data["status"] = res["status"]
             item_data["images"] = res.get("images", [])
+            item_data["sku_items"] = res.get("sku_details", [])
+            item_data["sku_count"] = len(res.get("sku_details", []))
             sku_results.append(item_data)
             
         (output_dir / "summary.json").write_text(json.dumps(sku_results, ensure_ascii=False, indent=2))

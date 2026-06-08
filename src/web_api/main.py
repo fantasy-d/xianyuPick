@@ -22,6 +22,44 @@ CONFIG_PATH = BASE_DIR / "config" / "database.json"
 DB_CONFIG = json.load(open(CONFIG_PATH))
 DB_CONFIG["cursorclass"] = pymysql.cursors.DictCursor
 def get_db_conn(): return pymysql.connect(**DB_CONFIG)
+
+def init_db_schema():
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        
+        # 1. 创建 ali1688_skus 表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ali1688_skus (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                source_id INT NOT NULL,
+                sku_text VARCHAR(255) NOT NULL,
+                price DECIMAL(10,2) NOT NULL,
+                stock INT NOT NULL,
+                spec_id VARCHAR(50) DEFAULT '',
+                image VARCHAR(1024) DEFAULT '',
+                FOREIGN KEY (source_id) REFERENCES ali1688_sources(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """)
+        
+        # 2. 丢弃不需要的库内 HTML 表 ali1688_source_htmls
+        cursor.execute("DROP TABLE IF EXISTS ali1688_source_htmls;")
+        
+        # 3. 自愈添加 html_path 字段以关联本地 HTML 物理文件
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN html_path VARCHAR(1024) DEFAULT '';")
+        except Exception:
+            pass  # 如果列已经存在则会报错，直接忽略即可
+            
+        conn.commit()
+        conn.close()
+        logger.info("[DB] Schema initialization complete (dropped ali1688_source_htmls, ensured html_path in ali1688_sources).")
+    except Exception as e:
+        logger.error(f"[DB] Schema initialization failed: {e}")
+
+# 执行自动建表自愈
+init_db_schema()
+
 def sanitize_dir_name(name: str) -> str:
     clean = re.sub(r'\s+', '', str(name))
     return re.sub(r'[\\/:*?"<>|]', '_', clean).strip()[:60]
@@ -30,6 +68,9 @@ def _clean_html_span(text: str) -> str:
     if not text: return ""
     text = re.sub(r'<span[^>]*?>.*?</span>', '', text, flags=re.IGNORECASE | re.DOTALL)
     text = re.sub(r'<[^>]+>', '', text)
+    import html
+    text = html.unescape(text)
+    text = text.replace(">", ";")
     parts = [p.strip() for p in text.split(";") if p.strip()]
     return ";".join(parts)
 
@@ -167,6 +208,20 @@ def retry_task(task_id: str):
     if row['status'] == '已完成':
         if is_today:
             logger.info(f"Performing same-day overwrite for task {task_id}")
+            
+            # 物理清理对应的本地 HTML 文件
+            try:
+                cursor.execute("SELECT html_path FROM ali1688_sources WHERE task_id = %s", (task_id,))
+                sources = cursor.fetchall()
+                for s in sources:
+                    if s.get("html_path"):
+                        p = BASE_DIR / s["html_path"] if not Path(s["html_path"]).is_absolute() else Path(s["html_path"])
+                        if p.exists() and p.is_file():
+                            p.unlink()
+                            logger.info(f"[Cleanup] Physically deleted local HTML: {p}")
+            except Exception as cleanup_err:
+                logger.error(f"[Cleanup] Failed to clean HTML files for task {task_id}: {cleanup_err}")
+
             cursor.execute("DELETE FROM xianyu_items WHERE task_id = %s", (task_id,))
             cursor.execute("DELETE FROM ali1688_sources WHERE task_id = %s", (task_id,))
             cursor.execute("UPDATE tasks SET status = '排队中', msg = '同日重扫中...', progress = 0, pgid = NULL, checkpoint = NULL WHERE id = %s", (task_id,))
@@ -186,6 +241,20 @@ def delete_task(task_id: str):
     logger.info(f"Full delete requested for task: {task_id}")
     pause_task(task_id)
     conn = get_db_conn(); cursor = conn.cursor()
+    
+    # 物理清理对应的本地 HTML 文件（双重保障）
+    try:
+        cursor.execute("SELECT html_path FROM ali1688_sources WHERE task_id = %s", (task_id,))
+        sources = cursor.fetchall()
+        for s in sources:
+            if s.get("html_path"):
+                p = BASE_DIR / s["html_path"] if not Path(s["html_path"]).is_absolute() else Path(s["html_path"])
+                if p.exists() and p.is_file():
+                    p.unlink()
+                    logger.info(f"[Cleanup] Physically deleted local HTML: {p}")
+    except Exception as cleanup_err:
+        logger.warning(f"[Cleanup] Failed to clean HTML files for deleted task {task_id}: {cleanup_err}")
+
     cursor.execute("SELECT root_dir FROM tasks WHERE id = %s", (task_id,))
     row = cursor.fetchone()
     if row and row['root_dir']:
@@ -197,6 +266,16 @@ def delete_task(task_id: str):
                 logger.info(f"Physical folder deleted: {folder_path}")
             except Exception as e:
                 logger.error(f"Failed to delete folder {folder_path}: {e}")
+                
+    # 从爆款和 1688 货源表中硬删除数据
+    try:
+        cursor.execute("DELETE FROM xianyu_items WHERE task_id = %s", (task_id,))
+        cursor.execute("DELETE FROM ali1688_sources WHERE task_id = %s", (task_id,))
+        conn.commit()
+        logger.info(f"[DB] Cleared database records for task {task_id}")
+    except Exception as db_err:
+        logger.error(f"[DB] Failed to clear records for task {task_id}: {db_err}")
+
     Task.update(task_id, status="已删除", msg="任务及物理文件已清理", is_deleted=1, pgid=None)
     conn.close(); return {"status": "ok"}
 
@@ -318,11 +397,40 @@ def load_source_skus_from_excel(source_id: int) -> list:
         logger.error(f"Failed to load skus from excel for source {source_id}: {e}")
         return []
 
+
+def load_source_skus_from_db(source_id: int):
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute("SELECT sku_text, price, stock, spec_id, image FROM ali1688_skus WHERE source_id = %s", (source_id,))
+        rows = cursor.fetchall()
+        conn.close()
+        
+        if rows:
+            skus = []
+            for r in rows:
+                skus.append({
+                    "sku_text": _clean_html_span(r["sku_text"]),
+                    "price": float(r["price"]),
+                    "stock": int(r["stock"]),
+                    "spec_id": r["spec_id"],
+                    "image": r["image"]
+                })
+            return skus
+    except Exception as e:
+        logger.error(f"Failed to load skus from DB for source {source_id}: {e}")
+        
+    # 兼容回退读取 Excel 物理文件
+    logger.warning(f"[Fallback] DB skus empty or failed for source {source_id}. Loading from Excel...")
+    return load_source_skus_from_excel(source_id)
+
+
 @app.get("/api/source_skus/{source_id}")
 def get_source_skus(source_id: int):
     logger.info(f"Fetching SKU list for source_id: {source_id}")
-    skus = load_source_skus_from_excel(source_id)
+    skus = load_source_skus_from_db(source_id)
     return {"skus": skus}
+
 
 @app.post("/api/publish/batch")
 async def batch_publish_to_xianyu(req: dict = {}):
@@ -349,7 +457,7 @@ async def batch_publish_to_xianyu(req: dict = {}):
         custom_title = custom_info.get("title") or source['title']
 
         # 获取默认规格并进行加价 30 自愈处理
-        skus = load_source_skus_from_excel(sid)
+        skus = load_source_skus_from_db(sid)
         sku_items = []
         sku_images = []
 

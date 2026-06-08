@@ -24,6 +24,35 @@ def get_db_conn():
     config["cursorclass"] = pymysql.cursors.DictCursor
     return pymysql.connect(**config)
 
+def init_db_schema():
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS ali1688_skus (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                source_id INT NOT NULL,
+                sku_text VARCHAR(255) NOT NULL,
+                price DECIMAL(10,2) NOT NULL,
+                stock INT NOT NULL,
+                spec_id VARCHAR(50) DEFAULT '',
+                image VARCHAR(1024) DEFAULT '',
+                FOREIGN KEY (source_id) REFERENCES ali1688_sources(id) ON DELETE CASCADE
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """)
+        cursor.execute("DROP TABLE IF EXISTS ali1688_source_htmls;")
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN html_path VARCHAR(1024) DEFAULT '';")
+        except Exception:
+            pass
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
+
+# 执行创表自愈
+init_db_schema()
+
 def extract_json(text):
     try:
         import re
@@ -132,7 +161,19 @@ async def main():
                 summary_path = item_dir / "summary.json"
                 logger.info(f"[Sync-DB] Checking file: {summary_path}")
                 
-                # 1. 删除旧数据
+                # 1. 删除旧数据时物理清理旧 HTML 文件
+                try:
+                    _cursor.execute("SELECT html_path FROM ali1688_sources WHERE task_id = %s AND item_id = %s", (task_id, item_db_id))
+                    old_sources = _cursor.fetchall()
+                    for os_rec in old_sources:
+                        if os_rec.get("html_path"):
+                            p = BASE_DIR / os_rec["html_path"] if not Path(os_rec["html_path"]).is_absolute() else Path(os_rec["html_path"])
+                            if p.exists() and p.is_file():
+                                p.unlink()
+                                logger.info(f"[Sync-DB] Physically deleted old local HTML: {p}")
+                except Exception as clean_err:
+                    logger.warning(f"[Sync-DB] Failed to clean old HTML files: {clean_err}")
+
                 _cursor.execute("DELETE FROM ali1688_sources WHERE task_id = %s AND item_id = %s", (task_id, item_db_id))
                 logger.info(f"[Sync-DB] Old records cleared for Task:{task_id}")
                 
@@ -146,24 +187,52 @@ async def main():
                         img_json = json.dumps(res.get("images", []), ensure_ascii=False)
                         min_price = res.get('min_price', 0); sku_count = 0
                         
-                        # 尝试从 Excel 提取更细的数据
-                        xlsx = list(item_dir.glob(f"*_{offer_id}.xlsx"))
-                        if xlsx:
-                            try:
-                                from openpyxl import load_workbook
-                                wb = load_workbook(filename=xlsx[0], read_only=True)
-                                ws = wb.active
-                                prices = [float(row[1]) for row in ws.iter_rows(min_row=2, max_col=2, values_only=True) if row[1]]
-                                if prices:
-                                    min_price = min(prices); sku_count = len(prices)
-                            except: pass
+                        # 从内存 JSON 提取 SKU 规格和价格数据
+                        sku_items = res.get("sku_items", [])
+                        if sku_items:
+                            prices = [float(s.get("price") or 0.0) for s in sku_items if s.get("price") is not None]
+                            if prices:
+                                min_price = min(prices)
+                            sku_count = len(sku_items)
                         
+                        # 计算本地 HTML 相对路径以建立对应关系
+                        html_file = item_dir / f"detail_{offer_id}.html"
+                        html_rel_path = ""
+                        if html_file.exists():
+                            try:
+                                html_rel_path = str(html_file.relative_to(BASE_DIR))
+                            except Exception:
+                                html_rel_path = str(html_file.resolve())
+
                         # 执行插入
                         logger.info(f"[Sync-DB] Inserting source: {res['title'][:20]} (Price: {min_price})")
                         _cursor.execute("""
-                            INSERT INTO ali1688_sources (item_id, task_id, title, offer_id, min_price, sku_count, source_url, images, drop_reason)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (item_db_id, task_id, res['title'], offer_id, min_price, sku_count, res['item_url'], img_json, res.get('drop_reason')))
+                            INSERT INTO ali1688_sources (item_id, task_id, title, offer_id, min_price, sku_count, source_url, images, drop_reason, html_path)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (item_db_id, task_id, res['title'], offer_id, min_price, sku_count, res['item_url'], img_json, res.get('drop_reason'), html_rel_path))
+                        source_id = _cursor.lastrowid
+
+                        # 2. 写入 SKU 到数据库 (ali1688_skus 表)
+                        if sku_items:
+                            try:
+                                # 先清空该货源下已有的旧 SKU
+                                _cursor.execute("DELETE FROM ali1688_skus WHERE source_id = %s", (source_id,))
+
+                                for sku in sku_items:
+                                    sku_text = str(sku.get("attributes") or "")
+                                    price = float(sku.get("price")) if sku.get("price") is not None else 0.0
+                                    stock = int(sku.get("stock")) if sku.get("stock") is not None else 0
+                                    spec_id = str(sku.get("spec_id") or "")
+                                    image = str(sku.get("image") or "")
+
+                                    _cursor.execute("""
+                                        INSERT INTO ali1688_skus (source_id, sku_text, price, stock, spec_id, image)
+                                        VALUES (%s, %s, %s, %s, %s, %s)
+                                    """, (source_id, sku_text, price, stock, spec_id, image))
+                                logger.info(f"[Sync-DB] Imported {len(sku_items)} SKUs into database for source_id: {source_id}")
+                            except Exception as db_sku_err:
+                                logger.error(f"[Sync-DB] Failed to import SKUs to database: {db_sku_err}")
+
                         count += 1
                     
                     _conn.commit()

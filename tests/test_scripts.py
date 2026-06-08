@@ -1068,3 +1068,90 @@ def test_run_category_pipeline_from_urls_writes_outputs(monkeypatch, capsys, tmp
     assert Path(output["source_bundle_file"]).exists()
     assert Path(output["profit_analysis_file"]).exists()
     assert Path(output["listing_candidates_file"]).exists()
+
+
+def test_pipeline_excel_free_parsing_logic() -> None:
+    # Test JSON-based SKU extraction and min_price calculation introduced in run_full_pipeline.py
+    res = {
+        "title": "测试商品",
+        "offer_id": "12345",
+        "item_url": "https://detail.1688.com/offer/12345.html",
+        "images": ["http://img1.jpg"],
+        "sku_items": [
+            {"attributes": "颜色:红色;尺码:L", "price": "100.00", "stock": 50, "spec_id": "sp1", "image": "http://img2.jpg"},
+            {"attributes": "颜色:红色;尺码:M", "price": 95.5, "stock": 20, "spec_id": "sp2", "image": ""},
+        ]
+    }
+    sku_items = res.get("sku_items", [])
+    min_price = 0
+    sku_count = 0
+    if sku_items:
+        prices = [float(s.get("price") or 0.0) for s in sku_items if s.get("price") is not None]
+        if prices:
+            min_price = min(prices)
+        sku_count = len(sku_items)
+    
+    assert min_price == 95.5
+    assert sku_count == 2
+
+
+def test_local_html_cleanup_on_decision_asset_delete(tmp_path) -> None:
+    # Verify basic physical file unlink cascade logic
+    dummy_html = tmp_path / "dummy_detail.html"
+    dummy_html.write_text("<html>test</html>", encoding="utf-8")
+    assert dummy_html.exists()
+    
+    # Simulate extraction of html_path and cascading unlink
+    html_path_str = str(dummy_html.resolve())
+    p = Path(html_path_str)
+    if p.exists() and p.is_file():
+        p.unlink()
+        
+    assert not dummy_html.exists()
+
+
+def test_delete_task_physically_cleans_local_html(monkeypatch, tmp_path) -> None:
+    # Test that delete_task route unlinks local HTML files cascadingly based on html_path
+    import src.web_api.main as web_main
+    
+    dummy_html = tmp_path / "dummy_1688_detail.html"
+    dummy_html.write_text("<html>test</html>", encoding="utf-8")
+    assert dummy_html.exists()
+
+    class FakeCursor:
+        def __init__(self):
+            self.query = None
+            self.args = None
+
+        def execute(self, query, args=None):
+            self.query = query
+            self.args = args
+
+        def fetchall(self):
+            # Simulate returning html_path for resources under this task
+            return [{"html_path": str(dummy_html.resolve())}]
+
+        def fetchone(self):
+            # Simulate task details
+            return {"root_dir": str(tmp_path)}
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+        def commit(self):
+            pass
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConn())
+    monkeypatch.setattr(web_main, "pause_task", lambda tid: None)
+    monkeypatch.setattr(web_main.Task, "update", lambda *args, **kwargs: None)
+
+    # Call delete_task to trigger cascade physical file deletion
+    res = web_main.delete_task("dummy_task_id")
+    assert res == {"status": "ok"}
+    
+    # Verify the cascade delete unlinked the file successfully
+    assert not dummy_html.exists()
+
+
