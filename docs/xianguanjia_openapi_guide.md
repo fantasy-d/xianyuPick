@@ -28,7 +28,8 @@
 ### 2.2 商品管理
 1.  **创建商品（单个）** (`POST /api/open/product/create`)
     *   *要点*：主价格字段 `price` 需乘以 100 转换为“分”单位传入。图片最多上传 9 张。
-2.  **创建商品（批量）** (`POST /api/open/product/batch_create`)
+2.  **创建商品（批量）** (`POST /api/open/product/batchCreate`)
+    *   *要点*：支持在一次 HTTP 请求中批量创建最多 50 个商品。各商品的入参字段与单创建接口一致，但包装在 `product_data` 数组下，各商品必须通过唯一 `item_key` 作为主键标识。
 3.  **正式上架商品** (`POST /api/open/product/publish`)
     *   *要点*：通过单个创建接口创建的商品仅处于“草稿”或“待发布”状态，必须调用上架接口传入商品 ID 才能在闲鱼端公开可见。
 4.  **编辑商品** (`POST /api/open/product/update`)
@@ -69,3 +70,14 @@
     1.  **接口本地缓存**：在第一次运行或缓存缺失时调用 `/api/open/product/category/list` 获取闲鱼类目全表，缓存在 [xianyu_categories.json](file:///Users/mac/PycharmProjects/mytools/xianyu-tools/config/xianyu_categories.json) 中，实现秒级零延迟读取。
     2.  **长短语优先匹配**：按类目名称的长度降序打分匹配商品标题（优先选择最精确的词）。同时支持多词复合匹配（如“平衡垫/球/盘”只要标题含有其一即可命中）。
     3.  **缺省配置回退**：若标题无法命中任何分类，自动以 [openapi.json](file:///Users/mac/PycharmProjects/mytools/xianyu-tools/config/openapi.json) 中配置的默认 ID 作为安全兜底。
+
+### 3.4 批量创建接口的 Chunk 分批与草稿自愈自动上架
+*   **规则限制**：批量创建商品接口 `/api/open/product/batchCreate` 有两个限制：
+    1. 单次 HTTP 请求中商品的数量上限为 50 个；
+    2. 创建成功后，商品在后台仅为“草稿”状态，不会公开可见，必须再次调用正式上架接口 `/api/open/product/publish`。
+*   **实施策略**：
+    1.  **Chunk 物理分批**：在 `publish_items_batch` 中，当待发布的商品总数超过 50 个时，自动按每组最多 50 个商品切片（Chunking），独立进行签名计算和 HTTP 发送，对上游调用方屏蔽底层分批逻辑。
+    2.  **唯一 Key 映射召回**：通过拼接唯一商品发布键 `pub-{source_id}-{index}` 作为 `item_key` 传入。接口返回批量结果后，依次提取成功商品的 `product_id`，利用 `item_key` 倒查召回原数据库中的 `source_id`。
+    3.  **串行事务上架**：对批量创建成功的 `product_id`，在后端立即自动、串行执行 `/api/open/product/publish` 正式上架，保证商品能直接公开发售，避免商品驻留在草稿箱中。
+    4.  **容错隔离**：对于批量创建成功但上架失败的商品，或部分创建失败的商品，将其标记为 `failed` 并记录详细错误原因，而不影响同批次其他商品的创建和上架。
+

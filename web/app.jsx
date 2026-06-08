@@ -317,68 +317,49 @@ const App = () => {
         }
         setBatchPublishing(true);
         
-        for (const dbId of selectedIds) {
-            if (batchStatusMap[dbId] === 'done') {
-                continue;
-            }
-            
+        const toPublishIds = selectedIds.filter(dbId => batchStatusMap[dbId] !== 'done');
+        if (toPublishIds.length === 0) {
+            setBatchPublishing(false);
+            return;
+        }
+        
+        toPublishIds.forEach(dbId => {
             setBatchStatusMap(prev => ({ ...prev, [dbId]: 'publishing' }));
-            
-            try {
-                const resSkus = await fetch(`/api/source_skus/${dbId}`).then(r => r.json());
-                const src = selectedItem.sources.find(s => s.db_id === dbId);
-                if (!src) continue;
-                
-                const payload = { title: src.title.slice(0, 60) };
-                
-                if (resSkus.skus && resSkus.skus.length > 1) {
-                    payload.sku_items = resSkus.skus.map(s => ({
-                        sku_text: s.sku_text,
-                        price: parseFloat((parseFloat(s.price) + 30).toFixed(2)),
-                        stock: Math.min(9999, parseInt(s.stock) || 1)
-                    }));
-                    
-                    const skuImages = [];
-                    resSkus.skus.forEach(s => {
-                        if (s.image) {
-                            const firstAttr = s.sku_text.split(';')[0];
-                            skuImages.push({
-                                src: s.image,
-                                width: 800,
-                                height: 800,
-                                sku_text: firstAttr
-                            });
-                        }
-                    });
-                    if (skuImages.length > 0) {
-                        payload.sku_images = skuImages;
-                    }
-                } else if (resSkus.skus && resSkus.skus.length === 1) {
-                    payload.price = parseFloat((parseFloat(resSkus.skus[0].price) + 30).toFixed(2));
-                } else {
-                    payload.price = parseFloat((parseFloat(src.min_price) + 30).toFixed(2));
-                }
-                
-                const resPub = await fetch(`/api/publish/${dbId}`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(payload)
-                }).then(r => r.json());
-                
-                if (resPub.status === 'success') {
+        });
+
+        try {
+            const resBatch = await fetch('/api/publish/batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_ids: toPublishIds })
+            }).then(r => r.json());
+
+            if (resBatch.success) {
+                resBatch.success.forEach(item => {
+                    const dbId = item.source_id;
                     setBatchStatusMap(prev => ({ ...prev, [dbId]: 'done' }));
-                    setBatchResultMap(prev => ({ ...prev, [dbId]: resPub }));
-                } else {
-                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
-                    setBatchResultMap(prev => ({ ...prev, [dbId]: resPub }));
-                }
-            } catch (e) {
-                console.error(`批量发布货源 ${dbId} 失败:`, e);
-                setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
-                setBatchResultMap(prev => ({ ...prev, [dbId]: { msg: '网络或连接出错' } }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'success', xianyu_item_id: item.product_id, published_url: item.published_url } }));
+                });
             }
-            
-            await new Promise(r => setTimeout(r, 1000));
+            if (resBatch.failed) {
+                resBatch.failed.forEach(item => {
+                    const dbId = item.source_id;
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: item.msg } }));
+                });
+            }
+            if (resBatch.error) {
+                toPublishIds.forEach(dbId => {
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: resBatch.error } }));
+                });
+            }
+        } catch (e) {
+            console.error("批量发布失败:", e);
+            toPublishIds.forEach(dbId => {
+                setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: '网络或连接出错' } }));
+            });
         }
         
         setBatchPublishing(false);

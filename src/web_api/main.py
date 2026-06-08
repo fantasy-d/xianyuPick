@@ -250,16 +250,15 @@ def get_task_details(task_id: str):
         logger.error(f"Failed to fetch details for task {task_id}: {e}")
         return {"error": str(e)}
 
-@app.get("/api/source_skus/{source_id}")
-def get_source_skus(source_id: int):
-    logger.info(f"Fetching SKU list for source_id: {source_id}")
+def load_source_skus_from_excel(source_id: int) -> list:
+    """从本地 excel 中加载商品的默认规格数据"""
     try:
         conn = get_db_conn(); cursor = conn.cursor()
         cursor.execute("SELECT * FROM ali1688_sources WHERE id = %s", (source_id,))
         source = cursor.fetchone()
         if not source:
             conn.close()
-            return {"skus": []}
+            return []
             
         task_id = source['task_id']
         item_id = source['item_id']
@@ -269,7 +268,7 @@ def get_source_skus(source_id: int):
         item = cursor.fetchone()
         if not item:
             conn.close()
-            return {"skus": []}
+            return []
             
         rank = item['rank_index']
         item_title = item['title']
@@ -314,10 +313,144 @@ def get_source_skus(source_id: int):
                                 "spec_id": str(r[3]) if len(r) > 3 and r[3] is not None else "",
                                 "image": img_val if is_valid_img else ""
                             })
-        return {"skus": skus}
+        return skus
     except Exception as e:
-        logger.error(f"Failed to fetch SKU for source {source_id}: {e}")
-        return {"error": str(e), "skus": []}
+        logger.error(f"Failed to load skus from excel for source {source_id}: {e}")
+        return []
+
+@app.get("/api/source_skus/{source_id}")
+def get_source_skus(source_id: int):
+    logger.info(f"Fetching SKU list for source_id: {source_id}")
+    skus = load_source_skus_from_excel(source_id)
+    return {"skus": skus}
+
+@app.post("/api/publish/batch")
+async def batch_publish_to_xianyu(req: dict = {}):
+    logger.info(f"OpenAPI batch publish request: {req}")
+    source_ids = req.get("source_ids", [])
+    if not source_ids:
+        return {"success": [], "failed": [{"source_id": 0, "msg": "未选中任何商品"}]}
+
+    custom_configs = req.get("custom_configs", {})
+    conn = get_db_conn(); cursor = conn.cursor()
+
+    items_to_publish = []
+    failed_items = []
+
+    for sid in source_ids:
+        cursor.execute("SELECT * FROM ali1688_sources WHERE id = %s", (sid,))
+        source = cursor.fetchone()
+        if not source:
+            failed_items.append({"source_id": sid, "msg": "货源数据在数据库中不存在"})
+            continue
+
+        images = json.loads(source['images'] or "[]")
+        custom_info = custom_configs.get(str(sid)) or {}
+        custom_title = custom_info.get("title") or source['title']
+
+        # 获取默认规格并进行加价 30 自愈处理
+        skus = load_source_skus_from_excel(sid)
+        sku_items = []
+        sku_images = []
+
+        if skus:
+            for s in skus:
+                sku_items.append({
+                    "sku_text": s["sku_text"],
+                    "price": round(s["price"] + 30.0, 2),
+                    "stock": min(9999, int(s["stock"]) or 1)
+                })
+            
+            seen_img_skus = set()
+            for s in skus:
+                if s.get("image"):
+                    first_attr = s["sku_text"].split(';')[0]
+                    if first_attr not in seen_img_skus:
+                        seen_img_skus.add(first_attr)
+                        sku_images.append({
+                            "src": s["image"],
+                            "width": 800,
+                            "height": 800,
+                            "sku_text": first_attr
+                        })
+            
+            final_price = min(s['price'] for s in sku_items)
+        else:
+            custom_price = custom_info.get("price")
+            if custom_price is not None:
+                final_price = float(custom_price)
+            else:
+                final_price = float(source['min_price']) + 30
+
+        item_data = {
+            "source_id": sid,
+            "title": custom_title[:60],
+            "description": f"【精选货源】\n{custom_title}\n品质保障，欢迎选购。",
+            "price": final_price,
+            "images": images,
+        }
+        if sku_items:
+            item_data["sku_items"] = sku_items
+        if sku_images:
+            item_data["sku_images"] = sku_images
+
+        items_to_publish.append(item_data)
+
+    conn.close()
+
+    # 调用批量上架自愈核心
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    try:
+        publisher = PublisherV3()
+        batch_res = publisher.publish_items_batch(items_to_publish)
+        
+        # 将结果写回数据库记录并整合返回
+        conn = get_db_conn(); cursor = conn.cursor()
+        final_success = []
+        final_failed = failed_items
+        
+        for succ in batch_res.get("success", []):
+            sid = succ["source_id"]
+            pid = succ["product_id"]
+            pub_url = f"https://www.goofish.com/item?id={pid}"
+            
+            cursor.execute("SELECT task_id FROM ali1688_sources WHERE id = %s", (sid,))
+            src = cursor.fetchone()
+            task_id = src['task_id'] if src else ""
+            
+            cursor.execute("INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url) VALUES (%s,%s,%s,%s,%s,%s)",
+                          (task_id, sid, pid, 'success', None, pub_url))
+            final_success.append({
+                "source_id": sid,
+                "product_id": pid,
+                "published_url": pub_url,
+                "status": "success"
+            })
+            
+        for fail in batch_res.get("failed", []):
+            sid = fail["source_id"]
+            msg = fail["msg"]
+            
+            cursor.execute("SELECT task_id FROM ali1688_sources WHERE id = %s", (sid,))
+            src = cursor.fetchone()
+            task_id = src['task_id'] if src else ""
+            
+            cursor.execute("INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url) VALUES (%s,%s,%s,%s,%s,%s)",
+                          (task_id, sid, None, 'failed', msg, None))
+            final_failed.append({
+                "source_id": sid,
+                "msg": msg,
+                "status": "failed"
+            })
+            
+        conn.commit()
+        conn.close()
+        
+        return {"success": final_success, "failed": final_failed}
+        
+    except Exception as e:
+        logger.error(f"Batch publisher global failure: {e}")
+        return {"error": str(e), "success": [], "failed": failed_items}
 
 @app.post("/api/publish/{source_id}")
 async def publish_to_xianyu(source_id: int, req: dict = {}):

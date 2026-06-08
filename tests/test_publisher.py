@@ -376,4 +376,73 @@ def test_publisher_v3_match_category_fuzzy_matches_title() -> None:
     assert pub._match_category("未知的无分类商品") == "default_id"
 
 
+def test_publisher_v3_publish_items_batch(monkeypatch) -> None:
+    mock_config = {
+        "base_url": "https://open.goofish.pro",
+        "appid": "mock_appid",
+        "app_secret": "mock_secret",
+        "default_config": {
+            "user_name": "test_user",
+            "province": "上海",
+            "city": "上海",
+            "district": "浦东",
+            "channel_cat_id": "default_cat"
+        }
+    }
+    
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(Path, "read_text", lambda self, encoding=None: json.dumps(mock_config))
+
+    last_batch_payload = {}
+    class FakeResponse:
+        def json(self):
+            return {
+                "code": 0,
+                "data": {
+                    "success": [
+                        {"item_key": "pub-111-0", "product_id": 999111, "product_status": 10},
+                        {"item_key": "pub-222-1", "product_id": 999222, "product_status": 10}
+                    ],
+                    "error": [
+                        {"item_key": "pub-333-2", "msg": "分类不支持当前属性"}
+                    ]
+                }
+            }
+
+    def mock_post(url, params=None, data=None, headers=None, timeout=None):
+        nonlocal last_batch_payload
+        last_batch_payload = json.loads(data.decode('utf-8'))
+        return FakeResponse()
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    pub = PublisherV3()
+    monkeypatch.setattr(pub, "commit_publish", lambda product_id: {"status": "success"})
+    monkeypatch.setattr(pub, "_load_categories", lambda: [])
+
+    batch_data = [
+        {"source_id": 111, "title": "测试商品1", "price": 10.0, "images": ["http://img.com/1.jpg"]},
+        {"source_id": 222, "title": "测试商品2", "price": 20.0, "images": ["http://img.com/2.jpg"]},
+        {"source_id": 333, "title": "测试商品3", "price": 30.0, "images": ["http://img.com/3.jpg"]}
+    ]
+
+    res = pub.publish_items_batch(batch_data)
+    
+    assert len(res["success"]) == 2
+    assert res["success"][0]["source_id"] == 111
+    assert res["success"][0]["product_id"] == "999111"
+    assert res["success"][1]["source_id"] == 222
+    
+    assert len(res["failed"]) == 1
+    assert res["failed"][0]["source_id"] == 333
+    assert res["failed"][0]["msg"] == "分类不支持当前属性"
+
+    assert "product_data" in last_batch_payload
+    assert len(last_batch_payload["product_data"]) == 3
+    assert last_batch_payload["product_data"][0]["item_key"] == "pub-111-0"
+    assert last_batch_payload["product_data"][0]["publish_shop"][0]["title"] == "测试商品1"
+
+
+
 

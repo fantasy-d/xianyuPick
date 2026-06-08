@@ -190,13 +190,11 @@ class PublisherV3:
             
         return ";".join(rebuilt_parts)
 
-    def publish_item(self, source_data: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        第一步：创建商品 (Create)
-        """
+    def prepare_item_payload(self, source_data: Dict[str, Any]) -> Dict[str, Any]:
+        """准备商品的创建 Payload，执行 SKU 自愈对齐、降级、字符清洗以及自动分类匹配"""
         images = source_data.get('images', [])
         if not images:
-            return {"status": "failed", "msg": "系统未采集到该货源的图片，无法发布。请尝试重新扫描该商品。"}
+            raise ValueError("系统未采集到该货源的图片，无法发布。请尝试重新扫描该商品。")
         
         # 协议补全：确保所有图片都带 https:
         clean_images = []
@@ -207,7 +205,7 @@ class PublisherV3:
                 clean_images.append(img)
         
         if not clean_images:
-            return {"status": "failed", "msg": "有效的图片链接为空"}
+            raise ValueError("有效的图片链接为空")
 
         price_fen = int(float(source_data['price']) * 100)
         
@@ -226,7 +224,7 @@ class PublisherV3:
                 "city": self.defaults.get("city"),
                 "district": self.defaults.get("district"),
                 "title": source_data['title'][:60],
-                "content": source_data['description'][:5000],
+                "content": (source_data.get('description') or "优质货源，欢迎选购。")[:5000],
                 "images": clean_images[:9] # 使用清洗后的图片
             }]
         }
@@ -344,6 +342,17 @@ class PublisherV3:
             payload['original_price'] = price_fen + 5000
             payload['stock'] = min(9999, int(single_sku.get('stock') or 10))
 
+        return payload
+
+    def publish_item(self, source_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        单个商品发布
+        """
+        try:
+            payload = self.prepare_item_payload(source_data)
+        except Exception as e:
+            return {"status": "failed", "msg": str(e)}
+
         timestamp = int(time.time())
         auth = APISigner.sign_v3_protocol(payload, self.appid, self.app_secret, timestamp)
         
@@ -375,6 +384,91 @@ class PublisherV3:
                 return {"status": "failed", "msg": result.get("msg"), "raw": result}
         except Exception as e:
             return {"status": "failed", "msg": str(e)}
+
+    def publish_items_batch(self, items_data: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """
+        批量创建商品并自动上架。
+        items_data 是商品原始数据列表，包含 source_id 字段。
+        """
+        payload_data = []
+        source_id_map = {}
+        failed_list = []
+
+        for idx, item in enumerate(items_data):
+            sid = item.get("source_id")
+            item_key = f"pub-{sid}-{idx}"
+            source_id_map[item_key] = sid
+            try:
+                # 复制并剥离 source_id 字段
+                source_data_copy = {k: v for k, v in item.items() if k != "source_id"}
+                item_payload = self.prepare_item_payload(source_data_copy)
+                item_payload["item_key"] = item_key
+                payload_data.append(item_payload)
+            except Exception as e:
+                failed_list.append({"source_id": sid, "msg": str(e)})
+
+        if not payload_data:
+            return {"success": [], "failed": failed_list}
+
+        success_list = []
+        chunk_size = 50
+        
+        for i in range(0, len(payload_data), chunk_size):
+            chunk = payload_data[i:i + chunk_size]
+            payload = {
+                "product_data": chunk
+            }
+            
+            timestamp = int(time.time())
+            auth = APISigner.sign_v3_protocol(payload, self.appid, self.app_secret, timestamp)
+            
+            target_url = f"{self.base_url}/api/open/product/batchCreate"
+            query_params = {
+                "appid": auth['app_key'],
+                "timestamp": auth['timestamp'],
+                "sign": auth['sign']
+            }
+            
+            compact_body = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
+            headers = {"Content-Type": "application/json"}
+            
+            try:
+                resp = requests.post(target_url, params=query_params, data=compact_body.encode('utf-8'), headers=headers, timeout=30)
+                result = resp.json()
+                
+                if result.get("code") == 0:
+                    res_data = result.get("data", {})
+                    # 处理成功项
+                    for succ in res_data.get("success", []):
+                        item_key = succ.get("item_key")
+                        pid = str(succ.get("product_id"))
+                        sid = source_id_map.get(item_key)
+                        
+                        # 自动上架商品
+                        listing_res = self.commit_publish(pid)
+                        if listing_res['status'] == 'success':
+                            success_list.append({"source_id": sid, "product_id": pid})
+                        else:
+                            failed_list.append({"source_id": sid, "msg": f"创建成功但上架失败: {listing_res['msg']}"})
+                            
+                    # 处理失败项
+                    for err in res_data.get("error", []):
+                        item_key = err.get("item_key")
+                        msg = err.get("msg", "未知创建错误")
+                        sid = source_id_map.get(item_key)
+                        failed_list.append({"source_id": sid, "msg": msg})
+                else:
+                    err_msg = result.get("msg", "批量创建请求整体失败")
+                    for p in chunk:
+                        sid = source_id_map.get(p["item_key"])
+                        failed_list.append({"source_id": sid, "msg": err_msg})
+            except Exception as e:
+                err_msg = f"批量创建接口连接异常: {e}"
+                for p in chunk:
+                    sid = source_id_map.get(p["item_key"])
+                    failed_list.append({"source_id": sid, "msg": err_msg})
+                    
+        return {"success": success_list, "failed": failed_list}
 
     def commit_publish(self, product_id: str) -> Dict[str, Any]:
         """
