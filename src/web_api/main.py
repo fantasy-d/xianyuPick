@@ -51,9 +51,15 @@ def init_db_schema():
         except Exception:
             pass  # 如果列已经存在则会报错，直接忽略即可
             
+        # 4. 自愈修改 publish_status 的 ENUM 增加 'depublished' 和 'deleted' 值以支持下架/删除状态记录
+        try:
+            cursor.execute("ALTER TABLE xianyu_published_items MODIFY COLUMN publish_status ENUM('pending','success','failed','depublished','deleted') DEFAULT 'pending';")
+        except Exception as alter_err:
+            logger.warning(f"[DB] Failed to modify publish_status enum: {alter_err}")
+            
         conn.commit()
         conn.close()
-        logger.info("[DB] Schema initialization complete (dropped ali1688_source_htmls, ensured html_path in ali1688_sources).")
+        logger.info("[DB] Schema initialization complete (ensured html_path and 'depublished' in ENUM xianyu_published_items).")
     except Exception as e:
         logger.error(f"[DB] Schema initialization failed: {e}")
 
@@ -611,6 +617,317 @@ def get_published_status(source_id: int):
     cursor.execute("SELECT publish_status, published_url FROM xianyu_published_items WHERE source_db_id = %s ORDER BY created_at DESC LIMIT 1", (source_id,))
     res = cursor.fetchone(); conn.close()
     return res if res else {"publish_status": "none"}
+
+@app.post("/api/depublish/batch")
+async def batch_depublish_from_xianyu(req: dict = {}):
+    logger.info(f"OpenAPI batch depublish request: {req}")
+    source_ids = req.get("source_ids", [])
+    if not source_ids:
+        return {"success": [], "failed": [{"source_id": 0, "msg": "未选中任何商品"}]}
+
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    try:
+        publisher = PublisherV3()
+    except Exception as e:
+        logger.error(f"Failed to initialize PublisherV3: {e}")
+        return {"success": [], "failed": [{"source_id": sid, "msg": f"初始化发布器失败: {e}"} for sid in source_ids]}
+
+    conn = get_db_conn(); cursor = conn.cursor()
+    success_list = []
+    failed_list = []
+
+    for sid in source_ids:
+        # 1. 查找此货源最近成功的上架记录
+        cursor.execute("""
+            SELECT xianyu_item_id, task_id 
+            FROM xianyu_published_items 
+            WHERE source_db_id = %s AND publish_status = 'success' 
+            ORDER BY created_at DESC LIMIT 1
+        """, (sid,))
+        row = cursor.fetchone()
+        
+        if not row:
+            failed_list.append({"source_id": sid, "msg": "未找到该商品的成功发布记录，无法执行下架"})
+            continue
+            
+        xianyu_item_id = row['xianyu_item_id']
+        task_id = row['task_id']
+        
+        # 2. 执行下架
+        try:
+            result = publisher.depublish_item(xianyu_item_id)
+            if result.get("status") == "success":
+                # 3. 记账
+                cursor.execute("""
+                    INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (task_id, sid, xianyu_item_id, 'depublished', '已下架', None))
+                success_list.append({"source_id": sid})
+            else:
+                failed_list.append({"source_id": sid, "msg": result.get("msg", "下架失败")})
+        except Exception as e:
+            logger.error(f"Batch depublish failed for source {sid}: {e}")
+            failed_list.append({"source_id": sid, "msg": f"下架异常: {e}"})
+
+    conn.commit()
+    conn.close()
+    return {"success": success_list, "failed": failed_list}
+
+@app.post("/api/depublish/{source_id}")
+async def depublish_from_xianyu(source_id: int):
+    logger.info(f"OpenAPI depublish request for source_id: {source_id}")
+    conn = get_db_conn(); cursor = conn.cursor()
+    
+    # 1. 查找此货源最近成功的上架记录
+    cursor.execute("""
+        SELECT xianyu_item_id, task_id 
+        FROM xianyu_published_items 
+        WHERE source_db_id = %s AND publish_status = 'success' 
+        ORDER BY created_at DESC LIMIT 1
+    """, (source_id,))
+    row = cursor.fetchone()
+    
+    if not row:
+        conn.close()
+        return {"status": "failed", "msg": "未找到该商品的成功发布记录，无法执行下架"}
+        
+    xianyu_item_id = row['xianyu_item_id']
+    task_id = row['task_id']
+    
+    # 2. 调用 PublisherV3 执行下架
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    try:
+        publisher = PublisherV3()
+        result = publisher.depublish_item(xianyu_item_id)
+        
+        if result.get("status") == "success":
+            # 3. 在发布表插入已下架状态，完成流水记账
+            cursor.execute("""
+                INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (task_id, source_id, xianyu_item_id, 'depublished', '已下架', None))
+            conn.commit()
+            conn.close()
+            return {"status": "success", "msg": "下架成功"}
+        else:
+            conn.close()
+            return {"status": "failed", "msg": result.get("msg", "下架失败")}
+            
+    except Exception as e:
+        logger.error(f"Depublisher Error: {e}")
+        conn.close()
+        return {"status": "failed", "msg": str(e)}
+
+@app.post("/api/delete/batch")
+async def batch_delete_from_xianyu(req: dict = {}):
+    logger.info(f"OpenAPI batch delete request: {req}")
+    source_ids = req.get("source_ids", [])
+    if not source_ids:
+        return {"success": [], "failed": [{"source_id": 0, "msg": "未选中任何商品"}]}
+
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    try:
+        publisher = PublisherV3()
+    except Exception as e:
+        logger.error(f"Failed to initialize PublisherV3 for delete: {e}")
+        return {"success": [], "failed": [{"source_id": sid, "msg": f"初始化发布器失败: {e}"} for sid in source_ids]}
+
+    conn = get_db_conn(); cursor = conn.cursor()
+    success_list = []
+    failed_list = []
+
+    for sid in source_ids:
+        # 1. 查找此货源最新的一条发布流水记录，校验状态必须为 'depublished'
+        cursor.execute("""
+            SELECT publish_status, xianyu_item_id, task_id 
+            FROM xianyu_published_items 
+            WHERE source_db_id = %s 
+            ORDER BY created_at DESC LIMIT 1
+        """, (sid,))
+        row = cursor.fetchone()
+
+        if not row:
+            failed_list.append({"source_id": sid, "msg": "商品未发布，无法删除"})
+            continue
+
+        status = row['publish_status']
+        xianyu_item_id = row['xianyu_item_id']
+        task_id = row['task_id']
+
+        if status != 'depublished':
+            failed_list.append({"source_id": sid, "msg": f"商品状态为 {status}，只有已下架商品可以删除"})
+            continue
+
+        # 2. 调用 PublisherV3 执行删除
+        try:
+            result = publisher.delete_item(xianyu_item_id)
+            if result.get("status") == "success":
+                # 3. 记账
+                cursor.execute("""
+                    INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
+                    VALUES (%s, %s, %s, %s, %s, %s)
+                """, (task_id, sid, xianyu_item_id, 'deleted', '已删除', None))
+                success_list.append({"source_id": sid})
+            else:
+                failed_list.append({"source_id": sid, "msg": result.get("msg", "删除失败")})
+        except Exception as e:
+            logger.error(f"Batch delete failed for source {sid}: {e}")
+            failed_list.append({"source_id": sid, "msg": f"删除异常: {e}"})
+
+    conn.commit()
+    conn.close()
+    return {"success": success_list, "failed": failed_list}
+
+@app.post("/api/delete/{source_id}")
+async def delete_from_xianyu(source_id: int):
+    logger.info(f"OpenAPI delete request for source_id: {source_id}")
+    conn = get_db_conn(); cursor = conn.cursor()
+
+    # 1. 查找此货源最新的一条发布流水记录，校验状态必须为 'depublished'
+    cursor.execute("""
+        SELECT publish_status, xianyu_item_id, task_id 
+        FROM xianyu_published_items 
+        WHERE source_db_id = %s 
+        ORDER BY created_at DESC LIMIT 1
+    """, (source_id,))
+    row = cursor.fetchone()
+
+    if not row:
+        conn.close()
+        return {"status": "failed", "msg": "商品未发布，无法删除"}
+
+    status = row['publish_status']
+    xianyu_item_id = row['xianyu_item_id']
+    task_id = row['task_id']
+
+    if status != 'depublished':
+        conn.close()
+        return {"status": "failed", "msg": f"商品当前状态为 {status}，只有已下架商品可以删除"}
+
+    # 2. 调用 PublisherV3 执行删除
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    try:
+        publisher = PublisherV3()
+        result = publisher.delete_item(xianyu_item_id)
+
+        if result.get("status") == "success":
+            # 3. 记账
+            cursor.execute("""
+                INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (task_id, source_id, xianyu_item_id, 'deleted', '已删除', None))
+            conn.commit()
+            conn.close()
+            return {"status": "success", "msg": "删除成功"}
+        else:
+            conn.close()
+            return {"status": "failed", "msg": result.get("msg", "删除失败")}
+
+    except Exception as e:
+        logger.error(f"Publisher Delete Error: {e}")
+        conn.close()
+        return {"status": "failed", "msg": str(e)}
+
+@app.get("/api/xianyu_products")
+def get_xianyu_products(page: int = 1, limit: int = 10, keyword: str = "", sort_by: str = "publish_time", sort_order: str = "desc"):
+    offset = (page - 1) * limit
+    conn = get_db_conn(); cursor = conn.cursor()
+
+    # 联表查询最新一条发布记录，且最新状态非 'deleted'
+    query_base = """
+        FROM xianyu_published_items p
+        INNER JOIN (
+            SELECT source_db_id, MAX(created_at) as max_time
+            FROM xianyu_published_items
+            GROUP BY source_db_id
+        ) latest ON p.source_db_id = latest.source_db_id AND p.created_at = latest.max_time
+        INNER JOIN ali1688_sources s ON p.source_db_id = s.id
+        LEFT JOIN xianyu_items xi ON s.item_id = xi.id
+        WHERE p.publish_status IN ('success', 'depublished', 'pending', 'failed')
+    """
+
+    params = []
+    if keyword:
+        query_base += " AND (s.title LIKE %s OR xi.title LIKE %s)"
+        params.extend([f"%{keyword}%", f"%{keyword}%"])
+
+    count_query = f"SELECT COUNT(*) as count {query_base}"
+    cursor.execute(count_query, tuple(params))
+    total_count = cursor.fetchone()['count']
+
+    # 排序字段映射防御 SQL 注入
+    sort_mapping = {
+        "title": "s.title",
+        "xianyu_item_id": "p.xianyu_item_id",
+        "publish_status": "p.publish_status",
+        "source_price": "s.min_price",
+        "ref_price": "xi.price",
+        "publish_time": "p.created_at"
+    }
+    order_field = sort_mapping.get(sort_by, "p.created_at")
+    order_direction = "DESC" if sort_order.lower() == "desc" else "ASC"
+
+    data_query = f"""
+        SELECT 
+            p.id as publish_id,
+            p.task_id,
+            p.source_db_id,
+            p.xianyu_item_id,
+            p.publish_status,
+            p.publish_msg,
+            p.published_url,
+            p.created_at as publish_time,
+            s.title as source_title,
+            s.source_url as source_url,
+            s.images as source_images,
+            s.min_price as source_price,
+            s.sku_count as source_sku_count,
+            xi.title as ref_title,
+            xi.price as ref_price,
+            xi.want_count as ref_want_count
+        {query_base}
+        ORDER BY {order_field} {order_direction}
+        LIMIT %s OFFSET %s
+    """
+    params.extend([limit, offset])
+    cursor.execute(data_query, tuple(params))
+    rows = cursor.fetchall()
+    conn.close()
+
+    items = []
+    for r in rows:
+        images_list = []
+        if r['source_images']:
+            try:
+                images_list = json.loads(r['source_images'])
+            except Exception:
+                pass
+
+        items.append({
+            "publish_id": r["publish_id"],
+            "task_id": r["task_id"],
+            "source_db_id": r["source_db_id"],
+            "xianyu_item_id": r["xianyu_item_id"],
+            "publish_status": r["publish_status"],
+            "publish_msg": r["publish_msg"],
+            "published_url": r["published_url"],
+            "publish_time": r["publish_time"].strftime("%Y-%m-%d %H:%M:%S") if r["publish_time"] else "",
+            "source_title": r["source_title"],
+            "source_url": r["source_url"],
+            "source_image": images_list[0] if images_list else "",
+            "source_price": float(r["source_price"]) if r["source_price"] is not None else 0.0,
+            "source_sku_count": r["source_sku_count"],
+            "ref_title": r["ref_title"] or "",
+            "ref_price": float(r["ref_price"]) if r["ref_price"] is not None else 0.0,
+            "ref_want_count": r["ref_want_count"] or 0
+        })
+
+    return {
+        "items": items,
+        "total": total_count,
+        "page": page,
+        "limit": limit
+    }
 
 @app.get("/api/tasks/{task_id}/logs", response_class=PlainTextResponse)
 def get_logs(task_id: str):

@@ -548,6 +548,112 @@ def test_publisher_v3_escaped_html_and_gt_split(monkeypatch) -> None:
     assert payload["sku_items"][2]["sku_text"] == expected_sku3
 
 
+def test_publisher_v3_depublish_item_success_and_fail(monkeypatch) -> None:
+    # 模拟 openapi.json 的加载
+    mock_config = {
+        "base_url": "https://open.goofish.pro",
+        "appid": "mock_appid",
+        "app_secret": "mock_secret",
+        "default_config": {
+            "user_name": "test_user"
+        }
+    }
+    
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(Path, "read_text", lambda self, encoding=None: json.dumps(mock_config))
+
+    # 模拟网络 POST 请求
+    last_url = None
+    last_payload = {}
+    class FakeResponse:
+        def __init__(self, code, msg=""):
+            self.code = code
+            self.msg = msg
+            self.text = json.dumps({"code": self.code, "msg": self.msg})
+        def json(self):
+            return {"code": self.code, "msg": self.msg}
+
+    def mock_post(url, params=None, data=None, headers=None, timeout=None):
+        nonlocal last_url, last_payload
+        last_url = url
+        last_payload = json.loads(data.decode('utf-8'))
+        # 根据 product_id 模拟成功与失败
+        if last_payload.get("product_id") == 12345:
+            return FakeResponse(0, "success")
+        else:
+            return FakeResponse(400, "Mock delisting failure")
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    pub = PublisherV3()
+
+    # 1. 测试下架成功
+    res_succ = pub.depublish_item("12345")
+    assert res_succ["status"] == "success"
+    assert res_succ["msg"] == "下架成功"
+    assert last_url == "https://open.goofish.pro/api/open/product/downShelf"
+    assert last_payload == {"product_id": 12345, "user_name": ["test_user"]}
+
+    # 2. 测试下架失败
+    res_fail = pub.depublish_item("99999")
+    assert res_fail["status"] == "failed"
+    assert "Mock delisting failure" in res_fail["msg"]
+
+
+def test_publisher_v3_delete_item_success_and_fail(monkeypatch) -> None:
+    # 模拟 openapi.json 的加载
+    mock_config = {
+        "base_url": "https://open.goofish.pro",
+        "appid": "mock_appid",
+        "app_secret": "mock_secret",
+        "default_config": {
+            "user_name": "test_user"
+        }
+    }
+    
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(Path, "read_text", lambda self, encoding=None: json.dumps(mock_config))
+
+    # 模拟网络 POST 请求
+    last_url = None
+    last_payload = {}
+    class FakeResponse:
+        def __init__(self, code, msg=""):
+            self.code = code
+            self.msg = msg
+            self.text = json.dumps({"code": self.code, "msg": self.msg})
+        def json(self):
+            return {"code": self.code, "msg": self.msg}
+
+    def mock_post(url, params=None, data=None, headers=None, timeout=None):
+        nonlocal last_url, last_payload
+        last_url = url
+        last_payload = json.loads(data.decode('utf-8'))
+        if last_payload.get("product_id") == 12345:
+            return FakeResponse(0, "success")
+        else:
+            return FakeResponse(400, "Mock deletion failure")
+
+    import requests
+    monkeypatch.setattr(requests, "post", mock_post)
+
+    pub = PublisherV3()
+
+    # 1. 测试删除成功
+    res_succ = pub.delete_item("12345")
+    assert res_succ["status"] == "success"
+    assert res_succ["msg"] == "删除成功"
+    assert last_url == "https://open.goofish.pro/api/open/product/delete"
+    assert last_payload == {"product_id": 12345}
+
+    # 2. 测试删除失败
+    res_fail = pub.delete_item("99999")
+    assert res_fail["status"] == "failed"
+    assert "Mock deletion failure" in res_fail["msg"]
+
+
+
 
 
 

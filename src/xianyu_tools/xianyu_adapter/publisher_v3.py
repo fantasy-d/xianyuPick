@@ -578,5 +578,85 @@ class PublisherV3:
         except Exception as e:
             return {"status": "failed", "msg": f"上架连接异常: {e}"}
 
+    def depublish_item(self, product_id: str) -> Dict[str, Any]:
+        """
+        下架商品 (Depublish Product)
+        """
+        payload = {
+            "product_id": int(product_id),
+            "user_name": [self.defaults.get("user_name")]
+        }
+
+        timestamp = int(time.time())
+        auth = APISigner.sign_v3_protocol(payload, self.appid, self.app_secret, timestamp)
+        
+        target_url = f"{self.base_url}/api/open/product/downShelf"
+        params = {
+            "appid": auth['app_key'],
+            "timestamp": auth['timestamp'],
+            "sign": auth['sign']
+        }
+        
+        compact_body = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
+        headers = {"Content-Type": "application/json"}
+        
+        logger.info(f"Delisting Product {product_id}...")
+        try:
+            resp = requests.post(target_url, params=params, data=compact_body.encode('utf-8'), headers=headers, timeout=20)
+            logger.info(f"Delisting response raw text: {resp.text}")
+            try:
+                result = resp.json()
+            except Exception as json_err:
+                logger.error(f"Failed to parse JSON response from delisting: {json_err}. Raw text: {resp.text}")
+                return {"status": "failed", "msg": f"下架响应解析失败，原始报文: {resp.text[:100]}"}
+                
+            if result.get("code") == 0:
+                logger.info(f"Delisting Successful.")
+                return {"status": "success", "msg": "下架成功"}
+            else:
+                return {"status": "failed", "msg": result.get("msg")}
+        except Exception as e:
+            return {"status": "failed", "msg": f"下架连接异常: {e}"}
+
+    def delete_item(self, product_id: str) -> Dict[str, Any]:
+        """
+        删除商品 (Delete Product)
+        注意事项：该接口只能删除状态为草稿箱、待发布的商品，不会删除闲鱼APP已下架的商品，需要手动去闲鱼APP删除！
+        """
+        payload = {
+            "product_id": int(product_id)
+        }
+
+        timestamp = int(time.time())
+        auth = APISigner.sign_v3_protocol(payload, self.appid, self.app_secret, timestamp)
+        
+        target_url = f"{self.base_url}/api/open/product/delete"
+        params = {
+            "appid": auth['app_key'],
+            "timestamp": auth['timestamp'],
+            "sign": auth['sign']
+        }
+        
+        compact_body = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
+        headers = {"Content-Type": "application/json"}
+        
+        logger.info(f"Deleting Product {product_id}...")
+        try:
+            resp = requests.post(target_url, params=params, data=compact_body.encode('utf-8'), headers=headers, timeout=20)
+            logger.info(f"Deleting response raw text: {resp.text}")
+            try:
+                result = resp.json()
+            except Exception as json_err:
+                logger.error(f"Failed to parse JSON response from delete: {json_err}. Raw text: {resp.text}")
+                return {"status": "failed", "msg": f"删除响应解析失败，原始报文: {resp.text[:100]}"}
+                
+            if result.get("code") == 0:
+                logger.info(f"Deleting Successful.")
+                return {"status": "success", "msg": "删除成功"}
+            else:
+                return {"status": "failed", "msg": result.get("msg")}
+        except Exception as e:
+            return {"status": "failed", "msg": f"删除连接异常: {e}"}
+
 if __name__ == "__main__":
     pass

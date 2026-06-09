@@ -1155,3 +1155,213 @@ def test_delete_task_physically_cleans_local_html(monkeypatch, tmp_path) -> None
     assert not dummy_html.exists()
 
 
+def test_web_api_depublish_route_flow(monkeypatch) -> None:
+    # Test POST /api/depublish/{source_id} API endpoint
+    import src.web_api.main as web_main
+
+    class FakeCursor:
+        def __init__(self):
+            self.queries = []
+            self.args = []
+
+        def execute(self, query, args=None):
+            self.queries.append(query)
+            self.args.append(args)
+
+        def fetchone(self):
+            # Simulate returning already published product_id and task_id
+            return {"xianyu_item_id": "987654", "task_id": "task_111"}
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+        def commit(self):
+            pass
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConn())
+
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    monkeypatch.setattr(PublisherV3, "depublish_item", lambda self, pid: {"status": "success", "msg": "下架成功"})
+
+    import asyncio
+    # 直接异步调用接口函数以规避对 httpx 的依赖
+    res = asyncio.run(web_main.depublish_from_xianyu(802))
+    assert res == {"status": "success", "msg": "下架成功"}
+
+
+def test_web_api_batch_depublish(monkeypatch) -> None:
+    import src.web_api.main as web_main
+
+    class FakeCursor:
+        def __init__(self):
+            self.queries = []
+            self.args = []
+
+        def execute(self, query, args=None):
+            self.queries.append(query)
+            self.args.append(args)
+
+        def fetchone(self):
+            return {"xianyu_item_id": "987654", "task_id": "task_111"}
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+        def commit(self):
+            pass
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConn())
+
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    monkeypatch.setattr(PublisherV3, "depublish_item", lambda self, pid: {"status": "success", "msg": "下架成功"})
+
+    import asyncio
+    req = {"source_ids": [802, 803]}
+    res = asyncio.run(web_main.batch_depublish_from_xianyu(req))
+    assert res == {
+        "success": [{"source_id": 802}, {"source_id": 803}],
+        "failed": []
+    }
+
+
+def test_web_api_delete_route_flow(monkeypatch) -> None:
+    # Test POST /api/delete/{source_id} API endpoint
+    import src.web_api.main as web_main
+
+    # 1. 测试未发布商品删除拦截
+    class FakeCursorNone:
+        def execute(self, query, args=None): pass
+        def fetchone(self): return None
+    class FakeConnNone:
+        def cursor(self): return FakeCursorNone()
+        def close(self): pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConnNone())
+    import asyncio
+    res_none = asyncio.run(web_main.delete_from_xianyu(901))
+    assert res_none == {"status": "failed", "msg": "商品未发布，无法删除"}
+
+    # 2. 测试非下架状态商品（例如 success）删除拦截
+    class FakeCursorSuccess:
+        def execute(self, query, args=None): pass
+        def fetchone(self): return {"publish_status": "success", "xianyu_item_id": "987654", "task_id": "task_111"}
+    class FakeConnSuccess:
+        def cursor(self): return FakeCursorSuccess()
+        def close(self): pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConnSuccess())
+    res_succ = asyncio.run(web_main.delete_from_xianyu(902))
+    assert res_succ == {"status": "failed", "msg": "商品当前状态为 success，只有已下架商品可以删除"}
+
+    # 3. 测试已下架商品（depublished）成功删除
+    class FakeCursorDepublished:
+        def execute(self, query, args=None): pass
+        def fetchone(self): return {"publish_status": "depublished", "xianyu_item_id": "987654", "task_id": "task_111"}
+    class FakeConnDepublished:
+        def cursor(self): return FakeCursorDepublished()
+        def commit(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConnDepublished())
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    monkeypatch.setattr(PublisherV3, "delete_item", lambda self, pid: {"status": "success", "msg": "删除成功"})
+
+    res_del = asyncio.run(web_main.delete_from_xianyu(903))
+    assert res_del == {"status": "success", "msg": "删除成功"}
+
+
+def test_web_api_batch_delete(monkeypatch) -> None:
+    # Test POST /api/delete/batch API endpoint
+    import src.web_api.main as web_main
+
+    # 模拟批量数据：
+    # 801: 未发布 (None)
+    # 802: 已下架 (depublished) -> 成功删除
+    # 803: 已上架 (success) -> 状态不符报错拦截
+    class FakeCursorBatch:
+        def __init__(self):
+            self.count = 0
+        def execute(self, query, args=None):
+            self.current_args = args
+        def fetchone(self):
+            sid = self.current_args[0]
+            if sid == 801:
+                return None
+            elif sid == 802:
+                return {"publish_status": "depublished", "xianyu_item_id": "item_802", "task_id": "task_802"}
+            elif sid == 803:
+                return {"publish_status": "success", "xianyu_item_id": "item_803", "task_id": "task_803"}
+            return None
+
+    class FakeConnBatch:
+        def cursor(self): return FakeCursorBatch()
+        def commit(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConnBatch())
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    monkeypatch.setattr(PublisherV3, "delete_item", lambda self, pid: {"status": "success", "msg": "删除成功"})
+
+    import asyncio
+    req = {"source_ids": [801, 802, 803]}
+    res = asyncio.run(web_main.batch_delete_from_xianyu(req))
+    assert res["success"] == [{"source_id": 802}]
+    assert len(res["failed"]) == 2
+    assert res["failed"][0] == {"source_id": 801, "msg": "商品未发布，无法删除"}
+    assert res["failed"][1] == {"source_id": 803, "msg": "商品状态为 success，只有已下架商品可以删除"}
+
+
+def test_web_api_get_xianyu_products(monkeypatch) -> None:
+    # Test GET /api/xianyu_products API endpoint
+    import src.web_api.main as web_main
+    from datetime import datetime
+
+    class FakeCursor:
+        def __init__(self):
+            self.queries = []
+            self.args = []
+
+        def execute(self, query, args=None):
+            self.queries.append(query)
+            self.args.append(args)
+
+        def fetchone(self):
+            return {"count": 1}
+
+        def fetchall(self):
+            return [{
+                "publish_id": 1,
+                "task_id": "task_abc",
+                "source_db_id": 101,
+                "xianyu_item_id": "999888",
+                "publish_status": "success",
+                "publish_msg": "已上架",
+                "published_url": "http://xianyu.com/999888",
+                "publish_time": datetime(2026, 6, 9, 12, 0, 0),
+                "source_title": "1688源头好物",
+                "source_url": "http://1688.com/101",
+                "source_images": '["http://img.1688.com/101.jpg"]',
+                "source_price": 50.0,
+                "source_sku_count": 3,
+                "ref_title": "参考爆款标题",
+                "ref_price": 80.0,
+                "ref_want_count": 500
+            }]
+
+    class FakeConn:
+        def cursor(self): return FakeCursor()
+        def close(self): pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConn())
+
+    res = web_main.get_xianyu_products(page=1, limit=10, keyword="1688")
+    assert res["total"] == 1
+    assert len(res["items"]) == 1
+    assert res["items"][0]["source_title"] == "1688源头好物"
+    assert res["items"][0]["xianyu_item_id"] == "999888"
+    assert res["items"][0]["publish_time"] == "2026-06-09 12:00:00"
+    assert res["items"][0]["source_image"] == "http://img.1688.com/101.jpg"
