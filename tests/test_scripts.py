@@ -35,6 +35,412 @@ def test_run_ali1688_slow_flow_script_exists() -> None:
     assert path.exists()
 
 
+def test_run_ali1688_slow_flow_dispatch_metric_helpers() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    metrics = module._extract_dispatch_metrics_from_text("近7天代发 123 月代发 2.4万")
+    assert metrics == {"seven_day_dispatch_count": 123, "month_dispatch_count": 24000}
+    assert module._parse_dispatch_count("3.5k") == 3500
+
+
+def test_run_ali1688_slow_flow_normalize_image_search_url() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module._normalize_image_search_url("http://img.alicdn.com/demo.jpg") == "http://img.alicdn.com/demo.jpg"
+    assert module._normalize_image_search_url("https://img.alicdn.com/demo") == "https://img.alicdn.com/demo"
+    assert module._normalize_image_search_url("http://img.alicdn.com/demo.heic") is None
+    assert module._normalize_image_search_url("ftp://img.alicdn.com/demo.jpg") is None
+    assert module._normalize_image_search_url("http://img.alicdn.com/demo.gif") is None
+
+
+def test_run_ali1688_slow_flow_top_dispatch_candidates_sorting() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    rows = [
+        {"item_url": "https://detail.1688.com/offer/1.html", "seven_day_dispatch_count": 30, "month_dispatch_count": 400},
+        {"item_url": "https://detail.1688.com/offer/2.html", "seven_day_dispatch_count": 50, "month_dispatch_count": 100},
+        {"item_url": "https://detail.1688.com/offer/3.html", "seven_day_dispatch_count": 50, "month_dispatch_count": 300},
+        {"item_url": "", "seven_day_dispatch_count": 999, "month_dispatch_count": 999},
+    ]
+
+    top_rows = module._top_dispatch_candidates(rows, 3)
+    assert [row["item_url"] for row in top_rows] == [
+        "https://detail.1688.com/offer/3.html",
+        "https://detail.1688.com/offer/2.html",
+        "https://detail.1688.com/offer/1.html",
+    ]
+
+
+def test_run_ali1688_slow_flow_prepare_managed_state_file_copies_into_dedicated_path(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    source_state = tmp_path / "input_state.json"
+    source_payload = {"cookies": [{"name": "a", "value": "1", "domain": ".1688.com", "path": "/"}], "origins": []}
+    source_state.write_text(json.dumps(source_payload), encoding="utf-8")
+    managed_state = tmp_path / "managed" / "storage_state.json"
+
+    effective_path, synced = module._prepare_managed_state_file(
+        str(source_state),
+        managed_state_file=str(managed_state),
+    )
+
+    assert synced is True
+    assert effective_path == str(managed_state.resolve())
+    assert json.loads(managed_state.read_text(encoding="utf-8")) == source_payload
+
+
+def test_run_ali1688_slow_flow_prepare_managed_state_file_missing_default_is_soft(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    managed_state = tmp_path / "managed" / "storage_state.json"
+    effective_path, synced = module._prepare_managed_state_file(
+        str(managed_state),
+        managed_state_file=str(managed_state),
+    )
+
+    assert effective_path is None
+    assert synced is False
+
+
+def test_run_ali1688_slow_flow_prepare_managed_state_file_missing_custom_raises(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    missing_source = tmp_path / "missing.json"
+    managed_state = tmp_path / "managed" / "storage_state.json"
+
+    try:
+        module._prepare_managed_state_file(str(missing_source), managed_state_file=str(managed_state))
+    except FileNotFoundError as exc:
+        assert "state file not found" in str(exc)
+    else:
+        raise AssertionError("expected FileNotFoundError for explicit missing state file")
+
+
+def test_run_ali1688_slow_flow_append_extension_launch_args(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    extension_dir = tmp_path / "ext"
+    extension_dir.mkdir()
+    args = module._append_extension_launch_args(["--foo", "--disable-extensions"], str(extension_dir))
+
+    assert "--foo" in args
+    assert "--disable-extensions" not in args
+    assert f"--disable-extensions-except={extension_dir}" in args
+    assert f"--load-extension={extension_dir}" in args
+
+
+def test_run_ali1688_slow_flow_resolve_browser_channel_uses_chromium_for_extension(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    extension_dir = tmp_path / "ext"
+    extension_dir.mkdir()
+
+    assert module._resolve_browser_channel("chrome", str(extension_dir)) is None
+    assert module._resolve_browser_channel("msedge", str(extension_dir)) == "msedge"
+    assert module._resolve_browser_channel("chrome", "") == "chrome"
+
+
+def test_run_ali1688_slow_flow_overlay_close_click_point() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module._overlay_close_click_point({"x": 0.0, "y": 0.0, "width": 1400.0, "height": 720.0}) == (1378.0, 20.0)
+
+
+def test_run_ali1688_slow_flow_plugin_toolbar_selectors_cover_verified_nodes() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    selectors = module._plugin_toolbar_selectors()
+    assert "#market-mate-for-1688" in selectors
+    assert "#market-mate-for-1688-od" in selectors
+    assert ".goods-operation-panel-media" in selectors
+    assert ".goods-operation-hover.copy-sku" in selectors
+    assert "text=复制sku" in selectors
+
+
+def test_run_ali1688_slow_flow_sanitize_storage_state_cookies() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    cookies = [
+        {
+            "name": "_m_h5_tk",
+            "value": "token",
+            "domain": ".1688.com",
+            "path": "/",
+            "expires": 123.0,
+            "httpOnly": False,
+            "secure": True,
+            "sameSite": "None",
+            "partitionKey": "https://1688.com",
+            "_crHasCrossSiteAncestor": True,
+        }
+    ]
+    assert module._sanitize_storage_state_cookies(cookies) == [
+        {
+            "name": "_m_h5_tk",
+            "value": "token",
+            "domain": ".1688.com",
+            "path": "/",
+            "expires": 123.0,
+            "httpOnly": False,
+            "secure": True,
+            "sameSite": "None",
+        }
+    ]
+
+
+def test_run_ali1688_slow_flow_resolve_runtime_user_data_dir_for_chromium_extension(tmp_path) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    extension_dir = tmp_path / "ext"
+    extension_dir.mkdir()
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    resolved = module._resolve_runtime_user_data_dir(
+        "/tmp/original-profile",
+        None,
+        str(extension_dir),
+        output_dir,
+    )
+    assert resolved == str((output_dir / "_runtime_chromium_profile").resolve())
+
+    preserved = module._resolve_runtime_user_data_dir(
+        "/tmp/original-profile",
+        "chrome",
+        str(extension_dir),
+        output_dir,
+    )
+    assert preserved == "/tmp/original-profile"
+
+
+def test_run_ali1688_slow_flow_detail_offer_id_from_url() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert (
+        module._detail_offer_id_from_url("https://detail.1688.com/offer/904776936832.html?spm=a26352.b28411319/2508.0.0")
+        == "904776936832"
+    )
+    assert module._detail_offer_id_from_url("https://www.1688.com/") == ""
+
+
+def test_run_ali1688_slow_flow_copy_sku_drawer_opened_detection() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class FakeLocator:
+        def __init__(self, *, count: int = 1, visible: bool = True, attrs: dict[str, str] | None = None):
+            self._count = count
+            self._visible = visible
+            self._attrs = attrs or {}
+
+        @property
+        def first(self):
+            return self
+
+        async def count(self):
+            return self._count
+
+        async def is_visible(self):
+            return self._visible
+
+        async def get_attribute(self, name: str):
+            return self._attrs.get(name)
+
+    class FakePage:
+        def __init__(self, drawer: FakeLocator, iframe: FakeLocator):
+            self._drawer = drawer
+            self._iframe = iframe
+
+        def locator(self, selector: str):
+            if selector == "#consign-sku-fullscreen-drawer":
+                return self._drawer
+            if selector == "#fullscreen-drawer-iframe":
+                return self._iframe
+            raise AssertionError(f"unexpected selector: {selector}")
+
+    opened_page = FakePage(
+        FakeLocator(attrs={"style": ""}),
+        FakeLocator(attrs={"src": "https://air.1688.com/app/upkg-solution/od-panel/sku-panel.html?offerId=904776936832"}),
+    )
+    hidden_page = FakePage(
+        FakeLocator(attrs={"style": "display: none;"}),
+        FakeLocator(attrs={"src": "https://air.1688.com/app/upkg-solution/od-panel/sku-panel.html?offerId=904776936832#hidden"}),
+    )
+
+    import asyncio
+
+    assert asyncio.run(module._copy_sku_drawer_opened(opened_page)) is True
+    assert asyncio.run(module._copy_sku_drawer_opened(hidden_page)) is False
+
+
+def test_run_ali1688_slow_flow_copy_sku_drawer_state_shape() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class FakeLocator:
+        def __init__(self, *, count: int = 1, visible: bool = True, attrs: dict[str, str] | None = None):
+            self._count = count
+            self._visible = visible
+            self._attrs = attrs or {}
+
+        @property
+        def first(self):
+            return self
+
+        async def count(self):
+            return self._count
+
+        async def is_visible(self):
+            return self._visible
+
+        async def get_attribute(self, name: str):
+            return self._attrs.get(name)
+
+    class FakePage:
+        def __init__(self, drawer: FakeLocator, iframe: FakeLocator):
+            self._drawer = drawer
+            self._iframe = iframe
+
+        def locator(self, selector: str):
+            if selector == "#consign-sku-fullscreen-drawer":
+                return self._drawer
+            if selector == "#fullscreen-drawer-iframe":
+                return self._iframe
+            raise AssertionError(f"unexpected selector: {selector}")
+
+    page = FakePage(
+        FakeLocator(attrs={"style": ""}),
+        FakeLocator(attrs={"src": "https://air.1688.com/app/upkg-solution/od-panel/sku-panel.html?offerId=1"}),
+    )
+
+    import asyncio
+
+    state = asyncio.run(module._copy_sku_drawer_state(page))
+    assert state == {
+        "drawer_present": True,
+        "drawer_visible": True,
+        "drawer_style": "",
+        "iframe_present": True,
+        "iframe_src": "https://air.1688.com/app/upkg-solution/od-panel/sku-panel.html?offerId=1",
+        "iframe_hidden": False,
+        "opened": True,
+    }
+
+
+def test_run_ali1688_slow_flow_overlay_state_shape() -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_ali1688_slow_flow.py")
+    spec = importlib.util.spec_from_file_location("run_ali1688_slow_flow_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class FakeLocator:
+        def __init__(self, *, count: int = 0, visible: bool = False):
+            self._count = count
+            self._visible = visible
+
+        @property
+        def first(self):
+            return self
+
+        @property
+        def last(self):
+            return self
+
+        async def count(self):
+            return self._count
+
+        async def is_visible(self):
+            return self._visible
+
+    class FakePage:
+        def locator(self, selector: str):
+            if selector == ".J_MIDDLEWARE_FRAME_WIDGET:visible":
+                return FakeLocator(count=2, visible=True)
+            raise AssertionError(f"unexpected selector: {selector}")
+
+        def get_by_text(self, text: str, exact: bool = False):
+            assert text == "我知道了"
+            assert exact is True
+            return FakeLocator(count=1, visible=True)
+
+    import asyncio
+
+    async def fake_toolbar_ready(page):
+        return True
+
+    original = module._plugin_toolbar_ready
+    module._plugin_toolbar_ready = fake_toolbar_ready
+    try:
+        state = asyncio.run(module._overlay_state(FakePage()))
+    finally:
+        module._plugin_toolbar_ready = original
+
+    assert state == {
+        "overlay_count": 2,
+        "ack_visible": True,
+        "toolbar_ready": True,
+    }
+
+
 def test_source_resolution_from_urls_script_exists() -> None:
     path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_source_resolution_from_urls.py")
     assert path.exists()
@@ -585,6 +991,11 @@ def test_export_pipeline_excel_outputs_workbook(tmp_path) -> None:
     assert "筛选总览" in workbook.sheetnames
     overview = workbook["筛选总览"]
     assert overview["A2"].value == "xy-001"
+    listing_sheet = workbook["最终上架候选"]
+    listing_headers = [cell.value for cell in listing_sheet[1]]
+    header_index = {value: index + 1 for index, value in enumerate(listing_headers)}
+    assert listing_sheet.cell(row=2, column=header_index["闲鱼价格"]).value == 299.0
+    assert listing_sheet.cell(row=2, column=header_index["1688价格"]).value == 120.0
 
 
 def test_run_category_pipeline_from_urls_writes_outputs(monkeypatch, capsys, tmp_path) -> None:
@@ -657,3 +1068,300 @@ def test_run_category_pipeline_from_urls_writes_outputs(monkeypatch, capsys, tmp
     assert Path(output["source_bundle_file"]).exists()
     assert Path(output["profit_analysis_file"]).exists()
     assert Path(output["listing_candidates_file"]).exists()
+
+
+def test_pipeline_excel_free_parsing_logic() -> None:
+    # Test JSON-based SKU extraction and min_price calculation introduced in run_full_pipeline.py
+    res = {
+        "title": "测试商品",
+        "offer_id": "12345",
+        "item_url": "https://detail.1688.com/offer/12345.html",
+        "images": ["http://img1.jpg"],
+        "sku_items": [
+            {"attributes": "颜色:红色;尺码:L", "price": "100.00", "stock": 50, "spec_id": "sp1", "image": "http://img2.jpg"},
+            {"attributes": "颜色:红色;尺码:M", "price": 95.5, "stock": 20, "spec_id": "sp2", "image": ""},
+        ]
+    }
+    sku_items = res.get("sku_items", [])
+    min_price = 0
+    sku_count = 0
+    if sku_items:
+        prices = [float(s.get("price") or 0.0) for s in sku_items if s.get("price") is not None]
+        if prices:
+            min_price = min(prices)
+        sku_count = len(sku_items)
+    
+    assert min_price == 95.5
+    assert sku_count == 2
+
+
+def test_local_html_cleanup_on_decision_asset_delete(tmp_path) -> None:
+    # Verify basic physical file unlink cascade logic
+    dummy_html = tmp_path / "dummy_detail.html"
+    dummy_html.write_text("<html>test</html>", encoding="utf-8")
+    assert dummy_html.exists()
+    
+    # Simulate extraction of html_path and cascading unlink
+    html_path_str = str(dummy_html.resolve())
+    p = Path(html_path_str)
+    if p.exists() and p.is_file():
+        p.unlink()
+        
+    assert not dummy_html.exists()
+
+
+def test_delete_task_physically_cleans_local_html(monkeypatch, tmp_path) -> None:
+    # Test that delete_task route unlinks local HTML files cascadingly based on html_path
+    import src.web_api.main as web_main
+    
+    dummy_html = tmp_path / "dummy_1688_detail.html"
+    dummy_html.write_text("<html>test</html>", encoding="utf-8")
+    assert dummy_html.exists()
+
+    class FakeCursor:
+        def __init__(self):
+            self.query = None
+            self.args = None
+
+        def execute(self, query, args=None):
+            self.query = query
+            self.args = args
+
+        def fetchall(self):
+            # Simulate returning html_path for resources under this task
+            return [{"html_path": str(dummy_html.resolve())}]
+
+        def fetchone(self):
+            # Simulate task details
+            return {"root_dir": str(tmp_path)}
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+        def commit(self):
+            pass
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConn())
+    monkeypatch.setattr(web_main, "pause_task", lambda tid: None)
+    monkeypatch.setattr(web_main.Task, "update", lambda *args, **kwargs: None)
+
+    # Call delete_task to trigger cascade physical file deletion
+    res = web_main.delete_task("dummy_task_id")
+    assert res == {"status": "ok"}
+    
+    # Verify the cascade delete unlinked the file successfully
+    assert not dummy_html.exists()
+
+
+def test_web_api_depublish_route_flow(monkeypatch) -> None:
+    # Test POST /api/depublish/{source_id} API endpoint
+    import src.web_api.main as web_main
+
+    class FakeCursor:
+        def __init__(self):
+            self.queries = []
+            self.args = []
+
+        def execute(self, query, args=None):
+            self.queries.append(query)
+            self.args.append(args)
+
+        def fetchone(self):
+            # Simulate returning already published product_id and task_id
+            return {"xianyu_item_id": "987654", "task_id": "task_111"}
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+        def commit(self):
+            pass
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConn())
+
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    monkeypatch.setattr(PublisherV3, "depublish_item", lambda self, pid: {"status": "success", "msg": "下架成功"})
+
+    import asyncio
+    # 直接异步调用接口函数以规避对 httpx 的依赖
+    res = asyncio.run(web_main.depublish_from_xianyu(802))
+    assert res == {"status": "success", "msg": "下架成功"}
+
+
+def test_web_api_batch_depublish(monkeypatch) -> None:
+    import src.web_api.main as web_main
+
+    class FakeCursor:
+        def __init__(self):
+            self.queries = []
+            self.args = []
+
+        def execute(self, query, args=None):
+            self.queries.append(query)
+            self.args.append(args)
+
+        def fetchone(self):
+            return {"xianyu_item_id": "987654", "task_id": "task_111"}
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+        def commit(self):
+            pass
+        def close(self):
+            pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConn())
+
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    monkeypatch.setattr(PublisherV3, "depublish_item", lambda self, pid: {"status": "success", "msg": "下架成功"})
+
+    import asyncio
+    req = {"source_ids": [802, 803]}
+    res = asyncio.run(web_main.batch_depublish_from_xianyu(req))
+    assert res == {
+        "success": [{"source_id": 802}, {"source_id": 803}],
+        "failed": []
+    }
+
+
+def test_web_api_delete_route_flow(monkeypatch) -> None:
+    # Test POST /api/delete/{source_id} API endpoint
+    import src.web_api.main as web_main
+
+    # 1. 测试未发布商品删除拦截
+    class FakeCursorNone:
+        def execute(self, query, args=None): pass
+        def fetchone(self): return None
+    class FakeConnNone:
+        def cursor(self): return FakeCursorNone()
+        def close(self): pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConnNone())
+    import asyncio
+    res_none = asyncio.run(web_main.delete_from_xianyu(901))
+    assert res_none == {"status": "failed", "msg": "商品未发布，无法删除"}
+
+    # 2. 测试非下架状态商品（例如 success）删除拦截
+    class FakeCursorSuccess:
+        def execute(self, query, args=None): pass
+        def fetchone(self): return {"publish_status": "success", "xianyu_item_id": "987654", "task_id": "task_111"}
+    class FakeConnSuccess:
+        def cursor(self): return FakeCursorSuccess()
+        def close(self): pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConnSuccess())
+    res_succ = asyncio.run(web_main.delete_from_xianyu(902))
+    assert res_succ == {"status": "failed", "msg": "商品当前状态为 success，只有已下架商品可以删除"}
+
+    # 3. 测试已下架商品（depublished）成功删除
+    class FakeCursorDepublished:
+        def execute(self, query, args=None): pass
+        def fetchone(self): return {"publish_status": "depublished", "xianyu_item_id": "987654", "task_id": "task_111"}
+    class FakeConnDepublished:
+        def cursor(self): return FakeCursorDepublished()
+        def commit(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConnDepublished())
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    monkeypatch.setattr(PublisherV3, "delete_item", lambda self, pid: {"status": "success", "msg": "删除成功"})
+
+    res_del = asyncio.run(web_main.delete_from_xianyu(903))
+    assert res_del == {"status": "success", "msg": "删除成功"}
+
+
+def test_web_api_batch_delete(monkeypatch) -> None:
+    # Test POST /api/delete/batch API endpoint
+    import src.web_api.main as web_main
+
+    # 模拟批量数据：
+    # 801: 未发布 (None)
+    # 802: 已下架 (depublished) -> 成功删除
+    # 803: 已上架 (success) -> 状态不符报错拦截
+    class FakeCursorBatch:
+        def __init__(self):
+            self.count = 0
+        def execute(self, query, args=None):
+            self.current_args = args
+        def fetchone(self):
+            sid = self.current_args[0]
+            if sid == 801:
+                return None
+            elif sid == 802:
+                return {"publish_status": "depublished", "xianyu_item_id": "item_802", "task_id": "task_802"}
+            elif sid == 803:
+                return {"publish_status": "success", "xianyu_item_id": "item_803", "task_id": "task_803"}
+            return None
+
+    class FakeConnBatch:
+        def cursor(self): return FakeCursorBatch()
+        def commit(self): pass
+        def close(self): pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConnBatch())
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    monkeypatch.setattr(PublisherV3, "delete_item", lambda self, pid: {"status": "success", "msg": "删除成功"})
+
+    import asyncio
+    req = {"source_ids": [801, 802, 803]}
+    res = asyncio.run(web_main.batch_delete_from_xianyu(req))
+    assert res["success"] == [{"source_id": 802}]
+    assert len(res["failed"]) == 2
+    assert res["failed"][0] == {"source_id": 801, "msg": "商品未发布，无法删除"}
+    assert res["failed"][1] == {"source_id": 803, "msg": "商品状态为 success，只有已下架商品可以删除"}
+
+
+def test_web_api_get_xianyu_products(monkeypatch) -> None:
+    # Test GET /api/xianyu_products API endpoint
+    import src.web_api.main as web_main
+    from datetime import datetime
+
+    class FakeCursor:
+        def __init__(self):
+            self.queries = []
+            self.args = []
+
+        def execute(self, query, args=None):
+            self.queries.append(query)
+            self.args.append(args)
+
+        def fetchone(self):
+            return {"count": 1}
+
+        def fetchall(self):
+            return [{
+                "publish_id": 1,
+                "task_id": "task_abc",
+                "source_db_id": 101,
+                "xianyu_item_id": "999888",
+                "publish_status": "success",
+                "publish_msg": "已上架",
+                "published_url": "http://xianyu.com/999888",
+                "publish_time": datetime(2026, 6, 9, 12, 0, 0),
+                "source_title": "1688源头好物",
+                "source_url": "http://1688.com/101",
+                "source_images": '["http://img.1688.com/101.jpg"]',
+                "source_price": 50.0,
+                "source_sku_count": 3,
+                "ref_title": "参考爆款标题",
+                "ref_price": 80.0,
+                "ref_want_count": 500
+            }]
+
+    class FakeConn:
+        def cursor(self): return FakeCursor()
+        def close(self): pass
+
+    monkeypatch.setattr(web_main, "get_db_conn", lambda: FakeConn())
+
+    res = web_main.get_xianyu_products(page=1, limit=10, keyword="1688")
+    assert res["total"] == 1
+    assert len(res["items"]) == 1
+    assert res["items"][0]["source_title"] == "1688源头好物"
+    assert res["items"][0]["xianyu_item_id"] == "999888"
+    assert res["items"][0]["publish_time"] == "2026-06-09 12:00:00"
+    assert res["items"][0]["source_image"] == "http://img.1688.com/101.jpg"

@@ -331,3 +331,64 @@ def test_ali1688_get_raises_network_error_after_retry_exhausted(monkeypatch) -> 
         assert "offline" in str(exc)
     else:
         raise AssertionError("Expected Ali1688NetworkError")
+
+
+def test_ali1688_detail_sku_extraction_cleans_span_and_matches_images() -> None:
+    mock_html = """
+    <html>
+      <body>
+        <script>
+          window.__INIT_DATA__ = {
+            "globalData": {
+              "skuProps": [
+                {
+                  "prop": "颜色",
+                  "value": [
+                    {
+                      "name": "红色<span style=\\"line-height: 1;\\">参数</span>",
+                      "imageUrl": "https://cbu01.alicdn.com/sku_red.jpg"
+                    },
+                    {
+                      "name": "蓝色",
+                      "imageUrl": "https://cbu01.alicdn.com/sku_blue.jpg"
+                    }
+                  ]
+                }
+              ],
+              "skuInfoMap": {
+                "颜色:红色<span style=\\"line-height: 1;\\">参数</span>": {
+                  "price": "19.9",
+                  "canBookCount": 99,
+                  "specId": "red123"
+                },
+                "颜色:蓝色": {
+                  "price": "20.9",
+                  "canBookCount": 50,
+                  "specId": "blue123"
+                }
+              }
+            }
+          };
+        </script>
+      </body>
+    </html>
+    """.strip()
+
+    res = Ali1688SourceAdapter.extract_detail_sku_and_images(mock_html)
+    sku_details = res.get("sku_details", [])
+    assert len(sku_details) == 2
+
+    # 验证红色规格
+    red_sku = next(s for s in sku_details if "红色" in s["attributes"])
+    assert red_sku["attributes"] == "颜色:红色"
+    assert red_sku["price"] == "19.9"
+    assert red_sku["stock"] == 99
+    assert red_sku["image"] == "https://cbu01.alicdn.com/sku_red.jpg"
+
+    # 验证蓝色规格
+    blue_sku = next(s for s in sku_details if "蓝色" in s["attributes"])
+    assert blue_sku["attributes"] == "颜色:蓝色"
+    assert blue_sku["price"] == "20.9"
+    assert blue_sku["stock"] == 50
+    assert blue_sku["image"] == "https://cbu01.alicdn.com/sku_blue.jpg"
+

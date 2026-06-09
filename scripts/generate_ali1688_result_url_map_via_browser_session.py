@@ -16,7 +16,7 @@ from xianyu_tools.xianyu_adapter.browser_transport import (
     default_launch_args,
 )
 
-from run_ali1688_slow_flow import DEFAULT_ALI1688_USER_DATA_DIR, _run_flow_on_page
+from run_ali1688_slow_flow import DEFAULT_ALI1688_USER_DATA_DIR, _normalize_image_search_url, _run_flow_on_page
 from run_source_resolution_from_browser_runs import _load_hot_items
 
 
@@ -64,11 +64,14 @@ async def _run(args) -> None:
                 output_dir = summary_dir / f"{slug}_artifacts"
                 output_dir.mkdir(parents=True, exist_ok=True)
                 summary_file = summary_dir / f"{slug}_summary.json"
+                effective_image_url = _normalize_image_search_url(hot_item.image_url)
                 summary: dict[str, object] = {
                     "ok": False,
                     "status": "starting",
                     "keyword": hot_item.metadata.get("category_keyword") or "",
-                    "image_url": hot_item.image_url,
+                    "image_url": effective_image_url or "",
+                    "requested_image_url": hot_item.image_url or "",
+                    "image_url_rejected": bool(hot_item.image_url and not effective_image_url),
                     "final_url": "",
                     "output_dir": str(output_dir.resolve()),
                     "user_data_dir": args.user_data_dir,
@@ -82,7 +85,7 @@ async def _run(args) -> None:
                     context=context,
                     page=page,
                     keyword=str(hot_item.metadata.get("category_keyword") or hot_item.title),
-                    image_url=hot_item.image_url,
+                    image_url=effective_image_url,
                     output_dir=output_dir,
                     summary=summary,
                     summary_json_file=str(summary_file),
@@ -90,6 +93,8 @@ async def _run(args) -> None:
                     subject_index=0,
                     capture_all_subjects=True,
                     max_subjects=args.max_subjects,
+                    detail_top_n=3,
+                    detail_ready_wait_seconds=30.0,
                     keep_open_seconds=0.0,
                 )
                 page = await _close_extra_pages(context, page)

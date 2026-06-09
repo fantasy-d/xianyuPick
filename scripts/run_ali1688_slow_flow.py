@@ -1,81 +1,454 @@
 #!/usr/bin/env python3
-from __future__ import annotations
-
-import argparse
-import asyncio
-import json
-import sys
+import argparse, asyncio, json, html, random, re, sys, logging
 from pathlib import Path
-import random
-
 from playwright.async_api import async_playwright
-import pyautogui
 
+# --- 导入统一日志工具 ---
+BASE_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BASE_DIR / "src"))
+from xianyu_tools.logging_util import get_unified_logger
+from xianyu_tools.source_adapter import Ali1688SourceAdapter
 from xianyu_tools.xianyu_adapter.browser_transport import (
-    default_desktop_context_options,
-    default_launch_args,
+    default_desktop_context_options, default_launch_args
 )
 
+try:
+    import pyautogui
+except ImportError:
+    pyautogui = None
+
+
+def _sanitize_filename(name: str) -> str:
+    name = html.unescape(name).replace(">", "-").replace("&", "and")
+    return re.sub(r'[\\/:*?"<>|]', '_', name).strip()[:60]
+
+DEFAULT_ALI1688_STATE_FILE = "state/ali1688/storage_state.json"
 DEFAULT_ALI1688_USER_DATA_DIR = str(
     (Path(__file__).resolve().parents[1] / "profiles" / "ali1688_chrome_profile").resolve()
 )
+DEFAULT_ALI1688_EXTENSION_DIR = "tmp/1688-extension"
 
 
-async def _dump_page(page, output_dir: Path, name: str) -> None:
-    html = await page.content()
-    (output_dir / f"{name}.html").write_text(html, encoding="utf-8")
-    print(json.dumps({"step": "dump", "name": name, "url": page.url}, ensure_ascii=False), flush=True)
+def _append_extension_launch_args(args: list[str], extension_dir: str) -> list[str]:
+    new_args = [a for a in args if a != "--disable-extensions"]
+    ext_path = str(Path(extension_dir).resolve())
+    if f"--disable-extensions-except={ext_path}" not in new_args:
+        new_args.append(f"--disable-extensions-except={ext_path}")
+    if f"--load-extension={ext_path}" not in new_args:
+        new_args.append(f"--load-extension={ext_path}")
+    return new_args
 
 
-async def _dump_json(output_dir: Path, name: str, payload: dict) -> None:
-    (output_dir / f"{name}.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"step": "dump_json", "name": name}, ensure_ascii=False), flush=True)
+def _resolve_browser_channel(channel: str, extension_dir: str) -> str | None:
+    if extension_dir:
+        if channel == "chrome":
+            return None
+    return channel
 
 
-def _write_summary(path: str | None, payload: dict) -> None:
-    if not path:
-        return
-    Path(path).write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+def _resolve_runtime_user_data_dir(original_user_data_dir: str, channel: str | None, extension_dir: str, output_dir: Path) -> str:
+    if channel is None and extension_dir:
+        return str((output_dir / "_runtime_chromium_profile").resolve())
+    return original_user_data_dir
 
 
-async def _switch_to_latest_page(context, page, output_dir: Path, name: str):
-    pages = context.pages
-    latest = pages[-1] if pages else page
-    if latest is not page:
-        await latest.wait_for_load_state("domcontentloaded", timeout=15000)
-        print(
-            json.dumps(
-                {"step": "switch_page", "name": name, "from_url": page.url, "to_url": latest.url, "page_count": len(pages)},
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-        await _dump_page(latest, output_dir, name)
-        return latest
-    print(json.dumps({"step": "page_count", "name": name, "page_count": len(pages), "url": page.url}, ensure_ascii=False), flush=True)
-    return page
+def _sanitize_storage_state_cookies(cookies: list[dict]) -> list[dict]:
+    allowed_fields = {"name", "value", "domain", "path", "expires", "httpOnly", "secure", "sameSite"}
+    clean_list = []
+    for c in cookies:
+        item = {k: v for k, v in c.items() if k in allowed_fields}
+        if "sameSite" in item and item["sameSite"] not in ["Strict", "Lax", "None"]:
+            del item["sameSite"]
+        clean_list.append(item)
+    return clean_list
 
 
-async def _recover_to_ali1688_search_page(context, page):
-    pages = list(context.pages)
-    for candidate in reversed(pages):
+def _prepare_managed_state_file(source_state: str, managed_state_file: str) -> tuple[str | None, bool]:
+    source_path = Path(source_state)
+    target_path = Path(managed_state_file)
+    
+    if not source_path.exists():
+        if source_state != managed_state_file:
+            raise FileNotFoundError(f"state file not found at {source_state}")
+        return None, False
+        
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
+        return str(target_path.resolve()), True
+    except Exception:
+        return None, False
+
+
+async def _apply_state_file_cookies(context, state_file: str | Path) -> None:
+    state_path = Path(state_file)
+    if state_path.exists():
         try:
-            if candidate.is_closed():
-                continue
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            cookies = state.get("cookies", [])
+            clean_cookies = _sanitize_storage_state_cookies(cookies)
+            await context.add_cookies(clean_cookies)
         except Exception:
-            continue
-        url = candidate.url or ""
-        if "login.taobao.com" in url:
-            try:
-                await candidate.close()
-            except Exception:
-                pass
-            continue
-        if "1688.com" in url:
-            return candidate
-    recovered = await context.new_page()
-    await recovered.goto("https://www.1688.com/", wait_until="domcontentloaded", timeout=30000)
-    return recovered
+            pass
+
+
+async def _export_context_state(context, state_file: str | Path) -> None:
+    state_path = Path(state_file)
+    try:
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state = await context.storage_state()
+        if "cookies" in state:
+            state["cookies"] = _sanitize_storage_state_cookies(state["cookies"])
+        state_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _overlay_close_click_point(rect: dict) -> tuple[float, float]:
+    x = rect.get("x", 0.0)
+    y = rect.get("y", 0.0)
+    w = rect.get("width", 0.0)
+    h = rect.get("height", 0.0)
+    return x + w - 22.0, y + 20.0
+
+
+def _plugin_toolbar_selectors() -> list[str]:
+    return [
+        "#market-mate-for-1688",
+        "#market-mate-for-1688-od",
+        ".goods-operation-panel-media",
+        ".goods-operation-hover.copy-sku",
+        "text=复制sku",
+    ]
+
+
+async def _plugin_toolbar_ready(page) -> bool:
+    selectors = _plugin_toolbar_selectors()
+    for sel in selectors:
+        try:
+            loc = page.locator(sel).first
+            if await loc.count() > 0 and await loc.is_visible():
+                return True
+        except Exception:
+            pass
+    return False
+
+
+async def _copy_sku_drawer_opened(page) -> bool:
+    try:
+        drawer = page.locator("#consign-sku-fullscreen-drawer").first
+        iframe = page.locator("#fullscreen-drawer-iframe").first
+        if await drawer.count() > 0 and await drawer.is_visible():
+            src = await iframe.get_attribute("src")
+            if src and "#hidden" not in src:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+async def _copy_sku_drawer_state(page) -> dict:
+    try:
+        drawer = page.locator("#consign-sku-fullscreen-drawer").first
+        iframe = page.locator("#fullscreen-drawer-iframe").first
+        drawer_present = await drawer.count() > 0
+        drawer_visible = await drawer.is_visible() if drawer_present else False
+        drawer_style = await drawer.get_attribute("style") if drawer_present else None
+        iframe_present = await iframe.count() > 0
+        iframe_src = await iframe.get_attribute("src") if iframe_present else None
+        iframe_hidden = "#hidden" in iframe_src if iframe_src else True
+        opened = drawer_visible and not iframe_hidden
+    except Exception:
+        drawer_present = drawer_visible = iframe_present = False
+        drawer_style = iframe_src = None
+        iframe_hidden = opened = False
+    return {
+        "drawer_present": drawer_present,
+        "drawer_visible": drawer_visible,
+        "drawer_style": drawer_style,
+        "iframe_present": iframe_present,
+        "iframe_src": iframe_src,
+        "iframe_hidden": iframe_hidden,
+        "opened": opened,
+    }
+
+
+async def _overlay_state(page) -> dict:
+    try:
+        overlay_loc = page.locator(".J_MIDDLEWARE_FRAME_WIDGET:visible")
+        overlay_count = await overlay_loc.count()
+        ack_loc = page.get_by_text("我知道了", exact=True)
+        ack_visible = False
+        if await ack_loc.count() > 0:
+            ack_visible = await ack_loc.first.is_visible()
+        toolbar_ready = await _plugin_toolbar_ready(page)
+    except Exception:
+        overlay_count = 0
+        ack_visible = toolbar_ready = False
+    return {
+        "overlay_count": overlay_count,
+        "ack_visible": ack_visible,
+        "toolbar_ready": toolbar_ready,
+    }
+
+
+async def _clear_extension_onboarding_state(context) -> None:
+    for sw in context.service_workers:
+        try:
+            await asyncio.wait_for(sw.evaluate("""
+                () => {
+                    if (typeof chrome !== 'undefined' && chrome.storage && chrome.storage.local) {
+                        chrome.storage.local.set({
+                            '_1688_EXTENSION_ONBOARDING_FEATURE': 'done',
+                            '_1688_EXTENSION_SHOW_GUIDANCE_REASON': 'none'
+                        }, () => {
+                            console.log('Onboarding state cleared');
+                        });
+                    }
+                }
+            """), timeout=2.0)
+        except Exception:
+            pass
+
+
+def _parse_dispatch_count(val_str: str) -> int:
+    if not val_str:
+        return 0
+    val_str = val_str.strip()
+    
+    match = re.match(r'^([\d\.]+)\s*([万kK]?)$', val_str)
+    if not match:
+        num_match = re.search(r'([\d\.]+)', val_str)
+        if not num_match:
+            return 0
+        num = float(num_match.group(1))
+        unit = ""
+        if "万" in val_str:
+            unit = "万"
+        elif "k" in val_str or "K" in val_str:
+            unit = "k"
+    else:
+        num = float(match.group(1))
+        unit = match.group(2)
+        
+    if unit == "万":
+        return int(num * 10000)
+    elif unit in ["k", "K"]:
+        return int(num * 1000)
+    return int(num)
+
+
+def _extract_dispatch_metrics_from_text(text: str) -> dict:
+    seven_day = 0
+    month = 0
+    if text:
+        match_7 = re.search(r'(?:7天|近7天)代发\s*([\d\.]+(?:万|k|K)?)', text)
+        if match_7:
+            seven_day = _parse_dispatch_count(match_7.group(1))
+        match_m = re.search(r'(?:月代发|月成交|月代发量|月\s*代发)\s*([\d\.]+(?:万|k|K)?)', text)
+        if match_m:
+            month = _parse_dispatch_count(match_m.group(1))
+    return {
+        "seven_day_dispatch_count": seven_day,
+        "month_dispatch_count": month,
+    }
+
+
+def _normalize_image_search_url(url: str) -> str | None:
+    if not url or not isinstance(url, str):
+        return None
+    url_lower = url.lower()
+    if not (url_lower.startswith("http://") or url_lower.startswith("https://")):
+        return None
+    parsed_path = url.split("?")[0]
+    if parsed_path.lower().endswith(".heic") or parsed_path.lower().endswith(".gif"):
+        return None
+    return url
+
+
+def _top_dispatch_candidates(rows: list, limit: int) -> list:
+    valid_rows = [r for r in rows if r.get("item_url")]
+    
+    def sort_key(r):
+        return (r.get("seven_day_dispatch_count", 0) or 0, r.get("month_dispatch_count", 0) or 0)
+        
+    valid_rows.sort(key=sort_key, reverse=True)
+    return valid_rows[:limit]
+
+
+def _detail_offer_id_from_url(url: str) -> str:
+    if not url:
+        return ""
+    match = re.search(r'/offer/(\d+)\.html', url)
+    if match:
+        return match.group(1)
+    return ""
+
+
+def _find_key_recursive(obj, target_key):
+    if isinstance(obj, dict):
+        if target_key in obj: return obj[target_key]
+        for v in obj.values():
+            res = _find_key_recursive(v, target_key)
+            if res: return res
+    elif isinstance(obj, list):
+        for item in obj:
+            res = _find_key_recursive(item, target_key)
+            if res: return res
+    return None
+
+def _clean_image_url(url: str) -> str:
+    """
+    1688 高清大图清洗逻辑：
+    1. 过滤掉所有视频文件和视频帧、封面图片资源（包含video、.mp4等特征）
+    2. 允许任何合法的阿里 CDN 图片或常见图像后缀直接通过
+    3. 使用正则过滤掉缩略图的裁剪尺寸并还原为原始大图
+    4. 过滤掉所有不以合法图片后缀结尾的非图资源链接
+    """
+    if not url or not isinstance(url, str): return ""
+    
+    # 补全协议
+    if url.startswith("//"): url = "https:" + url
+    elif not url.startswith("http"): url = "https://" + url
+
+    url_lower = url.lower()
+    # 视频过滤：包含 video 关键字或视频文件类型，直接丢弃
+    video_keywords = ["video", ".mp4", ".avi", ".mov", ".flv", "/video"]
+    if any(kw in url_lower for kw in video_keywords):
+        return ""
+
+    # 基础过滤：必须为阿里 CDN 图片或常见的图片后缀
+    if "alicdn.com" not in url_lower and not any(ext in url_lower for ext in [".jpg", ".jpeg", ".png"]):
+        return ""
+
+    # 清除 1688 / 淘宝 CDN 常见的缩略图和压缩后缀
+    # 比如：.jpg_300x300.jpg -> .jpg
+    #      .png_.webp -> .png
+    #      .jpeg_q90.jpg -> .jpeg
+    url = re.sub(r'\.([a-zA-Z]+)_[^/\\]+$', r'.\1', url)
+    
+    # 最终验证：必须是以常见的图片扩展名结尾
+    if not any(url.lower().endswith(ext) for ext in [".jpg", ".jpeg", ".png"]):
+        return ""
+        
+    return url
+
+def _sanitize_cookies(cookies):
+    """清洗 Cookie 字段，防止 Playwright 报错"""
+    allowed_fields = {"name", "value", "url", "domain", "path", "expires", "httpOnly", "secure", "sameSite"}
+    clean_list = []
+    for c in cookies:
+        item = {k: v for k, v in c.items() if k in allowed_fields}
+        if "sameSite" in item and item["sameSite"] not in ["Strict", "Lax", "None"]:
+            del item["sameSite"]
+        clean_list.append(item)
+    return clean_list
+
+def is_relevant(source_title, search_keyword):
+    if not source_title: return False, "标题为空"
+    s_title, t_kw = str(source_title).lower(), str(search_keyword).lower()
+    clean_keyword = re.sub(r'\s+', '', t_kw)
+    if clean_keyword in s_title: return True, ""
+    core_parts = [clean_keyword[:2], clean_keyword[-2:], clean_keyword[1:3]]
+    for part in core_parts:
+        if len(part) >= 2 and part in s_title: return True, ""
+    return False, f"不含关键词 '{clean_keyword}'"
+
+
+def _clean_html_span(text: str) -> str:
+    if not text: return ""
+    text = re.sub(r'<span[^>]*?>.*?</span>', '', text, flags=re.IGNORECASE | re.DOTALL)
+    text = re.sub(r'<[^>]+>', '', text)
+    parts = [p.strip() for p in text.split(";") if p.strip()]
+    return ";".join(parts)
+
+
+def _parse_captured_api_data(captured_responses: list[dict], logger):
+    parsed_result = {"sku_details": [], "images": []}
+    for resp in captured_responses:
+        data = resp.get("data", {})
+        # SKU
+        for key in ["skuInfoMap", "skuProps"]:
+            info_map = _find_key_recursive(data, key)
+            if info_map and not parsed_result["sku_details"] and isinstance(info_map, dict):
+                for attr_name, info in info_map.items():
+                    parsed_result["sku_details"].append({
+                        "attributes": _clean_html_span(html.unescape(str(attr_name))).replace(">", " - "),
+                        "price": info.get("discountPrice") or info.get("price"),
+                        "stock": info.get("canBookCount"),
+                        "spec_id": info.get("specId")
+                    })
+        # Images
+        for key in ["imageList", "images", "mainImages"]:
+            image_list = _find_key_recursive(data, key)
+            if image_list and isinstance(image_list, list) and not parsed_result["images"]:
+                for img in image_list:
+                    u = None
+                    if isinstance(img, str): u = img
+                    elif isinstance(img, dict): u = img.get("fullPathImageURI") or img.get("originalImageUri") or img.get("url")
+                    if u:
+                        cleaned = _clean_image_url(str(u))
+                        if cleaned: parsed_result["images"].append(cleaned)
+                if parsed_result["images"]: break
+    return parsed_result
+
+async def _clean_page_overlays(page, logger):
+    for i in range(5):
+        try:
+            # 尝试主动查找并关闭常见的新手引导/确认弹窗按钮
+            for btn_text in ["我知道了", "我知道啦", "跳过", "下一步", "关闭"]:
+                try:
+                    btn = page.get_by_text(btn_text).first
+                    if await btn.count() > 0 and await btn.is_visible():
+                        logger.info(f"    [Overlay] Clicking onboarding guide button: {btn_text}")
+                        await btn.click()
+                        await asyncio.sleep(1)
+                except Exception:
+                    pass
+
+            state = await _overlay_state(page)
+            if state["overlay_count"] == 0 and not state["ack_visible"]:
+                # 再通过注入JS移除任何残留的新手指引蒙层
+                try:
+                    await page.evaluate("""
+                        () => {
+                            const selectors = ['.next-guide-mask', '.guide-mask', '[class*="guide-mask"]', '[class*="next-guide"]', '.introjs-overlay', '.introjs-helperLayer'];
+                            selectors.forEach(sel => {
+                                document.querySelectorAll(sel).forEach(el => el.remove());
+                            });
+                        }
+                    """)
+                except Exception:
+                    pass
+                break
+            
+            logger.info(f"    [Overlay] Found {state['overlay_count']} overlays, ack_visible: {state['ack_visible']}. Cleaning...")
+            
+            if state["ack_visible"]:
+                ack_btn = page.get_by_text("我知道了", exact=True).first
+                if await ack_btn.is_visible():
+                    await ack_btn.click()
+                    await asyncio.sleep(1)
+                    continue
+                    
+            overlay_loc = page.locator(".J_MIDDLEWARE_FRAME_WIDGET:visible").first
+            if await overlay_loc.count() > 0:
+                rect = await overlay_loc.bounding_box()
+                if rect:
+                    cx, cy = _overlay_close_click_point(rect)
+                    await page.mouse.click(cx, cy)
+                    await asyncio.sleep(1)
+                    continue
+        except Exception as oe:
+            logger.warning(f"    [Overlay] Clean error: {oe}")
+            break
+
+
+def _log_slider_step(logger, payload: dict):
+    if logger:
+        logger.info(f"    [Slider] {payload.get('step')}: {json.dumps(payload, ensure_ascii=False)}")
+    else:
+        print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
 async def _drag_slider_track(locator) -> bool:
@@ -107,7 +480,6 @@ async def _drag_slider_track(locator) -> bool:
     end_x = track["x"] + track["width"] - handle_rect["width"] / 2 - 2
     y = start_y
     rng = random.Random()
-    # Temporarily bypass the global slow_mo cadence for the slider itself.
     original_timeout = page.context._impl_obj._timeout_settings.default_timeout()
     page.set_default_timeout(5000)
     await page.mouse.move(start_x - rng.uniform(3, 7), start_y + rng.uniform(-0.5, 0.5))
@@ -147,7 +519,10 @@ async def _frame_viewport_offset(frame, page) -> tuple[float, float]:
     return float(box["x"]), float(box["y"])
 
 
-async def _drag_slider_system_mouse(page, frame, locator) -> bool:
+async def _drag_slider_system_mouse(page, frame, locator, logger=None) -> bool:
+    if pyautogui is None:
+        _log_slider_step(logger, {"step": "pyautogui_not_available"})
+        return False
     await locator.wait_for(state="visible", timeout=5000)
     handle = await locator.element_handle()
     if handle is None:
@@ -204,10 +579,8 @@ async def _drag_slider_system_mouse(page, frame, locator) -> bool:
     move_steps = max(90, int(abs(total_distance) / 3.0))
     for index in range(1, move_steps + 1):
         progress = index / move_steps
-        # Ease-in acceleration: starts slower, ends faster, close to a human throw.
         eased = progress * progress
         target_x = start_x + total_distance * eased
-        # Keep Y nearly flat; only tiny jitter to avoid a mechanically perfect line.
         target_y = base_y + rng.uniform(-0.35, 0.35)
         pyautogui.moveTo(target_x, target_y, duration=0)
     await asyncio.sleep(0.02)
@@ -416,114 +789,31 @@ async def _search_input_locator(page):
     return None
 
 
-async def _search_button_locator(page):
-    selectors = [
-        "form#alisearch-from .input-button",
-        ".input-button",
-        "button[type='submit']",
-        "button:has-text('搜索')",
-        "[role='button']:has-text('搜索')",
-    ]
-    for selector in selectors:
-        locator = page.locator(selector).first
-        try:
-            if await locator.count():
-                return locator
-        except Exception:
-            continue
-    return None
-
-
-async def _page_ready_for_direct_search(page) -> bool:
-    try:
-        if "1688.com" not in page.url:
-            return False
-        if await _slider_still_present(page):
-            return False
-        locator = await _search_input_locator(page)
-        return locator is not None
-    except Exception:
-        return False
-
-
-async def _subject_region_locators(page):
-    selectors = [
-        "div[class*='cropRegion--']",
-        "div[class*='selectRegion--']",
-    ]
-    for selector in selectors:
-        locator = page.locator(selector)
-        try:
-            if await locator.count():
-                return locator
-        except Exception:
-            continue
-    return None
-
-
-async def _visible_subject_region_locators(page):
-    locator = await _subject_region_locators(page)
-    if locator is None:
-        return []
-    visible = []
-    total = await locator.count()
-    for index in range(total):
-        candidate = locator.nth(index)
-        try:
-            if await candidate.is_visible():
-                visible.append(candidate)
-        except Exception:
-            continue
-    return visible
-
-
-async def _count_subject_regions(page) -> int:
-    return len(await _visible_subject_region_locators(page))
-
-
-async def _select_subject_region(page, subject_index: int) -> dict[str, object]:
-    visible_locators = await _visible_subject_region_locators(page)
-    subject_count = len(visible_locators)
-    if subject_count <= 0:
-        return {"subject_count": 0, "selected_subject_index": 0, "subject_switched": False}
-    selected_index = max(0, min(subject_index, subject_count - 1))
-    if selected_index > 0:
-        target = visible_locators[selected_index]
-        await target.scroll_into_view_if_needed()
-        await asyncio.sleep(0.5)
-        await target.click(timeout=8000)
-        await asyncio.sleep(5)
-    return {
-        "subject_count": subject_count,
-        "selected_subject_index": selected_index,
-        "subject_switched": selected_index > 0,
-    }
-
-
-async def _select_subject_region_by_index(page, subject_index: int) -> bool:
-    visible_locators = await _visible_subject_region_locators(page)
-    if not visible_locators:
-        return False
-    selected_index = max(0, min(subject_index, len(visible_locators) - 1))
-    if selected_index == 0:
-        return True
-    target = visible_locators[selected_index]
-    await target.scroll_into_view_if_needed()
-    await asyncio.sleep(0.4)
-    await target.click(timeout=8000)
-    await asyncio.sleep(5)
-    return True
-
-
 def _looks_like_login_url(url: str) -> bool:
+    """检查 URL 是否是登录页（同步函数，不可用 async，否则调用处不加 await 会变成 truthy coroutine）"""
     lowered = url.lower()
     return any(token in lowered for token in ["login.taobao.com", "login.1688.com", "member/modify_evolve"])
 
 
+def _looks_like_captcha_page(url: str, title: str) -> bool:
+    """检查当前页是否为验证码拦截页"""
+    url_l = url.lower()
+    captcha_url_tokens = ["_____tmd_____/punish", "punish", "sec.taobao.com", "login.taobao.com", "login.1688.com"]
+    captcha_title_tokens = ["验证码", "安全验证", "访问被拒绝", "拦截"]
+    if any(t in url_l for t in captcha_url_tokens):
+        return True
+    if any(t in title for t in captcha_title_tokens):
+        return True
+    return False
+
+
 async def _wait_for_search_or_slider(page, timeout_seconds: float = 8.0) -> str:
+    """等待页面进入搜索框、滑块或登录页状态之一。
+    注意：_looks_like_login_url 必须是同步调用，不能 await。"""
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     while asyncio.get_running_loop().time() < deadline:
-        if _looks_like_login_url(page.url):
+        cur_url = page.url
+        if _looks_like_login_url(cur_url):
             return "login"
         if await _slider_still_present(page):
             return "slider"
@@ -533,7 +823,7 @@ async def _wait_for_search_or_slider(page, timeout_seconds: float = 8.0) -> str:
     return "unknown"
 
 
-async def _clear_home_slider(page, output_dir: Path | None = None, stage: str = "home", round_index: int | None = None) -> bool:
+async def _clear_home_slider(page, stage: str = "home", logger=None) -> bool:
     for attempt in range(1, 4):
         try:
             frames = list(page.frames)
@@ -547,13 +837,7 @@ async def _clear_home_slider(page, output_dir: Path | None = None, stage: str = 
             try:
                 if slider is None and frame_box is not None:
                     await _click_slider_frame(frame_box)
-                    print(
-                        json.dumps(
-                            {"step": "slider_retry_click", "attempt": attempt, "frame_url": frame.url},
-                            ensure_ascii=False,
-                        ),
-                        flush=True,
-                    )
+                    _log_slider_step(logger, {"step": "slider_retry_click", "attempt": attempt, "frame_url": frame.url})
                     await asyncio.sleep(0.4)
                     slider = await _find_slider_control(frame)
                 if slider is None:
@@ -565,538 +849,598 @@ async def _clear_home_slider(page, output_dir: Path | None = None, stage: str = 
                     track_x = geometry["geometry"]["track"]["x"]
                     if handle_x - track_x > 40 and frame_box is not None:
                         await _click_slider_frame(frame_box)
-                        print(
-                            json.dumps(
-                                {
-                                    "step": "slider_pre_reset",
-                                    "attempt": attempt,
-                                    "frame_url": frame.url,
-                                    "handle_x": handle_x,
-                                    "track_x": track_x,
-                                },
-                                ensure_ascii=False,
-                            ),
-                            flush=True,
-                        )
+                        _log_slider_step(logger, {
+                            "step": "slider_pre_reset",
+                            "attempt": attempt,
+                            "frame_url": frame.url,
+                            "handle_x": handle_x,
+                            "track_x": track_x,
+                        })
                         await asyncio.sleep(0.5)
                         slider = await _find_slider_control(frame)
                         if slider is None:
                             continue
                         slider_identity = await slider.evaluate("node => node.className || node.id || node.tagName")
                         geometry = await _read_slider_geometry(slider, frame, page)
-                if output_dir is not None:
-                    dump_prefix = f"{stage}_round{round_index or 0}_attempt{attempt}"
-                    await _dump_page(page, output_dir, f"{dump_prefix}_before_drag")
-                    if geometry is not None:
-                        await _dump_json(
-                            output_dir,
-                            f"{dump_prefix}_geometry",
-                            {
-                                "stage": stage,
-                                "round": round_index,
-                                "attempt": attempt,
-                                "frame_url": frame.url,
-                                "selector": slider_identity,
-                                **geometry,
-                            },
-                        )
-                if await _drag_slider_system_mouse(page, frame, slider):
-                    print(
-                        json.dumps(
-                            {
-                                "step": "slider_dragged",
-                                "attempt": attempt,
-                                "mode": "system_mouse",
-                                "selector": slider_identity,
-                                "frame_url": frame.url,
-                            },
-                            ensure_ascii=False,
-                        ),
-                        flush=True,
-                    )
+
+                drag_success = False
+                if pyautogui is not None:
+                    drag_success = await _drag_slider_system_mouse(page, frame, slider, logger=logger)
+                
+                if not drag_success:
+                    _log_slider_step(logger, {"step": "falling_back_to_playwright_drag"})
+                    drag_success = await _drag_slider_track(slider)
+
+                if drag_success:
+                    _log_slider_step(logger, {
+                        "step": "slider_dragged",
+                        "attempt": attempt,
+                        "mode": "system_mouse" if drag_success and pyautogui is not None else "playwright_track",
+                        "selector": slider_identity,
+                        "frame_url": frame.url,
+                    })
                     await asyncio.sleep(0.8)
                     hidden_state = await _read_slider_hidden_state(page)
                     visual_state = await _read_slider_visual_state(page)
-                    print(
-                        json.dumps(
-                            {"step": "slider_hidden_state", "attempt": attempt, "state": hidden_state},
-                            ensure_ascii=False,
-                        ),
-                        flush=True,
-                    )
-                    print(
-                        json.dumps(
-                            {"step": "slider_visual_state", "attempt": attempt, "state": visual_state},
-                            ensure_ascii=False,
-                        ),
-                        flush=True,
-                    )
+                    _log_slider_step(logger, {"step": "slider_hidden_state", "attempt": attempt, "state": hidden_state})
+                    _log_slider_step(logger, {"step": "slider_visual_state", "attempt": attempt, "state": visual_state})
                     passed = await _slider_verification_passed(page)
-                    print(
-                        json.dumps(
-                            {"step": "slider_verify", "attempt": attempt, "passed": passed},
-                            ensure_ascii=False,
-                        ),
-                        flush=True,
-                    )
+                    _log_slider_step(logger, {"step": "slider_verify", "attempt": attempt, "passed": passed})
                     if passed:
                         return True
                     if frame_box is not None:
                         await _click_slider_frame(frame_box)
-                        print(
-                            json.dumps(
-                                {"step": "slider_retry_click", "attempt": attempt, "frame_url": frame.url},
-                                ensure_ascii=False,
-                            ),
-                            flush=True,
-                        )
+                        _log_slider_step(logger, {"step": "slider_retry_click", "attempt": attempt, "frame_url": frame.url})
                         await asyncio.sleep(0.4)
             except Exception as exc:
-                print(
-                    json.dumps(
-                        {
-                            "step": "slider_drag_error",
-                            "attempt": attempt,
-                            "frame_url": frame.url,
-                            "error": f"{type(exc).__name__}: {exc}",
-                        },
-                        ensure_ascii=False,
-                    ),
-                    flush=True,
-                )
+                _log_slider_step(logger, {
+                    "step": "slider_drag_error",
+                    "attempt": attempt,
+                    "frame_url": frame.url,
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
         await asyncio.sleep(0.8)
     return False
 
 
-async def _clear_slider_if_present(page, stage: str) -> bool:
+async def _clear_slider_if_present(page, stage: str, logger=None) -> bool:
+    """检测并清除滑块验证。对于验证码拦截页，直接尝试解滑块而不是立即放弃。"""
     state = await _wait_for_search_or_slider(page)
-    print(json.dumps({"step": "slider_stage_state", "stage": stage, "state": state}, ensure_ascii=False), flush=True)
+    _log_slider_step(logger, {"step": "slider_stage_state", "stage": stage, "state": state})
     if state == "search":
-        print(json.dumps({"step": "slider_not_present", "stage": stage}, ensure_ascii=False), flush=True)
+        _log_slider_step(logger, {"step": "slider_not_present", "stage": stage})
         return True
     if state == "login":
-        print(json.dumps({"step": "login_redirect_detected", "stage": stage, "url": page.url}, ensure_ascii=False), flush=True)
+        # 真正的登录页（URL 含 login.taobao.com 等），无法自动处理
+        _log_slider_step(logger, {"step": "login_redirect_detected", "stage": stage, "url": page.url})
         return False
-    passed = await _clear_home_slider(page)
-    print(json.dumps({"step": "slider_stage_ready", "stage": stage, "passed": passed}, ensure_ascii=False), flush=True)
+    # state == "slider" 或 "unknown"：尝试清除滑块
+    passed = await _clear_home_slider(page, stage=stage, logger=logger)
+    _log_slider_step(logger, {"step": "slider_stage_ready", "stage": stage, "passed": passed})
     return passed
 
 
-async def _stabilize_home_until_search_ready(page, output_dir: Path, stage: str, max_rounds: int = 6) -> bool:
-    for round_index in range(1, max_rounds + 1):
-        state = await _wait_for_search_or_slider(page)
-        print(
-            json.dumps(
-                {"step": "home_stage_state", "stage": stage, "round": round_index, "state": state},
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-        if state == "search":
-            return True
-        if state != "slider":
-            await asyncio.sleep(0.5)
-            continue
-        passed = await _clear_home_slider(page, output_dir=output_dir, stage=stage, round_index=round_index)
-        print(
-            json.dumps(
-                {"step": "home_slider_round", "stage": stage, "round": round_index, "passed": passed},
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-        if not passed and round_index in {2, 4}:
-            print(
-                json.dumps(
-                    {"step": "home_reload_after_failed_rounds", "stage": stage, "round": round_index},
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
-            await page.reload(wait_until="domcontentloaded", timeout=30000)
-        await asyncio.sleep(0.8)
-    return await _search_input_locator(page) is not None
-
-
-async def _set_search_keyword(page, search_input, keyword: str) -> None:
-    await search_input.click(timeout=5000)
-    await search_input.press("Meta+A")
-    await search_input.press("Backspace")
-    await search_input.press_sequentially(keyword, delay=12)
-    await asyncio.sleep(0.3)
-    actual_value = await search_input.input_value()
-    if actual_value != keyword:
-        raise RuntimeError(f"Search input value mismatch: expected={keyword!r}, actual={actual_value!r}")
-
-
-async def _read_main_search_button_text(page) -> str:
-    button = await _search_button_locator(page)
-    if button is None:
-        return ""
-
-
-async def _ensure_ali1688_filter(page, text: str, url_token: str, dump_name: str, output_dir: Path) -> None:
-    if url_token and url_token in page.url:
-        await _dump_page(page, output_dir, dump_name)
-        return
-    locator = page.locator(f"text={text}").first
-    if await locator.count():
-        await locator.scroll_into_view_if_needed()
-        await asyncio.sleep(1)
-        await locator.click(timeout=8000)
-        await asyncio.sleep(6)
-        if not await _clear_slider_if_present(page, dump_name):
-            raise RuntimeError(f"slider_blocking_after_filter:{text}")
-        await _dump_page(page, output_dir, dump_name)
-        return
-    print(json.dumps({"step": "filter_not_found", "filter": text}, ensure_ascii=False), flush=True)
-
-
-async def _capture_all_subject_runs(page, output_dir: Path, summary: dict[str, object], *, max_subjects: int | None = None) -> None:
-    subject_count = await _count_subject_regions(page)
-    summary["subject_count"] = subject_count
-    subject_runs: list[dict[str, object]] = []
-    if subject_count <= 0:
-        summary["subject_runs"] = subject_runs
-        return
-
-    limit = subject_count if max_subjects is None else max(0, min(subject_count, max_subjects))
-    for subject_index in range(limit):
-        if not await _select_subject_region_by_index(page, subject_index):
-            continue
-        await _dump_page(page, output_dir, f"04_subject_{subject_index}")
-        await _ensure_ali1688_filter(page, "退货包运费", "complexTags=1001", f"06_subject_{subject_index}_return_shipping", output_dir)
-        await _ensure_ali1688_filter(page, "一件代发", "offerTags=1988226", f"07_subject_{subject_index}_dropship", output_dir)
-        await _ensure_ali1688_filter(page, "1件代发包邮", "", f"08_subject_{subject_index}_dropship_free_shipping", output_dir)
-        subject_runs.append(
-            {
-                "subject_index": subject_index,
-                "final_url": page.url,
-                "html_path": str((output_dir / f"08_subject_{subject_index}_dropship_free_shipping.html").resolve()),
-            }
-        )
-    summary["subject_runs"] = subject_runs
-
-
-async def _run_flow_on_page(
-    *,
-    context,
-    page,
-    keyword: str,
-    image_url: str | None,
-    output_dir: Path,
-    summary: dict[str, object],
-    summary_json_file: str | None,
-    pause_for_login_seconds: float,
-    subject_index: int,
-    capture_all_subjects: bool,
-    max_subjects: int | None,
-    keep_open_seconds: float,
-) -> object:
-    if await _page_ready_for_direct_search(page):
-        print(json.dumps({"step": "reuse_current_page_for_search", "url": page.url}, ensure_ascii=False), flush=True)
-        await _dump_page(page, output_dir, "01_reuse_current_page")
-    else:
-        print(json.dumps({"step": "open_home"}, ensure_ascii=False), flush=True)
-        await page.goto("https://www.1688.com/", wait_until="domcontentloaded", timeout=30000)
-        slider_cleared = await _stabilize_home_until_search_ready(page, output_dir, "home")
-        print(json.dumps({"step": "slider_ready", "passed": slider_cleared}, ensure_ascii=False), flush=True)
-        await _dump_page(page, output_dir, "01_home")
-
-        if pause_for_login_seconds > 0:
-            print(
-                json.dumps(
-                    {"step": "pause_for_login", "seconds": pause_for_login_seconds},
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
-            await asyncio.sleep(pause_for_login_seconds)
-            slider_cleared = await _stabilize_home_until_search_ready(page, output_dir, "after_login_pause")
-            print(json.dumps({"step": "slider_ready_after_pause", "passed": slider_cleared}, ensure_ascii=False), flush=True)
-            await _dump_page(page, output_dir, "01_after_login_pause")
-
-        if await _slider_still_present(page):
-            summary["status"] = "slider_blocking_home"
-            summary["final_url"] = page.url
-            _write_summary(summary_json_file, summary)
-            print(json.dumps({"step": "slider_blocking_home"}, ensure_ascii=False), flush=True)
-            return page
-
-    search_term = image_url or keyword
-    fill_step = "fill_image_url" if image_url else "fill_keyword"
-    max_submit_attempts = 2 if image_url else 1
-    for submit_attempt in range(1, max_submit_attempts + 1):
-        print(
-            json.dumps({"step": fill_step, "value": search_term, "submit_attempt": submit_attempt}, ensure_ascii=False),
-            flush=True,
-        )
-        search_input = await _search_input_locator(page)
-        if search_input is None:
-            await _dump_page(page, output_dir, "01_search_input_not_found")
-            raise RuntimeError("Search input not found after homepage became ready")
-        await _set_search_keyword(page, search_input, search_term)
+async def _ensure_page_navigated_safe(page, url: str, logger, timeout: int = 30000) -> bool:
+    logger.info(f"    [Session] Navigating to: {url}")
+    try:
+        await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
         await asyncio.sleep(2)
-        await _dump_page(page, output_dir, "02_search_input_filled")
+    except Exception as e:
+        logger.warning(f"    [Session] Initial navigation warning: {e}")
 
-        if image_url:
-            main_button_text = await _read_main_search_button_text(page)
-            print(
-                json.dumps(
-                    {"step": "image_search_submit", "main_button_text": main_button_text, "submit_attempt": submit_attempt},
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
-            search_button = await _search_button_locator(page)
-            if search_button is not None:
-                await search_button.scroll_into_view_if_needed()
-                await asyncio.sleep(0.2)
-                await search_button.click(timeout=10000)
+    for attempt in range(45):  # 最多等待 90 秒
+        cur_url = page.url
+        cur_title = await page.title() or ""
+        
+        is_blocked = _looks_like_captcha_page(cur_url, cur_title)
+        
+        if not is_blocked:
+            return True
+            
+        logger.warning(f"    [Session] [Blocked] Captcha or login redirect detected! URL: {cur_url}, Title: {cur_title}")
+        
+        # 先清理采购助手欢迎页/新手引导弹窗，它们可能遮住验证码滑块
+        try:
+            logger.info("    [Session] Dismissing any procurement assistant welcome popups before slider detection...")
+            await _clean_page_overlays(page, logger)
+            await asyncio.sleep(0.5)
+        except Exception as pe:
+            logger.warning(f"    [Session] Popup dismiss error (non-fatal): {pe}")
+
+        # 尝试自动滑动解锁（先检测当前页是否有滑块）
+        try:
+            slider_present = await _slider_still_present(page)
+            if slider_present:
+                logger.info("    [Session] Slider detected on captcha page. Attempting to drag...")
+                passed = await _clear_home_slider(page, stage="navigation", logger=logger)
+                if passed:
+                    logger.info("    [Session] Slider cleared! Waiting for redirect...")
+                    await asyncio.sleep(3)
+                    continue
+                else:
+                    logger.warning("    [Session] Slider drag failed. Will wait for manual resolve...")
             else:
-                await search_input.press("Enter")
-        else:
-            print(json.dumps({"step": "press_enter"}, ensure_ascii=False), flush=True)
-            await search_input.press("Enter")
-        await asyncio.sleep(8)
-        page = await _switch_to_latest_page(context, page, output_dir, "03_after_enter")
-        if await _clear_slider_if_present(page, "after_enter"):
-            break
-        await _dump_page(page, output_dir, "03_after_enter_slider_blocked")
-        if "login.taobao.com" in (page.url or "") and submit_attempt < max_submit_attempts:
-            print(
-                json.dumps(
-                    {"step": "retry_after_login_redirect", "submit_attempt": submit_attempt, "url": page.url},
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
-            page = await _recover_to_ali1688_search_page(context, page)
-            slider_cleared = await _stabilize_home_until_search_ready(page, output_dir, f"retry_{submit_attempt}")
-            print(
-                json.dumps(
-                    {"step": "retry_home_ready", "submit_attempt": submit_attempt, "passed": slider_cleared},
-                    ensure_ascii=False,
-                ),
-                flush=True,
-            )
-            continue
-        summary["status"] = "slider_blocking_after_enter"
-        summary["final_url"] = page.url
-        _write_summary(summary_json_file, summary)
-        print(json.dumps({"step": "slider_blocking_after_enter"}, ensure_ascii=False), flush=True)
-        return page
+                logger.warning("    [Session] No slider detected on captcha page. Waiting for manual resolve...")
+        except Exception as se:
+            logger.error(f"    [Session] Auto slider clearing encountered error: {se}")
 
-    subject_state = await _select_subject_region(page, max(subject_index, 0))
-    summary["subject_count"] = int(subject_state.get("subject_count") or 0)
-    summary["selected_subject_index"] = int(subject_state.get("selected_subject_index") or 0)
-    print(json.dumps({"step": "subject_state", **subject_state}, ensure_ascii=False), flush=True)
-    if subject_state.get("subject_switched"):
-        await _dump_page(page, output_dir, "04_after_subject_switch")
-
-    if capture_all_subjects:
-        await _capture_all_subject_runs(page, output_dir, summary, max_subjects=max_subjects)
-        summary["ok"] = True
-        summary["status"] = "completed"
-        summary["final_url"] = page.url
-        _write_summary(summary_json_file, summary)
-        print(json.dumps({"step": "final", "url": page.url}, ensure_ascii=False), flush=True)
-        if keep_open_seconds > 0:
-            await asyncio.sleep(keep_open_seconds)
-        return page
-
-    print(json.dumps({"step": "try_filters"}, ensure_ascii=False), flush=True)
-    for text, name in (("退货包运费", "06_filter_return_shipping"), ("一件代发", "07_filter_dropship")):
-        locator = page.locator(f"text={text}").first
-        if await locator.count():
-            try:
-                await locator.scroll_into_view_if_needed()
-                await asyncio.sleep(1)
-                await locator.click(timeout=8000)
-                await asyncio.sleep(6)
-                if not await _clear_slider_if_present(page, name):
-                    await _dump_page(page, output_dir, f"{name}_slider_blocked")
-                    summary["status"] = f"slider_blocking_after_filter:{text}"
-                    summary["final_url"] = page.url
-                    _write_summary(summary_json_file, summary)
-                    print(
-                        json.dumps(
-                            {"step": "slider_blocking_after_filter", "filter": text},
-                            ensure_ascii=False,
-                        ),
-                        flush=True,
-                    )
-                    return page
-                await _dump_page(page, output_dir, name)
-            except Exception as exc:
-                print(
-                    json.dumps(
-                        {"step": "filter_click_error", "filter": text, "error": f"{type(exc).__name__}: {exc}"},
-                        ensure_ascii=False,
-                    ),
-                    flush=True,
-                )
-                await _dump_page(page, output_dir, f"{name}_error")
-        else:
-            print(json.dumps({"step": "filter_not_found", "filter": text}, ensure_ascii=False), flush=True)
-
-    for text, name in (("1件代发包邮", "08_filter_dropship_free_shipping"),):
-        locator = page.locator(f"text={text}").first
-        if await locator.count():
-            try:
-                await locator.scroll_into_view_if_needed()
-                await asyncio.sleep(1)
-                await locator.click(timeout=8000)
-                await asyncio.sleep(6)
-                if not await _clear_slider_if_present(page, name):
-                    await _dump_page(page, output_dir, f"{name}_slider_blocked")
-                    summary["status"] = f"slider_blocking_after_filter:{text}"
-                    summary["final_url"] = page.url
-                    _write_summary(summary_json_file, summary)
-                    print(
-                        json.dumps(
-                            {"step": "slider_blocking_after_filter", "filter": text},
-                            ensure_ascii=False,
-                        ),
-                        flush=True,
-                    )
-                    return page
-                await _dump_page(page, output_dir, name)
-            except Exception as exc:
-                print(
-                    json.dumps(
-                        {"step": "filter_click_error", "filter": text, "error": f"{type(exc).__name__}: {exc}"},
-                        ensure_ascii=False,
-                    ),
-                    flush=True,
-                )
-                await _dump_page(page, output_dir, f"{name}_error")
-        else:
-            print(json.dumps({"step": "filter_not_found", "filter": text}, ensure_ascii=False), flush=True)
-
-    summary["ok"] = True
-    summary["status"] = "completed"
-    summary["final_url"] = page.url
-    _write_summary(summary_json_file, summary)
-    print(json.dumps({"step": "final", "url": page.url}, ensure_ascii=False), flush=True)
-    if keep_open_seconds > 0:
-        await asyncio.sleep(keep_open_seconds)
-    return page
+        logger.warning("    [Action Required] Please solve the captcha or scan code to log in manually in the browser window!")
+        await asyncio.sleep(2)
+        
+    logger.error("    [Session] Timeout waiting for verification bypass.")
+    return False
 
 
-async def _run(args) -> None:
+
+async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, index: int, logger):
+    safe_title = _sanitize_filename(item.get("title") or "item")
+    offer_id = item.get("offer_id")
+    
+    captured = []
+    async def on_resp(res):
+        try:
+            if "mtop" in res.url.lower():
+                text = await res.text()
+                if "(" in text: text = re.search(r"\((.*)\)", text, re.DOTALL).group(1)
+                captured.append({"url": res.url, "data": json.loads(text)})
+        except: pass
+
+    page = await context.new_page()
+    page.on("response", on_resp)
+    
+    physical_success = False
+    
+    try:
+        url = f"https://detail.1688.com/offer/{offer_id}.html"
+        logger.info(f"    [Step 2/4] Navigating to detail page: {url}")
+            
+        success = await _ensure_page_navigated_safe(page, url, logger, timeout=60000)
+        if not success:
+            logger.error(f"    [Session] Detail page navigation failed Rank {index}")
+            return {"status": "failed", "images": []}
+
+        # 等待页面渲染（JS 执行、图片懒加载触发）
+        await page.evaluate("window.scrollTo(0, 400)")
+        await asyncio.sleep(3)
+
+        # 清除可能弹出的新手引导/欢迎弹窗
+        await _clean_page_overlays(page, logger)
+
+        # ── 核心：直接取完整渲染后的 HTML，用 Scrapling 解析 ──
+        logger.info("    [HTML] Fetching rendered page HTML for Scrapling parsing...")
+        html_content = await page.content()
+
+        # 保存原始 HTML 到本地 detail_{offer_id}.html
+        html_file = output_dir / f"detail_{offer_id}.html"
+        try:
+            html_file.write_text(html_content, encoding="utf-8")
+            logger.info(f"    [HTML] Saved raw page HTML to {html_file}")
+        except Exception as html_err:
+            logger.warning(f"    [HTML] Failed to save raw HTML (non-fatal): {html_err}")
+
+        parsed_html = Ali1688SourceAdapter.extract_detail_sku_and_images(html_content)
+        logger.info(f"    [HTML] Scrapling parsed: {len(parsed_html['sku_details'])} SKU entries, {len(parsed_html['images'])} images")
+
+        # ── 补充：从 JS 运行时直接读取 SKU（比 HTML 正则更可靠）──
+        js_sku: list = []
+        js_images: list = []
+        try:
+            js_data = await page.evaluate("""
+                () => {
+                    const result = {sku: [], images: []};
+                    // 1. 尝试各种全局变量
+                    const candidates = [
+                        window.__INIT_DATA__,
+                        window.detailData,
+                        window.__GLOBAL_DATA__,
+                        window.context?.result?.data,
+                    ];
+                    for (const root of candidates) {
+                        if (!root || typeof root !== 'object') continue;
+                        // 递归搜索 skuInfoMap
+                        function findKey(obj, key, depth) {
+                            if (depth > 8 || !obj || typeof obj !== 'object') return null;
+                            if (obj[key] !== undefined) return obj[key];
+                            for (const v of Object.values(obj)) {
+                                const found = findKey(v, key, depth + 1);
+                                if (found !== null && found !== undefined) return found;
+                            }
+                            return null;
+                        }
+                        
+                        function cleanSpan(valStr) {
+                            if (!valStr || typeof valStr !== 'string') return valStr;
+                            let temp = valStr.replace(/<span[^>]*?>.*?<\/span>/gi, '');
+                            temp = temp.replace(/<[^>]+>/g, '');
+                            const parts = temp.split(';').map(p => p.trim()).filter(Boolean);
+                            return parts.join(';');
+                        }
+                        
+                        // 提取规格属性图片映射
+                        const skuProps = findKey(root, 'skuProps', 0);
+                        const propImages = {};
+                        if (Array.isArray(skuProps)) {
+                            for (const prop of skuProps) {
+                                if (Array.isArray(prop.value)) {
+                                    for (const val of prop.value) {
+                                        if (val.name && val.imageUrl) {
+                                            const cleanedValName = cleanSpan(val.name);
+                                            propImages[cleanedValName] = val.imageUrl;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        function matchImage(attributes) {
+                            if (!attributes) return null;
+                            const cleanedAttrs = cleanSpan(attributes);
+                            const attrParts = cleanedAttrs.split(';');
+                            for (const part of attrParts) {
+                                const valName = part.includes(':') ? part.split(':')[1] : part;
+                                if (propImages[valName.trim()]) return propImages[valName.trim()];
+                            }
+                            return null;
+                        }
+
+                        // SKU map
+                        const skuMap = findKey(root, 'skuInfoMap', 0);
+                        if (skuMap && typeof skuMap === 'object' && Object.keys(skuMap).length > 0) {
+                            for (const [name, info] of Object.entries(skuMap)) {
+                                result.sku.push({
+                                    attributes: cleanSpan(name),
+                                    price: info.discountPrice || info.price || null,
+                                    stock: info.canBookCount || null,
+                                    spec_id: info.specId || null,
+                                    image: matchImage(name),
+                                    source: 'js_runtime_skuInfoMap'
+                                });
+                            }
+                            break;
+                        }
+                        // skuList / skuInfos
+                        const skuList = findKey(root, 'skuInfos', 0) || findKey(root, 'skuList', 0);
+                        if (Array.isArray(skuList) && skuList.length > 0) {
+                            for (const sku of skuList) {
+                                const attrs = sku.attributes || sku.specName || sku.skuName || '';
+                                result.sku.push({
+                                    attributes: cleanSpan(attrs),
+                                    price: sku.discountPrice || sku.price || null,
+                                    stock: sku.canBookCount || sku.stock || null,
+                                    spec_id: sku.specId || sku.skuId || null,
+                                    image: matchImage(attrs),
+                                    source: 'js_runtime_skuList'
+                                });
+                            }
+                            break;
+                        }
+                        // 图片
+                        const imgList = findKey(root, 'imageList', 0);
+                        if (Array.isArray(imgList)) {
+                            for (const img of imgList) {
+                                const u = (typeof img === 'string') ? img
+                                    : img.fullPathImageURI || img.originalImageUri || img.url || '';
+                                if (u && u.includes('alicdn.com')) result.images.push(u);
+                            }
+                        }
+                    }
+                    return result;
+                }
+            """)
+            js_sku = js_data.get("sku", [])
+            js_images = js_data.get("images", [])
+            logger.info(f"    [JS] Runtime extracted: {len(js_sku)} SKU entries, {len(js_images)} images")
+        except Exception as je:
+            logger.warning(f"    [JS] Runtime eval error (non-fatal): {je}")
+
+        # mtop API 拦截数据作为兜底补充
+        parsed_api = _parse_captured_api_data(captured, logger)
+
+        # 合并 SKU：优先 JS 运行时 > HTML 解析 > API 拦截
+        sku_details = js_sku or parsed_html["sku_details"] or parsed_api["sku_details"]
+
+        # 合并图片：DOM 求值 + HTML 解析 + JS 运行时 + API 拦截（四层）
+        dom_images: list = []
+        try:
+            dom_images = await page.evaluate("""
+                () => {
+                    const list = [];
+                    const gallery = document.querySelector(
+                        '.module-od-picture-gallery, .detail-gallery, .od-gallery-list-wapper'
+                    );
+                    if (gallery) {
+                        gallery.querySelectorAll('img').forEach(img => {
+                            let src = img.getAttribute('data-lazyload-src') || img.getAttribute('src') || img.src;
+                            if (src && src.includes('alicdn.com')) list.push(src);
+                        });
+                    }
+                    return [...new Set(list)];
+                }
+            """)
+        except Exception as de:
+            logger.warning(f"    [HTML] DOM image eval error (non-fatal): {de}")
+
+        all_images = dom_images + parsed_html["images"] + js_images + parsed_api["images"]
+        clean_final = list(dict.fromkeys([_clean_image_url(u) for u in all_images if u]))
+        clean_final = list(filter(None, clean_final))[:9]
+
+        # 清洗 SKU 规格属性
+        if sku_details:
+            for sku in sku_details:
+                if sku.get("attributes"):
+                    sku["attributes"] = _clean_html_span(sku["attributes"])
+
+        if sku_details or clean_final:
+            logger.info(f"    [Step 4/4] Success! Extracted SKUs: {len(sku_details)}, Images: {len(clean_final)}")
+            return {"status": "success", "images": clean_final, "sku_details": sku_details}
+            
+    except Exception as e:
+        logger.error(f"    [Browser Error] Rank {index}: {e}")
+    finally:
+        await page.close()
+        
+    return {"status": "failed", "images": [], "sku_details": []}
+
+
+async def _run(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    launch_args = [*default_launch_args(), *args.launch_arg]
-    summary: dict[str, object] = {
-        "ok": False,
-        "status": "starting",
-        "keyword": args.keyword,
-        "image_url": args.image_url,
-        "final_url": "",
-        "output_dir": str(output_dir.resolve()),
-        "user_data_dir": args.user_data_dir,
-        "profile_directory": args.profile_directory,
-        "subject_count": 0,
-        "selected_subject_index": max(args.subject_index, 0),
-        "subject_runs": [],
-    }
+    logger = get_unified_logger("1688Worker", log_file=args.log_file)
+    
+    input_state = args.state_file
+    managed_state = DEFAULT_ALI1688_STATE_FILE
+    effective_state_path, synced = _prepare_managed_state_file(input_state, managed_state)
+    if synced:
+        logger.info(f"[Auth] Synced input state {input_state} to managed state {effective_state_path}")
+    else:
+        logger.info(f"[Auth] Using managed state {managed_state} (synced=False)")
 
-    async with async_playwright() as playwright:
-        if args.user_data_dir:
-            persistent_args = list(launch_args)
-            if args.profile_directory:
-                persistent_args.append(f"--profile-directory={args.profile_directory}")
-            context = await playwright.chromium.launch_persistent_context(
-                args.user_data_dir,
-                channel=args.browser_channel,
-                headless=False,
-                slow_mo=args.slow_mo_ms,
-                args=persistent_args,
-                **default_desktop_context_options(),
-            )
-            owns_browser = False
-        else:
-            browser = await playwright.chromium.launch(
-                channel=args.browser_channel,
-                headless=False,
-                slow_mo=args.slow_mo_ms,
-                args=launch_args,
-            )
-            context = await browser.new_context(**default_desktop_context_options())
-            owns_browser = True
+    state_file_to_save = effective_state_path or managed_state
 
+    async with async_playwright() as pw:
+        options = default_desktop_context_options()
+        options["user_agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+
+        # 已去掉浏览器扩展依赖（SKU 改用 JS 运行时提取），直接 headless 启动
+        headless_args = [
+            *default_launch_args(),
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+        ]
+        logger.info("[Browser] Launching headless Chromium (no extension required)")
+        browser = await pw.chromium.launch(
+            headless=True,
+            args=headless_args,
+        )
+        context = await browser.new_context(**options)
+
+        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined })")
+
+        # 注入全局新手引导弹窗自动关闭脚本（MutationObserver 持续监听）
+        await context.add_init_script("""
+        (function() {
+            const GUIDE_CLOSE_TEXTS = ['我知道了', '我知道啦', '跳过', '关闭', '跳过引导', '跳过新手引导', '完成'];
+            const GUIDE_SELECTORS = [
+                '.next-guide-mask', '.guide-mask', '[class*="guide-mask"]',
+                '[class*="next-guide"]', '.introjs-overlay', '.introjs-helperLayer',
+                '.introjs-tooltipReferenceLayer',
+            ];
+
+            function tryDismissGuide() {
+                // 1. 点击关闭按钮
+                for (const text of GUIDE_CLOSE_TEXTS) {
+                    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+                    let node;
+                    while ((node = walker.nextNode())) {
+                        if (node.nodeValue && node.nodeValue.trim() === text) {
+                            const el = node.parentElement;
+                            if (el && el.offsetParent !== null) {
+                                try { el.click(); } catch(e) {}
+                                break;
+                            }
+                        }
+                    }
+                }
+                // 2. 移除残留蒙层 DOM
+                for (const sel of GUIDE_SELECTORS) {
+                    document.querySelectorAll(sel).forEach(el => {
+                        try { el.remove(); } catch(e) {}
+                    });
+                }
+            }
+
+            // 首次执行
+            if (document.readyState === 'loading') {
+                document.addEventListener('DOMContentLoaded', tryDismissGuide);
+            } else {
+                tryDismissGuide();
+            }
+
+            // 持续监听 DOM 变化
+            const observer = new MutationObserver(() => { tryDismissGuide(); });
+            observer.observe(document.documentElement, { childList: true, subtree: true });
+        })();
+        """)
+
+        if state_file_to_save and Path(state_file_to_save).exists():
+            await _apply_state_file_cookies(context, state_file_to_save)
+            logger.info(f"[Auth] Injected cookies from {state_file_to_save}")
+        await _clear_extension_onboarding_state(context)
+
+        # 1. 下载远程图片到本地临时目录
+        import urllib.request
+        temp_img_path = output_dir / "temp_search.jpg"
+        logger.info(f"[Search] Downloading remote image for physical upload: {args.image_url}")
         try:
-            page = context.pages[0] if context.pages else await context.new_page()
-            await _run_flow_on_page(
-                context=context,
-                page=page,
-                keyword=args.keyword,
-                image_url=args.image_url,
-                output_dir=output_dir,
-                summary=summary,
-                summary_json_file=args.summary_json_file,
-                pause_for_login_seconds=args.pause_for_login_seconds,
-                subject_index=args.subject_index,
-                capture_all_subjects=args.capture_all_subjects,
-                max_subjects=args.max_subjects,
-                keep_open_seconds=args.keep_open_seconds,
+            req = urllib.request.Request(
+                args.image_url, 
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"}
             )
-        finally:
-            if summary["status"] == "starting":
-                summary["status"] = "aborted"
-                _write_summary(args.summary_json_file, summary)
+            with urllib.request.urlopen(req, timeout=15) as response:
+                temp_img_path.write_bytes(response.read())
+            logger.info(f"[Search] Remote image successfully downloaded to {temp_img_path}")
+        except Exception as dl_err:
+            logger.error(f"[Search] Image download failed: {dl_err}")
             await context.close()
-            if owns_browser:
-                await browser.close()
+            return
+
+        # 2. 导航至 1688 主页进行全域安全会话激活
+        logger.info("[Search] Pre-warming browser context by visiting 1688 homepage...")
+        page = await context.new_page()
+        success = await _ensure_page_navigated_safe(page, "https://www.1688.com", logger, timeout=60000)
+        if not success:
+            logger.error("[Search] Failed to pre-warm on 1688 homepage.")
+            await context.close()
+            return
+        await asyncio.sleep(4)
+
+        # 3. 导航至以图搜主页（空参数，有 Referer 且已同步 cookie，安全）
+        search_home_url = "https://s.1688.com/youyuan/index.htm"
+        success = await _ensure_page_navigated_safe(page, search_home_url, logger, timeout=60000)
+        if not success:
+            logger.error("[Search] Failed to open image search home page.")
+            await context.close()
+            return
+        await asyncio.sleep(3)
+
+        # 3. 定位文件输入框并模拟上传
+        upload_success = False
+        try:
+            logger.info("[Search] Locating file input elements...")
+            # 匹配 input type="file" 或 accept 包含 image 的节点
+            input_loc = page.locator('input[type="file"], input[accept*="image"], .upload-btn input').first
+            if await input_loc.count() > 0:
+                await input_loc.set_input_files(str(temp_img_path))
+                logger.info("[Search] File selected and uploaded physically. Waiting for auto-redirection...")
+                # 等待 URL 发生改变，跳转到结果页面
+                await page.wait_for_url(lambda url: "imageAddress=" in url or "tab=imageSearch" in url, timeout=25000)
+                logger.info(f"[Search] Successfully redirected to results page: {page.url}")
+                await asyncio.sleep(5)
+                upload_success = True
+            else:
+                logger.warning("[Search] No upload input element found on the home page.")
+        except Exception as upload_err:
+            logger.error(f"[Search] Physical upload failed or redirection timeout: {upload_err}")
+
+        # 4. 兜底方案：如果物理上传失败，则直连以图搜 URL
+        if not upload_success:
+            from urllib.parse import quote
+            search_url = f"https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress={quote(args.image_url)}"
+            logger.warning(f"[Search] Falling back to direct URL visit: {search_url}")
+            success = await _ensure_page_navigated_safe(page, search_url, logger, timeout=60000)
+            if not success:
+                logger.error("[Search] Direct URL fallback failed. Captcha unsolved.")
+                await context.close()
+                return
+            await asyncio.sleep(8)
+        
+        from xianyu_tools.source_adapter.ali1688 import Ali1688CaptchaError, Ali1688PayloadError
+        adapter = Ali1688SourceAdapter()
+        candidates = []
+        parse_success = False
+        
+        for attempt in range(1, 4):  # 最多尝试 3 次
+            html_content = await page.content()
+            try:
+                # 判断是否是验证码页面或惩罚页面
+                if adapter._is_captcha_page(html_content) or "哎呦喂" in html_content or "空空如也" in html_content:
+                    raise Ali1688CaptchaError("Captcha or soft-block (empty page) detected in HTML content")
+                
+                candidates = adapter.search_from_html(html_content, limit=60)
+                if not candidates:
+                    raise Ali1688PayloadError("Search result set is empty")
+                
+                parse_success = True
+                break
+            except Exception as e:
+                logger.warning(f"[Search] Attempt {attempt} failed to parse search results: {e}")
+                if attempt == 3:
+                    err_file = output_dir / "search_page_error.html"
+                    try:
+                        err_file.write_text(html_content, encoding="utf-8")
+                        logger.error(f"[Search] Dumped failed page to {err_file}")
+                    except Exception as dump_err:
+                        logger.error(f"[Search] Failed to dump: {dump_err}")
+                    raise e
+                
+                logger.warning("[Search] Possible bot detection. Attempting recovery and safety pre-warm...")
+                # 重新导航，并阻塞等待用户滑块自愈
+                nav_success = await _ensure_page_navigated_safe(page, search_url, logger, timeout=45000)
+                if not nav_success:
+                    logger.error(f"[Search] Recovery navigation failed in attempt {attempt}")
+                await asyncio.sleep(5)
+                
+        await page.close()
+        
+        import html as py_html
+        parsed_candidates = []
+        for c in candidates:
+            dispatch_text = ""
+            offer_id = c.source_item_id
+            if offer_id:
+                pos = html_content.find(offer_id)
+                if pos != -1:
+                    chunk = html_content[max(0, pos - 500): min(len(html_content), pos + 2500)]
+                    dispatch_text = py_html.unescape(chunk)
+            
+            metrics = _extract_dispatch_metrics_from_text(dispatch_text)
+            parsed_candidates.append({
+                "offer_id": offer_id,
+                "title": c.title,
+                "item_url": c.item_url,
+                "price": c.price,
+                "seven_day_dispatch_count": metrics["seven_day_dispatch_count"],
+                "month_dispatch_count": metrics["month_dispatch_count"],
+            })
+            
+        top_candidates = _top_dispatch_candidates(parsed_candidates, args.detail_top_n)
+        logger.info(f"[Search] Found {len(candidates)} candidates, sorted & filtered to Top {len(top_candidates)}")
+
+        sku_results = []
+        for i, c in enumerate(top_candidates, start=1):
+            if i > 1:
+                inter_wait = random.uniform(5.0, 10.0)
+                logger.info(f"    [Cooling] Safety pause for {inter_wait:.1f}s before Rank {i}...")
+                await asyncio.sleep(inter_wait)
+
+            item_data = {
+                "offer_id": c["offer_id"],
+                "title": c["title"],
+                "item_url": c["item_url"],
+                "min_price": c["price"],
+                "sku_count": 0,
+                "status": "pending",
+                "drop_reason": None,
+                "images": []
+            }
+
+            res = await _export_sku_from_detail_page(context, item_data, output_dir, i, logger)
+            item_data["status"] = res["status"]
+            item_data["images"] = res.get("images", [])
+            item_data["sku_items"] = res.get("sku_details", [])
+            item_data["sku_count"] = len(res.get("sku_details", []))
+            sku_results.append(item_data)
+            
+        (output_dir / "summary.json").write_text(json.dumps(sku_results, ensure_ascii=False, indent=2))
+        
+        if state_file_to_save:
+            await _export_context_state(context, state_file_to_save)
+            logger.info(f"[Auth] Context state exported to {state_file_to_save}")
+            
+        await context.close()
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Run a slow, observable ali1688 browser flow with optional persistent profile reuse."
-    )
-    parser.add_argument("--keyword", default="升降桌")
-    parser.add_argument("--image-url", help="Optional image URL for 1688 image search. When provided, prefer image search over text search.")
-    parser.add_argument("--browser-channel", default="chrome")
-    parser.add_argument(
-        "--user-data-dir",
-        default=DEFAULT_ALI1688_USER_DATA_DIR,
-        help="Chrome user data dir for a persistent ali1688 session. Defaults to a dedicated project profile.",
-    )
-    parser.add_argument("--profile-directory", help="Chrome profile directory inside the user data dir, e.g. Default.")
-    parser.add_argument("--pause-for-login-seconds", type=float, default=0.0)
-    parser.add_argument("--slow-mo-ms", type=int, default=0)
-    parser.add_argument("--keep-open-seconds", type=float, default=120.0)
-    parser.add_argument("--output-dir", default="./tmp/ali1688_slow_flow")
-    parser.add_argument("--summary-json-file", help="Optional path to write a machine-readable run summary.")
-    parser.add_argument("--subject-index", type=int, default=0, help="Which visible image-search subject region to use. 0 keeps the default subject.")
-    parser.add_argument(
-        "--capture-all-subjects",
-        action="store_true",
-        help="After entering the image-search result page, iterate all visible subject regions in the same page and dump each filtered result page.",
-    )
-    parser.add_argument("--max-subjects", type=int, default=3, help="Maximum number of image-search subjects to process when capture-all-subjects is enabled.")
-    parser.add_argument(
-        "--launch-arg",
-        action="append",
-        default=[],
-        help="Extra browser launch arg. Repeatable, e.g. --launch-arg=--start-maximized",
-    )
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--image-url", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--state-file", default="state/ali1688/storage_state.json")
+    parser.add_argument("--detail-top-n", type=int, default=10)
+    parser.add_argument("--target-keyword", required=False)
+    parser.add_argument("--log-file", required=False)
     args = parser.parse_args()
-    print(
-        json.dumps(
-            {
-                "step": "session_profile",
-                "user_data_dir": args.user_data_dir,
-                "profile_directory": args.profile_directory,
-            },
-            ensure_ascii=False,
-        ),
-        flush=True,
-    )
     asyncio.run(_run(args))
-    return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()

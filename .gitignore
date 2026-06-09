@@ -16,3 +16,5 @@ xianyu_state.json
 # macOS / editors
 .idea/
 .vscode/
+config/database.json
+config/llm.json

@@ -1,6 +1,32 @@
 # xianyu-tools
 
-一个面向选品的自动化工具链：
+gemini --resume                           │
+│  a39eef35-af98-41f9-b32b-aeee5a3696d5
+
+一个面向选品的自动化工具链。
+
+## 🚀 H5 可视化管理系统 (推荐)
+
+本项目现在提供了一个高审美的 H5 选品决策中枢，支持多端适配、任务队列管理和历史结果持久化。
+
+### 1. 数据库配置
+
+系统使用 MySQL 存储任务。请按照以下步骤配置：
+
+1.  进入 `config/` 目录。
+2.  参考 `database.json.example` 创建 `database.json`。
+3.  填入您本地的 MySQL 连接信息（系统会自动为您创建 `xianyu_tools` 数据库）。
+
+### 2. 快速启动
+
+在 macOS 下，直接在 Finder 中 **双击** 根目录下的：
+- `start_h5.command`
+
+系统将自动启动后台服务并打开浏览器访问 `http://localhost:8000`。
+
+---
+
+## 5 分钟命令行上手
 
 1. 在闲鱼按关键词搜索商品。
 2. 勾选 `超赞鱼小铺`。
@@ -94,6 +120,13 @@ PYTHONPATH=src python3 scripts/run_keyword_pipeline.py \
   最终上架候选判定。
 - [export_pipeline_excel.py](/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/export_pipeline_excel.py)
   导出中文 Excel。
+
+### 关键设计文档
+
+- [xianguanjia_openapi_guide.md](/Users/mac/PycharmProjects/mytools/xianyu-tools/docs/xianguanjia_openapi_guide.md)
+  闲管家开放平台（Goofish OpenAPI）接口规范及本项目的多规格 SKU 自愈、自动分类匹配规则。
+- [source_adapter_contract.md](/Users/mac/PycharmProjects/mytools/xianyu-tools/docs/source_adapter_contract.md)
+  货源适配器契约规范。
 
 ### 关键目录
 
