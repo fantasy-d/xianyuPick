@@ -45,6 +45,10 @@ def init_db_schema():
             cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN html_path VARCHAR(1024) DEFAULT '';")
         except Exception:
             pass
+        try:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN input_type VARCHAR(20) DEFAULT 'keyword';")
+        except Exception:
+            pass
         conn.commit()
         conn.close()
     except Exception:
@@ -56,10 +60,42 @@ init_db_schema()
 def extract_json(text):
     try:
         import re
-        match = re.search(r'(\{.*"hot_items".*\})', text, re.DOTALL)
+        match = re.search(r'(\{.*"(?:hot_items|error)".*\})', text, re.DOTALL)
         if match: return match.group(1)
     except: pass
     return text
+
+def run_ai_arbitration_for_source(source_title: str, search_keyword: str, logger, task_id=None) -> tuple[bool, str, int]:
+    """
+    同品类三级漏斗判定逻辑，返回 (是否相关, 不相关原因, 消耗的token数)
+    """
+    if not search_keyword:
+        return True, "", 0
+        
+    s_title = str(source_title).lower()
+    clean_keyword = re.sub(r'\s+', '', str(search_keyword)).lower()
+    
+    # 1. 规则初筛
+    if clean_keyword in s_title:
+        return True, "", 0
+    core_parts = [clean_keyword[:2], clean_keyword[-2:], clean_keyword[1:3]]
+    for part in core_parts:
+        if len(part) >= 2 and part in s_title:
+            return True, "", 0
+            
+    # 2. AI 仲裁
+    logger.info(f"[AI Arbitration] Auditing: '{source_title}' against keyword '{search_keyword}'")
+    try:
+        from xianyu_tools.llm_util import ask_llm_relevance_with_usage
+        ai_ok, tokens = ask_llm_relevance_with_usage(source_title, search_keyword, task_id=task_id, external_logger=logger)
+        if ai_ok is True:
+            return True, "", tokens
+        elif ai_ok is False:
+            return False, "AI判定不相关", tokens
+    except Exception as e:
+        logger.error(f"[AI Arbitration] Failed to run LLM relevance check: {e}")
+        
+    return False, f"不含关键词 '{clean_keyword}'", 0
 
 async def main():
     parser = argparse.ArgumentParser()
@@ -67,7 +103,7 @@ async def main():
     parser.add_argument("--task-id", required=False)
     args = parser.parse_args()
     
-    keyword, task_id = args.keyword, args.task_id
+    keyword, task_id = args.keyword.replace("'", ""), args.task_id
     python_path = sys.executable
     Task = None; checkpoint = {}; root_dir = None
 
@@ -101,16 +137,42 @@ async def main():
         full_output = await run_command(cmd_xianyu, logger)
         raw_output = extract_json(full_output)
         try:
-            json.loads(raw_output); xianyu_json_path.write_text(raw_output)
+            parsed_data = json.loads(raw_output)
+            if "error" in parsed_data:
+                err_msg = parsed_data.get("msg", "扫描闲鱼发生异常")
+                logger.error(f"[Phase 1] Xianyu scan failed: {err_msg}")
+                if Task: Task.update(task_id, status="失败", msg=err_msg)
+                return
+            xianyu_json_path.write_text(raw_output)
+            if Task and task_id:
+                try:
+                    from scripts.run_xianyu_hot_items import detect_input_type
+                    in_type = detect_input_type(keyword)
+                    if in_type == 'url' and parsed_data.get("hot_items"):
+                        resolved_title = parsed_data["hot_items"][0].get("title")
+                        if resolved_title:
+                            Task.update(task_id, keyword=resolved_title)
+                            logger.info(f"Successfully updated task keyword to product title: {resolved_title}")
+                except Exception as ue:
+                    logger.error(f"Failed to update task keyword to title: {ue}")
             if Task: Task.update(task_id, checkpoint=json.dumps({"phase": 2, "processed_rank": 0}))
-        except:
-            logger.error("[Phase 1] Failed to parse JSON.")
-            if Task: Task.update(task_id, status="失败", msg="解析闲鱼数据失败")
+        except Exception as e:
+            logger.error(f"[Phase 1] Failed to parse JSON. Error: {e}")
+            fallback_msg = "解析闲鱼数据失败，子进程输出格式错误"
+            if "timeout" in raw_output.lower() or "timeout" in str(e).lower():
+                fallback_msg = "扫描闲鱼超时，网络连接异常"
+            if Task: Task.update(task_id, status="失败", msg=fallback_msg)
             return
 
     try:
         hot_items = json.loads(raw_output).get("hot_items", [])
-    except: return
+        if not hot_items:
+            if Task: Task.update(task_id, status="失败", msg="未获取到任何宝贝数据")
+            return
+    except Exception as e:
+        logger.error(f"Failed to load hot items from json: {e}")
+        if Task: Task.update(task_id, status="失败", msg="宝贝数据解析异常")
+        return
 
     # --- 资产初始化 ---
     db_item_ids = {}
@@ -182,6 +244,7 @@ async def main():
                     logger.info(f"[Sync-DB] Loaded {len(results)} source candidates from summary.json")
                     
                     count = 0
+                    total_task_tokens = 0
                     for res in results:
                         offer_id = res['offer_id']
                         img_json = json.dumps(res.get("images", []), ensure_ascii=False)
@@ -204,12 +267,20 @@ async def main():
                             except Exception:
                                 html_rel_path = str(html_file.resolve())
 
+                        # 进行 AI 同品类仲裁
+                        final_drop_reason = res.get('drop_reason')
+                        if not final_drop_reason:
+                            is_ok, reject_reason, tokens_used = run_ai_arbitration_for_source(res['title'], keyword, logger, task_id=task_id)
+                            total_task_tokens += tokens_used
+                            if not is_ok:
+                                final_drop_reason = reject_reason
+
                         # 执行插入
                         logger.info(f"[Sync-DB] Inserting source: {res['title'][:20]} (Price: {min_price})")
                         _cursor.execute("""
                             INSERT INTO ali1688_sources (item_id, task_id, title, offer_id, min_price, sku_count, source_url, images, drop_reason, html_path)
                             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (item_db_id, task_id, res['title'], offer_id, min_price, sku_count, res['item_url'], img_json, res.get('drop_reason'), html_rel_path))
+                        """, (item_db_id, task_id, res['title'], offer_id, min_price, sku_count, res['item_url'], img_json, final_drop_reason, html_rel_path))
                         source_id = _cursor.lastrowid
 
                         # 2. 写入 SKU 到数据库 (ali1688_skus 表)
@@ -237,6 +308,9 @@ async def main():
                     
                     _conn.commit()
                     logger.info(f"[Sync-DB] Transaction Committed. Total {count} rows added.")
+
+                    if total_task_tokens > 0 and task_id:
+                        logger.info(f"[Sync-DB] AI relevance checks ran for this sync. Total AI tokens: {total_task_tokens} (already synced inside llm_util)")
                 else:
                     logger.warning(f"[Sync-DB] summary.json NOT FOUND in {item_dir}!")
                 

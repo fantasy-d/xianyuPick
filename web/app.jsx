@@ -1,8 +1,35 @@
 const { useState, useEffect, useRef } = React;
 
+// --- 任务类型标签组件 ---
+const renderTaskTypeBadge = (inputType) => {
+    const type = inputType || 'keyword';
+    if (type === 'image') {
+        return (
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-purple-100/80 text-purple-700 border border-purple-200 dark:bg-purple-950/40 dark:text-purple-300 dark:border-purple-800/40">
+                <span className="material-symbols-outlined text-[11px] leading-none">image</span>
+                以图搜图
+            </span>
+        );
+    }
+    if (type === 'url') {
+        return (
+            <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-blue-100/80 text-blue-700 border border-blue-200 dark:bg-blue-950/40 dark:text-blue-300 dark:border-blue-800/40">
+                <span className="material-symbols-outlined text-[11px] leading-none">link</span>
+                单品链接
+            </span>
+        );
+    }
+    return (
+        <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full text-[9px] font-bold bg-amber-100/80 text-amber-700 border border-amber-200 dark:bg-amber-950/40 dark:text-amber-300 dark:border-amber-800/40">
+            <span className="material-symbols-outlined text-[11px] leading-none">search</span>
+            品类扫描
+        </span>
+    );
+};
+
+
 // --- 日志视图组件 ---
 const LogViewer = ({ tasks }) => {
-    const [logType, setLogType] = useState('task');
     const [selectedTaskId, setSelectedTaskId] = useState(null);
     const [logContent, setLogContent] = useState('请选择一个任务来查看日志...');
     const logPollTimer = useRef(null);
@@ -27,17 +54,295 @@ const LogViewer = ({ tasks }) => {
 
     return (
         <div className="view-content">
-            <header><h1>任务日志中心</h1><p>实时监控具体任务的后台输出。</p></header>
-            <div style={{ marginBottom: '20px', display: 'flex', gap: '15px', alignItems: 'center' }}>
-                <span style={{fontWeight: 600}}>选择任务:</span>
-                <select onChange={(e) => setSelectedTaskId(e.target.value)} defaultValue="" style={{padding: '10px', borderRadius: '8px', border: '1px solid var(--border)', flex: 1, maxWidth: '400px'}}>
-                    <option value="" disabled>-- 请选择一个任务 --</option>
-                    {tasks.map(t => <option key={t.id} value={t.id}>{t.keyword} ({t.id})</option>)}
-                </select>
+            <header className="mb-6">
+                <h1 className="font-sans text-2xl font-bold text-on-surface">任务日志中心</h1>
+                <p className="font-sans text-sm text-secondary mt-1">实时监控扫描Worker的后台标准输出日志。</p>
+            </header>
+            
+            <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 mb-6 ambient-shadow flex items-center gap-4">
+                <span className="font-sans text-sm font-semibold text-secondary whitespace-nowrap">选择活跃任务:</span>
+                <div className="relative flex-1 max-w-md">
+                    <select 
+                        onChange={(e) => setSelectedTaskId(e.target.value)} 
+                        defaultValue="" 
+                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-4 py-2.5 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all cursor-pointer appearance-none"
+                    >
+                        <option value="" disabled>-- 请选择一个已启动的任务 --</option>
+                        {tasks.map(t => <option key={t.id} value={t.id}>{t.keyword} (ID: {t.id})</option>)}
+                    </select>
+                    <span className="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-secondary pointer-events-none">expand_more</span>
+                </div>
             </div>
-            <pre style={{ background: '#1E293B', color: '#E2E8F0', padding: '20px', borderRadius: '12px', whiteSpace: 'pre-wrap', height: '60vh', overflowY: 'auto' }}>
+
+            <pre className="bg-surface-container-high border border-border-hairline text-on-surface font-mono text-xs p-5 rounded-xl whiteSpace-pre-wrap h-[60vh] overflow-y-auto shadow-inner">
                 {logContent}
             </pre>
+        </div>
+    );
+};
+
+// --- AI Token 计量舱视图组件 ---
+const TokenStatsView = () => {
+    const [stats, setStats] = useState(null);
+    const [loading, setLoading] = useState(true);
+    const [error, setError] = useState(null);
+
+    const fetchStats = async () => {
+        try {
+            setLoading(true);
+            const resp = await fetch('/api/token/stats');
+            const data = await resp.json();
+            if (data.status === 'success') {
+                setStats(data);
+                setError(null);
+            } else {
+                setError(data.message || '加载统计数据失败');
+            }
+        } catch (err) {
+            setError('网络请求失败，请稍后重试');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchStats();
+    }, []);
+
+    if (loading) {
+        return (
+            <div className="flex flex-col items-center justify-center h-[50vh] gap-4">
+                <span className="material-symbols-outlined text-[48px] text-primary animate-spin">autorenew</span>
+                <p className="font-sans text-sm text-secondary">正在计算 Token 账单明细...</p>
+            </div>
+        );
+    }
+
+    if (error) {
+        return (
+            <div className="flex flex-col items-center justify-center h-[50vh] gap-4 text-center">
+                <span className="material-symbols-outlined text-[48px] text-error">error</span>
+                <p className="font-sans text-sm text-error font-semibold">{error}</p>
+                <button onClick={fetchStats} className="px-4 py-2 bg-primary text-on-primary rounded-lg text-xs font-semibold hover:bg-primary-hover transition-colors">重新加载</button>
+            </div>
+        );
+    }
+
+    const { summary, by_model, by_feature, recent_logs } = stats;
+
+    return (
+        <div className="view-content">
+            <header className="mb-6 flex justify-between items-center">
+                <div>
+                    <h1 className="font-sans text-2xl font-bold text-on-surface">AI Token 计量舱</h1>
+                    <p className="font-sans text-sm text-secondary mt-1">系统大模型调用统计、模型消耗占比及审计流水线。</p>
+                </div>
+                <button 
+                    onClick={fetchStats}
+                    className="flex items-center gap-1.5 px-4 py-2 bg-surface-container-high border border-border-hairline hover:bg-surface-container-highest text-on-surface hover:text-primary rounded-lg transition-colors font-sans text-xs font-semibold"
+                >
+                    <span className="material-symbols-outlined text-[16px]">autorenew</span>
+                    <span>刷新面板</span>
+                </button>
+            </header>
+
+            {/* Bento Grid */}
+            <div className="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+                {/* Card 1: Total Tokens */}
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 ambient-shadow glow-bg hover:border-primary transition-all duration-150 group relative overflow-hidden">
+                    <div className="flex justify-between items-start mb-3">
+                        <span className="font-sans text-xs font-semibold text-secondary uppercase tracking-wider">总 Token 消耗</span>
+                        <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary">
+                            <span className="material-symbols-outlined text-[18px]">generating_tokens</span>
+                        </div>
+                    </div>
+                    <div className="font-mono text-3xl font-bold text-on-surface mb-2">
+                        {summary.total_tokens.toLocaleString()}
+                    </div>
+                    <div className="text-[11px] text-secondary font-sans flex items-center gap-1">
+                        <span>Prompt: {(summary.total_prompt_tokens).toLocaleString()}</span>
+                        <span className="text-border-hairline">|</span>
+                        <span>Completion: {(summary.total_completion_tokens).toLocaleString()}</span>
+                    </div>
+                </div>
+
+                {/* Card 2: Calls */}
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 ambient-shadow glow-bg hover:border-primary transition-all duration-150 group relative overflow-hidden">
+                    <div className="flex justify-between items-start mb-3">
+                        <span className="font-sans text-xs font-semibold text-secondary uppercase tracking-wider">大模型调用次数</span>
+                        <div className="w-8 h-8 rounded-lg bg-processing/10 flex items-center justify-center text-processing">
+                            <span className="material-symbols-outlined text-[18px]">api</span>
+                        </div>
+                    </div>
+                    <div className="font-mono text-3xl font-bold text-on-surface mb-2">
+                        {summary.total_calls.toLocaleString()}
+                    </div>
+                    <div className="text-[11px] text-secondary font-sans">
+                        单次均耗 {summary.total_calls > 0 ? Math.round(summary.total_tokens / summary.total_calls).toLocaleString() : 0} Token
+                    </div>
+                </div>
+
+                {/* Card 3: Model Count */}
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 ambient-shadow glow-bg hover:border-primary transition-all duration-150 group relative overflow-hidden">
+                    <div className="flex justify-between items-start mb-3">
+                        <span className="font-sans text-xs font-semibold text-secondary uppercase tracking-wider">活跃模型数</span>
+                        <div className="w-8 h-8 rounded-lg bg-success/10 flex items-center justify-center text-success">
+                            <span className="material-symbols-outlined text-[18px]">robot_2</span>
+                        </div>
+                    </div>
+                    <div className="font-mono text-3xl font-bold text-on-surface mb-2">
+                        {summary.model_count} <span className="text-sm font-sans text-secondary font-normal">个</span>
+                    </div>
+                    <div className="text-[11px] text-secondary font-sans truncate">
+                        主流模型: {by_model[0]?.model || '无'}
+                    </div>
+                </div>
+
+                {/* Card 4: Feature Count */}
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 ambient-shadow glow-bg hover:border-primary transition-all duration-150 group relative overflow-hidden">
+                    <div className="flex justify-between items-start mb-3">
+                        <span className="font-sans text-xs font-semibold text-secondary uppercase tracking-wider">涉及功能类别</span>
+                        <div className="w-8 h-8 rounded-lg bg-amber-500/10 flex items-center justify-center text-amber-500">
+                            <span className="material-symbols-outlined text-[18px]">category</span>
+                        </div>
+                    </div>
+                    <div className="font-mono text-3xl font-bold text-on-surface mb-2">
+                        {summary.feature_count} <span className="text-sm font-sans text-secondary font-normal">种</span>
+                    </div>
+                    <div className="text-[11px] text-secondary font-sans truncate">
+                        核心场景: {by_feature[0]?.feature || '无'}
+                    </div>
+                </div>
+            </div>
+
+            {/* Split Grid for Charts/Percentages */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
+                {/* Model Share */}
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow">
+                    <h3 className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-[18px] text-primary">analytics</span>
+                        <span>模型消耗占比</span>
+                    </h3>
+                    {by_model.length === 0 ? (
+                        <p className="font-sans text-xs text-secondary py-8 text-center">暂无大模型调用数据</p>
+                    ) : (
+                        <div className="space-y-4">
+                            {by_model.map(m => {
+                                const percentage = summary.total_tokens > 0 ? (m.total_tokens / summary.total_tokens * 100).toFixed(1) : 0;
+                                return (
+                                    <div key={m.model} className="space-y-1.5">
+                                        <div className="flex justify-between items-center text-xs">
+                                            <span className="font-mono font-medium text-on-surface">{m.model}</span>
+                                            <span className="font-sans text-secondary font-semibold">{m.total_tokens.toLocaleString()} ({percentage}%)</span>
+                                        </div>
+                                        <div className="w-full h-2 bg-surface-container-high rounded-full overflow-hidden">
+                                            <div className="h-full bg-primary rounded-full transition-all duration-500" style={{ width: `${percentage}%` }}></div>
+                                        </div>
+                                        <div className="text-[10px] text-secondary font-sans">
+                                            调用次数: {m.calls.toLocaleString()} | Prompt: {m.prompt_tokens.toLocaleString()} | Completion: {m.completion_tokens.toLocaleString()}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+
+                {/* Feature Share */}
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow">
+                    <h3 className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-[18px] text-primary">dashboard_customize</span>
+                        <span>功能消耗占比</span>
+                    </h3>
+                    {by_feature.length === 0 ? (
+                        <p className="font-sans text-xs text-secondary py-8 text-center">暂无大模型调用数据</p>
+                    ) : (
+                        <div className="space-y-4">
+                            {by_feature.map(f => {
+                                const percentage = summary.total_tokens > 0 ? (f.total_tokens / summary.total_tokens * 100).toFixed(1) : 0;
+                                return (
+                                    <div key={f.feature} className="space-y-1.5">
+                                        <div className="flex justify-between items-center text-xs">
+                                            <span className="font-mono font-medium text-on-surface">{f.feature === 'source_relevance' ? '商品品类相关性判定 (source_relevance)' : f.feature}</span>
+                                            <span className="font-sans text-secondary font-semibold">{f.total_tokens.toLocaleString()} ({percentage}%)</span>
+                                        </div>
+                                        <div className="w-full h-2 bg-surface-container-high rounded-full overflow-hidden">
+                                            <div className="h-full bg-secondary rounded-full transition-all duration-500" style={{ width: `${percentage}%` }}></div>
+                                        </div>
+                                        <div className="text-[10px] text-secondary font-sans">
+                                            调用次数: {f.calls.toLocaleString()} | Prompt: {f.prompt_tokens.toLocaleString()} | Completion: {f.completion_tokens.toLocaleString()}
+                                        </div>
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+                </div>
+            </div>
+
+            {/* Recent Logs Table */}
+            <div className="bg-surface-container-lowest border border-border-hairline rounded-xl overflow-hidden ambient-shadow">
+                <div className="px-6 py-4 border-b border-border-hairline flex justify-between items-center bg-surface-container-lowest">
+                    <h3 className="font-sans text-sm font-bold text-on-surface flex items-center gap-1.5">
+                        <span className="material-symbols-outlined text-[18px] text-primary">receipt_long</span>
+                        <span>审计流水日志 (最近 20 次)</span>
+                    </h3>
+                </div>
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse">
+                        <thead>
+                            <tr className="bg-surface-container-low border-b border-border-hairline">
+                                <th className="p-4 font-sans text-[11px] font-bold text-secondary uppercase tracking-wider">时间</th>
+                                <th className="p-4 font-sans text-[11px] font-bold text-secondary uppercase tracking-wider">场景功能</th>
+                                <th className="p-4 font-sans text-[11px] font-bold text-secondary uppercase tracking-wider">大模型</th>
+                                <th className="p-4 font-sans text-[11px] font-bold text-secondary uppercase tracking-wider">对应调研任务</th>
+                                <th className="p-4 font-sans text-[11px] font-bold text-secondary uppercase tracking-wider text-right">Prompt</th>
+                                <th className="p-4 font-sans text-[11px] font-bold text-secondary uppercase tracking-wider text-right">Completion</th>
+                                <th className="p-4 font-sans text-[11px] font-bold text-secondary uppercase tracking-wider text-right">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border-hairline">
+                            {recent_logs.length === 0 ? (
+                                <tr>
+                                    <td colSpan="7" className="p-8 text-center font-sans text-xs text-secondary">
+                                        暂无明细审计日志
+                                    </td>
+                                </tr>
+                            ) : (
+                                recent_logs.map(log => (
+                                    <tr key={log.id} className="hover:bg-surface-container-low/50 transition-colors">
+                                        <td className="p-4 font-mono text-xs text-on-surface whitespace-nowrap">{log.created_at}</td>
+                                        <td className="p-4 font-sans text-xs text-on-surface">
+                                            {log.feature === 'source_relevance' ? (
+                                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-100 text-blue-800 dark:bg-blue-900/30 dark:text-blue-300">
+                                                    品类相关性判定
+                                                </span>
+                                            ) : (
+                                                <span className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium bg-gray-100 text-gray-800 dark:bg-gray-800 dark:text-gray-300">
+                                                    {log.feature}
+                                                </span>
+                                            )}
+                                        </td>
+                                        <td className="p-4 font-mono text-xs text-on-surface">{log.model}</td>
+                                        <td className="p-4 font-sans text-xs text-secondary max-w-xs truncate">
+                                            {log.task_keyword ? (
+                                                <span title={log.task_keyword}>{log.task_keyword}</span>
+                                            ) : log.task_id ? (
+                                                <span className="font-mono text-[10px]" title={log.task_id}>Task: {log.task_id.slice(0, 8)}...</span>
+                                            ) : (
+                                                <span className="text-gray-400 italic">手动脚本或公共调用</span>
+                                            )}
+                                        </td>
+                                        <td className="p-4 font-mono text-xs text-on-surface text-right">{log.prompt_tokens.toLocaleString()}</td>
+                                        <td className="p-4 font-mono text-xs text-on-surface text-right">{log.completion_tokens.toLocaleString()}</td>
+                                        <td className="p-4 font-mono text-xs font-bold text-primary text-right">{log.total_tokens.toLocaleString()}</td>
+                                    </tr>
+                                ))
+                            )}
+                        </tbody>
+                    </table>
+                </div>
+            </div>
         </div>
     );
 };
@@ -78,8 +383,6 @@ const PublishPreviewModal = ({ src, editTitle, setEditTitle, editPrice, setEditP
         }, 220);
     };
 
-    const btnStyle = { padding: '6px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontSize: '0.8rem', fontWeight: '600', marginTop: '8px' };
-
     return ReactDOM.createPortal(
         <div 
             className={`preview-modal-overlay ${active ? 'active' : ''}`}
@@ -89,78 +392,133 @@ const PublishPreviewModal = ({ src, editTitle, setEditTitle, editPrice, setEditP
                 className={`preview-modal-wrapper ${active ? 'active' : ''}`}
                 onClick={e => e.stopPropagation()}
             >
-                <h3 style={{ marginBottom: '20px', fontSize: '1.1rem' }}>📦 发布预览</h3>
-
-                {/* 图片预览 */}
-                {src.images && src.images.length > 0 && (
-                    <div style={{ display: 'flex', gap: '8px', marginBottom: '20px', flexWrap: 'wrap' }}>
-                        {src.images.slice(0, 5).map((img, idx) => (
-                            <img key={idx} src={img} referrerPolicy="no-referrer"
-                                 style={{ width: '72px', height: '72px', borderRadius: '8px', objectFit: 'cover', border: '1px solid var(--border)' }} />
-                        ))}
-                    </div>
-                )}
-
-                {/* 标题编辑 */}
-                <div style={{ marginBottom: '16px' }}>
-                    <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '6px' }}>标题（最多60字）</label>
-                    <input value={editTitle} onChange={e => setEditTitle(e.target.value.slice(0, 60))}
-                           style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', boxSizing: 'border-box' }} />
-                    <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', textAlign: 'right', marginTop: '4px' }}>{editTitle.length}/60</div>
+                <div className="px-6 py-4 border-b border-border-hairline flex justify-between items-center bg-surface-container-low">
+                    <h3 className="font-sans text-base font-bold text-on-surface flex items-center gap-2">
+                        <span className="material-symbols-outlined text-primary">publish</span>
+                        闲鱼发布预览与定价
+                    </h3>
+                    <button onClick={handleClose} className="w-8 h-8 rounded-full hover:bg-surface-container-high flex items-center justify-center text-secondary hover:text-on-surface transition-all">
+                        <span className="material-symbols-outlined text-[20px]">close</span>
+                    </button>
                 </div>
 
-                {/* 售价与多规格编辑 */}
-                {loadingSkus ? (
-                    <div style={{ marginBottom: '24px', fontSize: '0.9rem', color: 'var(--text-secondary)' }}>
-                        🔄 正在加载规格规格配置信息...
-                    </div>
-                ) : skus.length > 0 ? (
-                    <div style={{ marginBottom: '24px' }}>
-                        <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '10px' }}>
-                            规格售价与库存配置（进价加价后默认 +30 元）
-                        </label>
-                        <div style={{ maxHeight: '180px', overflowY: 'auto', border: '1px solid var(--border)', borderRadius: '8px', padding: '12px' }}>
-                            {skus.map((s, idx) => (
-                                <div key={idx} style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '12px', borderBottom: idx < skus.length - 1 ? '1px solid var(--border)' : 'none', paddingBottom: '10px' }}>
-                                    {s.image && (
-                                        <img src={s.image} referrerPolicy="no-referrer"
-                                             style={{ width: '28px', height: '28px', borderRadius: '4px', objectFit: 'cover', border: '1px solid var(--border)' }} />
-                                    )}
-                                    <span style={{ fontSize: '0.8rem', flex: 1, wordBreak: 'break-all' }}>{s.sku_text}</span>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px', width: '145px' }}>
-                                        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>进¥{s.price}→</span>
-                                        <input type="number" min="0" step="0.5" value={s.xianyu_price}
-                                               onChange={e => {
-                                                   const val = e.target.value;
-                                                   setSkus(prev => prev.map((item, i) => i === idx ? { ...item, xianyu_price: val } : item));
-                                               }}
-                                               style={{ width: '70px', padding: '6px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', fontSize: '0.8rem' }} />
-                                    </div>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: '5px', width: '85px' }}>
-                                        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>库存</span>
-                                        <input type="number" min="1" max="9999" value={s.stock}
-                                               onChange={e => {
-                                                   const val = Math.min(9999, parseInt(e.target.value) || 1);
-                                                   setSkus(prev => prev.map((item, i) => i === idx ? { ...item, stock: val } : item));
-                                               }}
-                                               style={{ width: '45px', padding: '6px', borderRadius: '6px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', fontSize: '0.8rem' }} />
-                                    </div>
-                                </div>
+                <div className="p-6 overflow-y-auto max-h-[70vh]">
+                    {/* 图片预览 */}
+                    {src.images && src.images.length > 0 && (
+                        <div className="flex gap-2.5 mb-5 flex-wrap">
+                            {src.images.slice(0, 5).map((img, idx) => (
+                                <img 
+                                    key={idx} 
+                                    src={img} 
+                                    referrerPolicy="no-referrer"
+                                    className="w-16 h-16 rounded-lg object-cover border border-border-hairline shadow-sm" 
+                                />
                             ))}
                         </div>
-                    </div>
-                ) : (
-                    /* 售价编辑（单规格） */
-                    <div style={{ marginBottom: '24px' }}>
-                        <label style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'block', marginBottom: '6px' }}>售价（元）<span style={{ color: 'var(--text-secondary)', fontWeight: 'normal' }}>1688进价 ¥{src.min_price}，加价后默认 ¥{(parseFloat(src.min_price)+30).toFixed(2)}</span></label>
-                        <input type="number" min="0" step="0.5" value={editPrice} onChange={e => setEditPrice(e.target.value)}
-                               style={{ width: '100%', padding: '10px', borderRadius: '8px', border: '1px solid var(--border)', background: 'var(--bg)', color: 'var(--text)', boxSizing: 'border-box' }} />
-                    </div>
-                )}
+                    )}
 
-                <div style={{ display: 'flex', gap: '12px', justifyContent: 'flex-end' }}>
-                    <button style={{ ...btnStyle, background: 'var(--border)', color: 'var(--text)' }} onClick={handleClose}>取消</button>
-                    <button style={{ ...btnStyle, background: 'var(--primary)', color: '#fff' }} onClick={handleConfirm} disabled={loadingSkus}>确认发布</button>
+                    {/* 标题编辑 */}
+                    <div className="mb-4">
+                        <label className="font-sans text-xs font-semibold text-secondary block mb-1.5">商品标题（最多60字，自动过滤敏感词）</label>
+                        <input 
+                            value={editTitle} 
+                            onChange={e => setEditTitle(e.target.value.slice(0, 60))}
+                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all" 
+                        />
+                        <div className="text-right text-[11px] text-secondary mt-1 font-mono">{editTitle.length}/60</div>
+                    </div>
+
+                    {/* 售价与多规格编辑 */}
+                    {loadingSkus ? (
+                        <div className="py-6 text-center text-sm text-secondary flex items-center justify-center gap-2">
+                            <span className="material-symbols-outlined animate-spin text-primary">sync</span>
+                            正在加载规格库存信息...
+                        </div>
+                    ) : skus.length > 0 ? (
+                        <div className="mb-5">
+                            <label className="font-sans text-xs font-semibold text-secondary block mb-2">
+                                规格售价与库存配置（进价默认加价 30 元）
+                            </label>
+                            <div className="max-h-56 overflow-y-auto border border-border-hairline rounded-lg bg-surface-container-low p-3 space-y-3">
+                                {skus.map((s, idx) => (
+                                    <div key={idx} className="flex items-center gap-3 pb-3 border-b border-border-hairline last:border-0 last:pb-0">
+                                        {s.image && (
+                                            <img 
+                                                src={s.image} 
+                                                referrerPolicy="no-referrer"
+                                                className="w-8 h-8 rounded object-cover border border-border-hairline shrink-0" 
+                                            />
+                                        )}
+                                        <span className="text-xs text-on-surface font-semibold flex-1 truncate" title={s.sku_text}>{s.sku_text}</span>
+                                        
+                                        <div className="flex items-center gap-1 shrink-0 w-36">
+                                            <span className="text-[10px] text-secondary font-mono">进¥{s.price}→</span>
+                                            <input 
+                                                type="number" 
+                                                min="0" 
+                                                step="0.5" 
+                                                value={s.xianyu_price}
+                                                onChange={e => {
+                                                    const val = e.target.value;
+                                                    setSkus(prev => prev.map((item, i) => i === idx ? { ...item, xianyu_price: val } : item));
+                                                }}
+                                                className="w-16 bg-surface-container-lowest border border-border-hairline text-on-surface text-xs rounded px-1.5 py-1 text-center focus:outline-none focus:border-primary font-mono" 
+                                            />
+                                        </div>
+
+                                        <div className="flex items-center gap-1 shrink-0 w-20">
+                                            <span className="text-[10px] text-secondary">库存</span>
+                                            <input 
+                                                type="number" 
+                                                min="1" 
+                                                max="9999" 
+                                                value={s.stock}
+                                                onChange={e => {
+                                                    const val = Math.min(9999, parseInt(e.target.value) || 1);
+                                                    setSkus(prev => prev.map((item, i) => i === idx ? { ...item, stock: val } : item));
+                                                }}
+                                                className="w-12 bg-surface-container-lowest border border-border-hairline text-on-surface text-xs rounded px-1.5 py-1 text-center focus:outline-none focus:border-primary font-mono" 
+                                            />
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    ) : (
+                        /* 售价编辑（单规格） */
+                        <div className="mb-5">
+                            <label className="font-sans text-xs font-semibold text-secondary block mb-1.5">
+                                售价（元）<span className="text-secondary font-normal ml-2">1688成本进价 ¥{src.min_price}，默认加价30元后 ¥{(parseFloat(src.min_price)+30).toFixed(2)}</span>
+                            </label>
+                            <div className="relative">
+                                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-primary font-mono font-bold">¥</span>
+                                <input 
+                                    type="number" 
+                                    min="0" 
+                                    step="0.5" 
+                                    value={editPrice} 
+                                    onChange={e => setEditPrice(e.target.value)}
+                                    className="w-full bg-surface-container-low border border-border-hairline text-on-surface rounded-lg pl-8 pr-3 py-2.5 text-sm focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all font-mono font-bold" 
+                                />
+                            </div>
+                        </div>
+                    )}
+                </div>
+
+                <div className="px-6 py-4 border-t border-border-hairline flex gap-3 justify-end bg-surface-container-low">
+                    <button 
+                        onClick={handleClose} 
+                        className="px-4 py-2 border border-border-hairline rounded-lg text-secondary font-sans text-xs font-semibold hover:bg-surface-container-high hover:text-on-surface transition-colors"
+                    >
+                        取消
+                    </button>
+                    <button 
+                        onClick={handleConfirm} 
+                        disabled={loadingSkus}
+                        className="px-4 py-2 bg-primary hover:bg-primary-container text-white font-sans text-xs font-semibold rounded-lg shadow-sm disabled:opacity-50 transition-colors"
+                    >
+                        确认发布上架
+                    </button>
                 </div>
             </div>
         </div>,
@@ -207,9 +565,29 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
         }, 220);
     };
 
-    const margin = (item.ref_price - item.source_price - 20).toFixed(2);
+    const costPrice = parseFloat(item.source_price) || 0;
+    const refPrice = parseFloat(item.ref_price) || 0;
+    const margin = (refPrice - costPrice - 20).toFixed(2);
     
-    // 动态构造 mockSrc 数据结构传给 PublishButton
+    // AI ROI 测算
+    const roiPercentage = costPrice > 0 ? Math.round(((refPrice - costPrice) / costPrice) * 100) : 0;
+    let recommendationBadge = "Strong Buy";
+    let badgeColorClass = "bg-success/10 text-success border-success/20";
+    let pulseColorClass = "bg-success";
+    let aiAdvice = "利润空间巨大，超过 40% 的理想红线。且货源在同类厂家中最为稳定，建议立即上架抢占市场。";
+
+    if (roiPercentage < 30) {
+        recommendationBadge = "Low Margin";
+        badgeColorClass = "bg-error/10 text-error border-error/20";
+        pulseColorClass = "bg-error";
+        aiAdvice = "该商品的利润低于 30%，存在一定程度的价格战风险，建议提高闲鱼端售价或者寻找更低价货源。";
+    } else if (roiPercentage < 60) {
+        recommendationBadge = "Good to Buy";
+        badgeColorClass = "bg-warning/10 text-warning border-warning/20";
+        pulseColorClass = "bg-warning";
+        aiAdvice = "利润处于中等健康区间，可稳健切入。建议配合赠品等差异化策略来提升客单价及流量。";
+    }
+
     const mockSrc = {
         db_id: item.source_db_id,
         title: item.source_title,
@@ -224,171 +602,213 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
             onClick={handleClose}
         >
             <div 
-                className={`detail-modal-wrapper ${active ? 'active' : ''}`}
+                className={`detail-modal-wrapper ${active ? 'active' : ''} max-w-4xl`}
+                style={{ width: '840px' }}
                 onClick={e => e.stopPropagation()}
             >
-                <div className="detail-modal-header">
-                    <h2><i className="fas fa-box-open" style={{ color: 'var(--primary)' }}></i> 闲鱼发布商品详情</h2>
-                    <button className="detail-modal-close" onClick={handleClose}>&times;</button>
+                <div className="px-6 py-4 border-b border-border-hairline flex justify-between items-center bg-surface-container-low">
+                    <h2 className="font-sans text-base font-bold text-on-surface flex items-center gap-2">
+                        <span className="material-symbols-outlined text-primary">inventory</span>
+                        闲鱼已发布商品档案
+                    </h2>
+                    <button className="w-8 h-8 rounded-full hover:bg-surface-container-high flex items-center justify-center text-secondary hover:text-on-surface transition-all" onClick={handleClose}>
+                        <span className="material-symbols-outlined text-[20px]">close</span>
+                    </button>
                 </div>
                 
-                <div className="detail-modal-body">
-                    <div style={{ display: 'flex', gap: '25px', alignItems: 'flex-start' }}>
-                        {/* 缩略图大图展示 */}
-                        <div style={{ flexShrink: 0 }}>
+                <div className="p-6 overflow-y-auto max-h-[72vh] flex gap-6">
+                    {/* 左侧主要信息: Span 8 布局 */}
+                    <div className="flex-1 flex flex-col gap-5">
+                        <div className="flex gap-4 items-start">
                             {item.source_image ? (
-                                <img src={item.source_image} style={{ width: '180px', height: '180px', borderRadius: '16px', objectFit: 'cover', border: '1px solid var(--border)', boxShadow: '0 8px 20px rgba(0,0,0,0.06)' }} referrerPolicy="no-referrer" />
+                                <img 
+                                    src={item.source_image} 
+                                    className="w-36 h-36 rounded-xl object-cover border border-border-hairline ambient-shadow shrink-0" 
+                                    referrerPolicy="no-referrer" 
+                                />
                             ) : (
-                                <div style={{ width: '180px', height: '180px', borderRadius: '16px', background: '#F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94A3B8', border: '1px solid var(--border)' }}>暂无图片</div>
+                                <div className="w-36 h-36 rounded-xl bg-surface-container-low border border-border-hairline flex items-center justify-center text-secondary shrink-0 text-xs">
+                                    暂无商品图片
+                                </div>
                             )}
-                        </div>
-                        
-                        {/* 关键信息显示 */}
-                        <div style={{ flex: 1 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
-                                <span style={{ fontSize: '0.7rem', color: 'var(--primary)', background: '#FFEFE6', padding: '3px 8px', borderRadius: '4px', fontWeight: 'bold' }}>1688 货源</span>
-                                <span style={{ fontSize: '0.7rem', color: 'var(--text-secondary)' }}>ID: {item.source_db_id}</span>
-                            </div>
-                            <h3 style={{ fontSize: '1.05rem', fontWeight: '700', lineHeight: '1.4', marginBottom: '16px', color: 'var(--text-main)' }}>
-                                <a href={item.source_url} target="_blank" rel="noreferrer" className="hover-link" style={{ textDecoration: 'none', color: 'inherit' }}>
-                                    {item.source_title} <i className="fas fa-external-link-alt" style={{ fontSize: '0.75rem', color: '#94A3B8' }}></i>
-                                </a>
-                            </h3>
                             
-                            {/* 信息卡片网格 */}
-                            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px 20px', padding: '16px', background: 'rgba(0,0,0,0.02)', borderRadius: '12px', border: '1px solid var(--border)', marginBottom: '16px' }}>
-                                <div>
-                                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>闲鱼端商品 ID</span>
-                                    <div style={{ fontWeight: '700', fontSize: '0.88rem', marginTop: '3px', fontFamily: 'monospace' }}>{item.xianyu_item_id || '暂无'}</div>
+                            <div className="flex-1 min-w-0">
+                                <div className="flex items-center gap-2 mb-1.5">
+                                    <span className="text-[10px] text-primary bg-primary/10 border border-primary/20 px-2 py-0.5 rounded font-bold">1688货源</span>
+                                    <span className="text-[10px] text-secondary font-mono">DB_ID: {item.source_db_id}</span>
                                 </div>
-                                <div>
-                                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>发布记录时间</span>
-                                    <div style={{ fontWeight: '600', fontSize: '0.88rem', marginTop: '3px' }}>{item.publish_time}</div>
-                                </div>
-                                {item.ref_title && (
-                                    <div style={{ gridColumn: '1 / -1' }}>
-                                        <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>关联参考爆款标题</span>
-                                        <div style={{ fontWeight: '600', fontSize: '0.82rem', marginTop: '3px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.ref_title}>
-                                            {item.ref_title}
-                                        </div>
+                                <h3 className="text-sm font-bold text-on-surface leading-snug line-clamp-2 hover:text-primary transition-colors">
+                                    <a href={item.source_url} target="_blank" rel="noreferrer" className="flex items-center gap-1">
+                                        {item.source_title}
+                                        <span className="material-symbols-outlined text-xs text-secondary">open_in_new</span>
+                                    </a>
+                                </h3>
+                                
+                                <div className="grid grid-cols-2 gap-2 mt-4 p-3 bg-surface-container rounded-lg border border-border-hairline">
+                                    <div>
+                                        <span className="text-[10px] text-secondary block">闲鱼商品 ID</span>
+                                        <span className="font-mono text-xs font-bold text-on-surface mt-0.5 block">{item.xianyu_item_id || '暂无云端ID'}</span>
                                     </div>
-                                )}
-                            </div>
-                            
-                            {/* 核心对比利润指标 */}
-                            <div style={{ display: 'flex', gap: '20px', alignItems: 'center', borderTop: '1px dashed var(--border)', paddingTop: '16px' }}>
-                                <div>
-                                    <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>1688 成本进价</span>
-                                    <div style={{ fontSize: '1.25rem', fontWeight: '800', marginTop: '3px' }}>¥{item.source_price}</div>
+                                    <div>
+                                        <span className="text-[10px] text-secondary block">发布记录时间</span>
+                                        <span className="text-xs font-semibold text-on-surface mt-0.5 block">{item.publish_time}</span>
+                                    </div>
                                 </div>
-                                {item.ref_price > 0 && (
-                                    <>
-                                        <div style={{ borderLeft: '1px solid var(--border)', height: '24px' }}></div>
-                                        <div>
-                                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>爆款参考价</span>
-                                            <div style={{ fontSize: '1.25rem', fontWeight: '800', marginTop: '3px' }}>¥{item.ref_price}</div>
-                                        </div>
-                                        <div style={{ borderLeft: '1px solid var(--border)', height: '24px' }}></div>
-                                        <div>
-                                            <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)' }}>预计利润额</span>
-                                            <div style={{ fontSize: '1.25rem', fontWeight: '800', color: margin > 50 ? 'var(--success)' : 'var(--danger)', marginTop: '3px' }}>¥{margin}</div>
-                                        </div>
-                                    </>
-                                )}
                             </div>
+                        </div>
+
+                        {/* 爆款参考 */}
+                        {item.ref_title && (
+                            <div className="p-3 bg-surface-container-low border border-border-hairline rounded-lg text-xs">
+                                <span className="text-[10px] text-secondary font-semibold block mb-0.5">关联参考爆款标题</span>
+                                <span className="text-on-surface font-medium block truncate" title={item.ref_title}>{item.ref_title}</span>
+                            </div>
+                        )}
+
+                        {/* SKU 规格明细板块 */}
+                        <div className="border-t border-border-hairline pt-4">
+                            <h4 className="text-xs font-bold text-on-surface flex items-center gap-1.5 mb-3">
+                                <span className="material-symbols-outlined text-primary text-[18px]">format_list_bulleted</span>
+                                商品规格明细 ({skus.length} 个规格)
+                            </h4>
+                            
+                            {loadingSkus ? (
+                                <div className="py-6 text-center text-xs text-secondary flex items-center justify-center gap-2">
+                                    <span className="material-symbols-outlined animate-spin text-primary">sync</span>
+                                    正在同步SKU明细中...
+                                </div>
+                            ) : skus.length > 0 ? (
+                                <div className="max-h-48 overflow-y-auto border border-border-hairline rounded-lg bg-surface-container-low p-1.5">
+                                    <table className="w-full text-left border-collapse text-xs">
+                                        <thead>
+                                            <tr className="border-b border-border-hairline">
+                                                <th className="p-2 font-bold text-secondary w-12 text-center">规格图</th>
+                                                <th className="p-2 font-bold text-secondary">规格描述</th>
+                                                <th className="p-2 font-bold text-secondary w-20">成本进价</th>
+                                                <th className="p-2 font-bold text-secondary w-20">建议闲鱼价</th>
+                                                <th className="p-2 font-bold text-secondary w-16 text-center">云仓库存</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {skus.map((sku, idx) => (
+                                                <tr key={idx} className="border-b border-border-hairline/40 last:border-0 hover:bg-primary/5 transition-colors">
+                                                    <td className="p-2 text-center">
+                                                        {sku.image ? (
+                                                            <img 
+                                                                src={sku.image} 
+                                                                referrerPolicy="no-referrer" 
+                                                                className="w-8 h-8 rounded object-cover border border-border-hairline mx-auto" 
+                                                            />
+                                                        ) : (
+                                                            <div className="w-8 h-8 rounded bg-surface-container border border-border-hairline flex items-center justify-center text-[9px] text-secondary mx-auto">无图</div>
+                                                        )}
+                                                    </td>
+                                                    <td className="p-2 font-semibold text-on-surface break-words max-w-[150px]">
+                                                        {sku.sku_text}
+                                                    </td>
+                                                    <td className="p-2 font-mono text-secondary">
+                                                        ¥{sku.price}
+                                                    </td>
+                                                    <td className="p-2 font-mono text-primary font-bold">
+                                                        ¥{(parseFloat(sku.price) + 30).toFixed(2)}
+                                                    </td>
+                                                    <td className={`p-2 text-center font-mono font-bold ${sku.stock > 10 ? 'text-success' : 'text-error'}`}>
+                                                        {sku.stock}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            ) : (
+                                <div className="py-6 text-center text-xs text-secondary bg-surface-container rounded-lg border border-border-hairline border-dashed">
+                                    📦 该商品属于单规格一口价商品（无多规格明细）。
+                                </div>
+                            )}
                         </div>
                     </div>
 
-                    {/* SKU 规格明细板块 */}
-                    <div style={{ marginTop: '25px', borderTop: '1px solid var(--border)', paddingTop: '20px' }}>
-                        <h4 style={{ fontSize: '0.9rem', fontWeight: '800', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px', color: 'var(--text-main)' }}>
-                            <i className="fas fa-th-list" style={{ color: 'var(--primary)', fontSize: '0.85rem' }}></i>
-                            商品关联 SKU 规格明细 ({skus.length} 个规格)
-                        </h4>
-                        
-                        {loadingSkus ? (
-                            <div style={{ padding: '20px 0', textAlign: 'center', color: 'var(--text-secondary)', fontSize: '0.85rem' }}>
-                                🔄 正在加载 SKU 规格明细...
+                    {/* 右侧决策面板: Span 4 布局 (AI ROI 引擎) */}
+                    <div className="w-64 shrink-0 flex flex-col gap-4">
+                        {/* 基础测算卡片 */}
+                        <div className="bg-surface-container rounded-xl p-4 border border-border-hairline flex flex-col gap-3">
+                            <span className="font-sans text-[10px] font-bold text-secondary tracking-wider uppercase">价格与纯利测算</span>
+                            
+                            <div className="flex justify-between items-baseline">
+                                <span className="text-xs text-secondary">1688成本价</span>
+                                <span className="font-mono text-sm font-bold text-on-surface">¥{item.source_price}</span>
                             </div>
-                        ) : skus.length > 0 ? (
-                            <div style={{ 
-                                maxHeight: '220px', 
-                                overflowY: 'auto', 
-                                border: '1px solid var(--border)', 
-                                borderRadius: '12px', 
-                                background: 'rgba(0, 0, 0, 0.01)',
-                                padding: '4px'
-                            }}>
-                                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: '0.82rem', textAlign: 'left' }}>
-                                    <thead>
-                                        <tr style={{ borderBottom: '1px solid var(--border)' }}>
-                                            <th style={{ padding: '10px 12px', color: 'var(--text-secondary)', fontWeight: '700', width: '50px' }}>规格图</th>
-                                            <th style={{ padding: '10px 12px', color: 'var(--text-secondary)', fontWeight: '700' }}>规格文案</th>
-                                            <th style={{ padding: '10px 12px', color: 'var(--text-secondary)', fontWeight: '700', width: '100px' }}>成本进价</th>
-                                            <th style={{ padding: '10px 12px', color: 'var(--text-secondary)', fontWeight: '700', width: '110px' }}>默认闲鱼价</th>
-                                            <th style={{ padding: '10px 12px', color: 'var(--text-secondary)', fontWeight: '700', width: '80px' }}>库存</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {skus.map((sku, idx) => (
-                                            <tr key={idx} style={{ 
-                                                borderBottom: idx < skus.length - 1 ? '1px solid rgba(0,0,0,0.04)' : 'none',
-                                                transition: 'background-color 0.15s'
-                                            }} className="sku-detail-row">
-                                                <td style={{ padding: '8px 12px' }}>
-                                                    {sku.image ? (
-                                                        <img src={sku.image} referrerPolicy="no-referrer" style={{ width: '32px', height: '32px', borderRadius: '6px', objectFit: 'cover', border: '1px solid var(--border)' }} />
-                                                    ) : (
-                                                        <div style={{ width: '32px', height: '32px', borderRadius: '6px', background: '#F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94A3B8', fontSize: '0.55rem' }}>无图</div>
-                                                    )}
-                                                </td>
-                                                <td style={{ padding: '8px 12px', fontWeight: '600', color: 'var(--text-main)', wordBreak: 'break-all' }}>
-                                                    {sku.sku_text}
-                                                </td>
-                                                <td style={{ padding: '8px 12px', fontWeight: '700', color: 'var(--text-secondary)' }}>
-                                                    ¥{sku.price}
-                                                </td>
-                                                <td style={{ padding: '8px 12px', fontWeight: '800', color: 'var(--primary)' }}>
-                                                    ¥{(parseFloat(sku.price) + 30).toFixed(2)}
-                                                </td>
-                                                <td style={{ padding: '8px 12px', color: sku.stock > 10 ? 'var(--success)' : 'var(--danger)', fontWeight: '700' }}>
-                                                    {sku.stock}
-                                                </td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
+                            
+                            {item.ref_price > 0 && (
+                                <>
+                                    <div className="flex justify-between items-baseline border-t border-border-hairline/60 pt-2">
+                                        <span className="text-xs text-secondary">爆款参考售价</span>
+                                        <span className="font-mono text-sm font-bold text-on-surface">¥{item.ref_price}</span>
+                                    </div>
+                                    <div className="flex justify-between items-baseline border-t border-border-hairline/60 pt-2">
+                                        <span className="text-xs text-secondary">预期净利润额</span>
+                                        <span className={`font-mono text-base font-black ${parseFloat(margin) > 50 ? 'text-success' : 'text-error'}`}>
+                                            ¥{margin}
+                                        </span>
+                                    </div>
+                                </>
+                            )}
+                        </div>
+
+                        {/* AI 决策建议 */}
+                        <div className="bg-surface-container-low border border-border-hairline rounded-xl p-4 flex-1 flex flex-col justify-between">
+                            <div>
+                                <span className="font-sans text-[10px] font-bold text-secondary tracking-wider uppercase block mb-3">AI 推荐诊断</span>
+                                
+                                <div className="flex items-center gap-1.5 mb-2">
+                                    <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border flex items-center gap-1 ${badgeColorClass}`}>
+                                        <span className={`w-1.5 h-1.5 rounded-full ${pulseColorClass} animate-pulse`}></span>
+                                        {recommendationBadge}
+                                    </span>
+                                </div>
+                                
+                                <div className="text-3xl font-sans font-black text-on-surface tracking-tight mt-2 flex items-baseline">
+                                    {roiPercentage}%
+                                    <span className="text-xs text-secondary font-normal ml-1">预期 ROI</span>
+                                </div>
+                                
+                                <p className="text-xs leading-relaxed text-secondary mt-3 bg-surface-container-lowest p-3 rounded-lg border border-border-hairline/50">
+                                    {aiAdvice}
+                                </p>
                             </div>
-                        ) : (
-                            <div style={{ padding: '20px 0', textAlign: 'center', color: '#94A3B8', fontSize: '0.85rem' }}>
-                                📦 该商品为单规格一口价商品（无多属性规格明细）。
+                            
+                            <div className="text-[10px] text-secondary font-mono mt-4 text-center">
+                                * ROI 测算扣除了估计加价运费成本
                             </div>
-                        )}
+                        </div>
                     </div>
                 </div>
                 
-                <div className="detail-modal-footer">
-                    <div style={{ display: 'flex', width: '100%', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div style={{ fontSize: '0.78rem', color: 'var(--text-secondary)' }}>
-                            提示：可在右侧控制面板进行下架或删除操作。
-                        </div>
-                        <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
-                            <PublishButton 
-                                src={mockSrc} 
-                                xianyuPrice={item.ref_price} 
-                                onStatusLoaded={(dbId, status, result) => {
-                                    handleStatusLoaded(dbId, status, result);
-                                    if (status === 'idle') {
-                                        handleClose();
-                                    } else {
-                                        onUpdateItem({ ...item, publish_status: status });
-                                    }
-                                }}
-                                batchStatus={batchStatusMap[item.source_db_id]}
-                                batchResult={batchResultMap[item.source_db_id]}
-                            />
-                            <button className="pro-btn" style={{ padding: '6px 16px', fontSize: '0.8rem' }} onClick={handleClose}>关闭</button>
-                        </div>
+                <div className="px-6 py-4 border-t border-border-hairline bg-surface-container-low flex justify-between items-center">
+                    <div className="text-[11px] text-secondary">
+                        提示：可在右侧面板控制直接执行云端数据同步。
+                    </div>
+                    <div className="flex gap-3 items-center">
+                        <PublishButton 
+                            src={mockSrc} 
+                            xianyuPrice={item.ref_price} 
+                            onStatusLoaded={(dbId, status, result) => {
+                                handleStatusLoaded(dbId, status, result);
+                                if (status === 'idle') {
+                                    handleClose();
+                                } else {
+                                    onUpdateItem({ ...item, publish_status: status });
+                                }
+                            }}
+                            batchStatus={batchStatusMap[item.source_db_id]}
+                            batchResult={batchResultMap[item.source_db_id]}
+                        />
+                        <button 
+                            className="px-4 py-2 border border-border-hairline rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container-high font-sans text-xs font-semibold transition-all" 
+                            onClick={handleClose}
+                        >
+                            关闭档案
+                        </button>
                     </div>
                 </div>
             </div>
@@ -432,11 +852,9 @@ const PublishedManager = () => {
         fetchPublishedProducts();
     }, [page, keyword, sortBy, sortOrder, refreshTrigger]);
 
-    // 移除原有的 overflow 控制逻辑，由 DetailModal 组件自身效果管控
-
     const handleStatusLoaded = (dbId, status, result) => {
         setBatchStatusMap(prev => {
-            // 如果已经被删除，我们需要更新列表
+            // 如果已被删除，我们需要更新列表
             if (status === 'idle' && prev[dbId] === 'deleting') {
                 setTimeout(() => {
                     setRefreshTrigger(t => t + 1);
@@ -463,21 +881,21 @@ const PublishedManager = () => {
         setPage(1); // 排序后回到第一页
     };
 
-    const renderSortHeader = (label, field, style = {}) => {
+    const renderSortHeader = (label, field, extraClasses = "") => {
         const isCurrent = sortBy === field;
-        let icon = <i className="fas fa-sort" style={{ color: '#CBD5E1', marginLeft: '6px' }}></i>;
+        let icon = <span className="material-symbols-outlined text-[16px] text-secondary/40 ml-1">swap_vert</span>;
         if (isCurrent) {
             icon = sortOrder === 'asc' 
-                ? <i className="fas fa-sort-up" style={{ color: 'var(--primary)', marginLeft: '6px' }}></i>
-                : <i className="fas fa-sort-down" style={{ color: 'var(--primary)', marginLeft: '6px' }}></i>;
+                ? <span className="material-symbols-outlined text-[16px] text-primary ml-1">arrow_upward</span>
+                : <span className="material-symbols-outlined text-[16px] text-primary ml-1">arrow_downward</span>;
         }
         return (
             <th 
                 onClick={() => handleSort(field)} 
-                style={{ cursor: 'pointer', userSelect: 'none', ...style }}
-                title="点击进行排序"
+                className={`p-cell-padding font-sans text-xs font-semibold text-secondary uppercase tracking-wider cursor-pointer user-select-none hover:bg-surface-container-high transition-colors ${extraClasses}`}
+                title="点击切换升序/降序"
             >
-                <div style={{ display: 'flex', alignItems: 'center' }}>
+                <div className="flex items-center justify-start">
                     {label} {icon}
                 </div>
             </th>
@@ -488,117 +906,172 @@ const PublishedManager = () => {
 
     return (
         <div className="view-content">
-            <header>
-                <h1>📦 闲鱼已上架商品管理</h1>
-                <p>管理目前在闲鱼中已成功发布的商品资产，并与 1688 原始货源进行联动追踪。点击行项目可展开详情及控制面板。</p>
+            <header className="mb-6">
+                <h1 className="font-sans text-2xl font-bold text-on-surface flex items-center gap-2">
+                    <span className="material-symbols-outlined text-primary text-[28px]">shopping_bag</span>
+                    闲鱼上架商品中枢
+                </h1>
+                <p className="font-sans text-sm text-secondary mt-1">管理并监控已经在闲鱼铺货成功的商品，支持与 1688 源头采购价、物流信息实时联动。点击行项目可展开详情数据与下架控制。</p>
             </header>
 
             {/* 搜索栏 */}
-            <div className="task-card" style={{ padding: '20px', marginBottom: '30px', display: 'flex', gap: '15px' }}>
-                <input 
-                    style={{ flex: 1, padding: '10px 15px', borderRadius: '8px', border: '1px solid var(--border)' }}
-                    value={keyword}
-                    onChange={e => { setKeyword(e.target.value); setPage(1); }}
-                    placeholder="输入商品标题关键字搜索（支持搜索 1688 源标题或参考爆款标题）..."
-                />
-                <button className="pro-btn primary" onClick={() => { setPage(1); fetchPublishedProducts(); }}>搜索</button>
+            <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-4 mb-6 ambient-shadow flex gap-3">
+                <div className="relative flex-1">
+                    <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-secondary text-[20px]">search</span>
+                    <input 
+                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-10 pr-4 py-2 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all placeholder-secondary/50"
+                        value={keyword}
+                        onChange={e => { setKeyword(e.target.value); setPage(1); }}
+                        placeholder="输入货源源标题、闲鱼发布标题或者商品数据库 ID 进行深度搜索..."
+                    />
+                </div>
+                <button 
+                    className="bg-primary hover:bg-primary-container text-white px-5 py-2 rounded-lg font-sans text-sm font-semibold transition-colors flex items-center gap-2 shadow-[0_2px_8px_rgba(168,50,0,0.15)]"
+                    onClick={() => { setPage(1); fetchPublishedProducts(); }}
+                >
+                    立即筛选
+                </button>
             </div>
 
             {loading ? (
-                <div className="task-card" style={{ textAlign: 'center', padding: '100px' }}>
-                    <p>🔄 正在加载闲鱼商品列表...</p>
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-24 text-center ambient-shadow">
+                    <div className="inline-flex items-center gap-2 text-secondary text-sm">
+                        <span className="material-symbols-outlined animate-spin text-primary text-[24px]">sync</span>
+                        正在同步已上架商品资产列表...
+                    </div>
                 </div>
             ) : items.length > 0 ? (
-                <div>
-                    <div className="pub-list-container">
-                        <table className="pub-table">
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl overflow-hidden ambient-shadow">
+                    <div className="overflow-x-auto w-full">
+                        <table className="w-full text-left border-collapse">
                             <thead>
-                                <tr>
-                                    <th style={{ width: '80px' }}>商品图片</th>
+                                <tr className="bg-table-header-bg border-b border-border-hairline">
+                                    <th className="p-cell-padding font-sans text-xs font-semibold text-secondary uppercase tracking-wider w-20">主图</th>
                                     {renderSortHeader("1688 原始货源信息", "title")}
-                                    {renderSortHeader("闲鱼商品 ID", "xianyu_item_id")}
-                                    {renderSortHeader("当前状态", "publish_status")}
-                                    {renderSortHeader("货源进价", "source_price")}
-                                    {renderSortHeader("参考售价", "ref_price")}
+                                    {renderSortHeader("闲鱼端商品 ID", "xianyu_item_id", "font-mono")}
+                                    {renderSortHeader("系统同步状态", "publish_status")}
+                                    {renderSortHeader("拿货进价", "source_price")}
+                                    {renderSortHeader("爆款参考价", "ref_price")}
                                     {renderSortHeader("发布时间", "publish_time")}
                                 </tr>
                             </thead>
-                            <tbody>
+                            <tbody className="divide-y divide-border-hairline text-sm">
                                 {items.map((item) => {
                                     const currentStatus = batchStatusMap[item.source_db_id] || item.publish_status;
                                     
                                     let statusText = '未知';
-                                    let statusClass = 'pending';
+                                    let statusClass = 'bg-secondary/10 text-secondary border-secondary/20';
+                                    let pulseColor = 'bg-secondary';
+
                                     if (currentStatus === 'success' || currentStatus === 'done') {
                                         statusText = '已上架';
-                                        statusClass = 'success';
+                                        statusClass = 'bg-success/10 text-success border-success/20';
+                                        pulseColor = 'bg-success';
                                     } else if (currentStatus === 'depublished') {
                                         statusText = '已下架';
-                                        statusClass = 'depublished';
+                                        statusClass = 'bg-warning/10 text-warning border-warning/20';
+                                        pulseColor = 'bg-warning';
                                     } else if (currentStatus === 'failed') {
-                                        statusText = '发布失败';
-                                        statusClass = 'failed';
+                                        statusText = '同步失败';
+                                        statusClass = 'bg-error/10 text-error border-error/20';
+                                        pulseColor = 'bg-error';
                                     } else if (currentStatus === 'pending' || currentStatus === 'publishing') {
                                         statusText = '同步中';
-                                        statusClass = 'pending';
+                                        statusClass = 'bg-processing/10 text-processing border-processing/20';
+                                        pulseColor = 'bg-processing';
                                     } else if (currentStatus === 'deleting') {
                                         statusText = '删除中';
-                                        statusClass = 'failed';
+                                        statusClass = 'bg-error/10 text-error border-error/20';
+                                        pulseColor = 'bg-error';
                                     }
 
                                     return (
-                                        <tr key={item.publish_id} className="pub-row" onClick={() => setSelectedProduct(item)}>
-                                            <td>
+                                        <tr 
+                                            key={item.publish_id} 
+                                            className="hover:bg-surface-container-low transition-colors cursor-pointer group"
+                                            onClick={() => setSelectedProduct(item)}
+                                        >
+                                            <td className="p-cell-padding">
                                                 {item.source_image ? (
-                                                    <img src={item.source_image} style={{ width: '48px', height: '48px', borderRadius: '8px', objectFit: 'cover' }} referrerPolicy="no-referrer" />
+                                                    <img 
+                                                        src={item.source_image} 
+                                                        className="w-12 h-12 rounded-lg object-cover border border-border-hairline mx-auto" 
+                                                        referrerPolicy="no-referrer" 
+                                                    />
                                                 ) : (
-                                                    <div style={{ width: '48px', height: '48px', borderRadius: '8px', background: '#F1F5F9', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#94A3B8', fontSize: '0.65rem' }}>暂无图片</div>
+                                                    <div className="w-12 h-12 rounded-lg bg-surface-container border border-border-hairline flex items-center justify-center text-secondary text-[10px] mx-auto">暂无图片</div>
                                                 )}
                                             </td>
-                                            <td>
-                                                <div style={{ fontWeight: '600', color: 'var(--text-main)', maxWidth: '380px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.source_title}>
+                                            <td className="p-cell-padding">
+                                                <div className="font-semibold text-on-surface max-w-[280px] truncate" title={item.source_title}>
                                                     {item.source_title}
                                                 </div>
-                                                <div style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                                                    <a href={item.source_url} target="_blank" rel="noreferrer" className="hover-link" onClick={e => e.stopPropagation()} style={{ textDecoration: 'none', color: 'inherit' }}>
-                                                        查看 1688 货源链接 ↗
+                                                <div className="text-xs text-secondary mt-1 flex items-center gap-1">
+                                                    <a 
+                                                        href={item.source_url} 
+                                                        target="_blank" 
+                                                        rel="noreferrer" 
+                                                        className="hover:text-primary transition-colors flex items-center gap-0.5" 
+                                                        onClick={e => e.stopPropagation()}
+                                                    >
+                                                        查看1688货源 ↗
                                                     </a>
                                                 </div>
                                             </td>
-                                            <td style={{ fontFamily: 'monospace', fontWeight: '700' }}>{item.xianyu_item_id || '-'}</td>
-                                            <td>
-                                                <span className={`badge ${statusClass}`}>
-                                                    <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'currentColor' }}></span>
+                                            <td className="p-cell-padding font-mono font-bold text-on-surface">{item.xianyu_item_id || '-'}</td>
+                                            <td className="p-cell-padding">
+                                                <span className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs font-bold border ${statusClass}`}>
+                                                    <span className={`w-1.5 h-1.5 rounded-full ${pulseColor} animate-pulse`}></span>
                                                     {statusText}
                                                 </span>
                                             </td>
-                                            <td style={{ fontWeight: '700' }}>¥{item.source_price}</td>
-                                            <td style={{ fontWeight: '600' }}>¥{item.ref_price || '-'}</td>
-                                            <td style={{ color: 'var(--text-secondary)', fontSize: '0.8rem' }}>{item.publish_time}</td>
+                                            <td className="p-cell-padding font-mono text-secondary font-bold">¥{item.source_price}</td>
+                                            <td className="p-cell-padding font-mono text-on-surface font-semibold">¥{item.ref_price || '-'}</td>
+                                            <td className="p-cell-padding text-secondary text-xs">{item.publish_time}</td>
                                         </tr>
                                     );
                                 })}
                             </tbody>
                         </table>
                     </div>
+
+                    {/* 分页控制 */}
+                    {totalPages > 1 && (
+                        <div className="p-4 border-t border-border-hairline bg-surface-container-lowest flex items-center justify-between">
+                            <span className="font-mono text-xs text-secondary">
+                                共 {total} 个商品，当前显示第 {page} / {totalPages} 页
+                            </span>
+                            <div className="flex items-center gap-1.5">
+                                <button 
+                                    className="w-8 h-8 flex items-center justify-center rounded border border-border-hairline text-secondary hover:bg-surface-container-low transition-colors disabled:opacity-40" 
+                                    disabled={page <= 1} 
+                                    onClick={() => setPage(p => p - 1)}
+                                >
+                                    <span className="material-symbols-outlined text-[18px]">chevron_left</span>
+                                </button>
+                                <span className="font-mono text-xs font-bold px-3 py-1 bg-primary/10 border border-primary/20 text-primary rounded">
+                                    {page}
+                                </span>
+                                <button 
+                                    className="w-8 h-8 flex items-center justify-center rounded border border-border-hairline text-secondary hover:bg-surface-container-low transition-colors disabled:opacity-40" 
+                                    disabled={page >= totalPages} 
+                                    onClick={() => setPage(p => p + 1)}
+                                >
+                                    <span className="material-symbols-outlined text-[18px]">chevron_right</span>
+                                </button>
+                            </div>
+                        </div>
+                    )}
                 </div>
             ) : (
-                <div className="task-card" style={{ textAlign: 'center', padding: '100px' }}>
-                    <p style={{ color: 'var(--text-secondary)', fontSize: '1.1rem' }}>📦 暂无已发布在闲鱼的商品。</p>
-                    <p style={{ color: '#94A3B8', fontSize: '0.85rem', marginTop: '10px' }}>您可以先去“决策资产”库中发布选中的商品。</p>
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-24 text-center ambient-shadow">
+                    <span className="material-symbols-outlined text-secondary text-[48px] opacity-40">package_2</span>
+                    <p className="text-secondary font-semibold mt-4 text-sm">📦 暂无已发布在闲鱼的商品记录。</p>
+                    <p className="text-xs text-secondary/60 mt-1">您可以先前往“决策资产”库中发布选中的匹配商品。</p>
                 </div>
             )}
 
-            {/* 分页控制 */}
-            {totalPages > 1 && (
-                <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '15px', marginTop: '40px' }}>
-                    <button className="pro-btn" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>上一页</button>
-                    <span style={{ fontSize: '0.9rem', color: 'var(--text-secondary)' }}>第 {page} / {totalPages} 页 (共 {total} 个商品)</span>
-                    <button className="pro-btn" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>下一页</button>
-                </div>
-            )}
-
-            {/* 详情模态弹窗 (点击行记录展开) */}
+            {/* 详情模态弹窗 */}
             {selectedProduct && (
                 <DetailModal
                     item={selectedProduct}
@@ -660,8 +1133,6 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
         }
     }, [batchStatus, batchResult]);
 
-    // 移除原有滚动穿透控制，由 PublishPreviewModal 组件自身效果管控
-
     const openModal = async () => {
         setEditTitle(src.title.slice(0, 60));
         setEditPrice((parseFloat(src.min_price) + 30).toFixed(2));
@@ -671,7 +1142,6 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
         try {
             const res = await fetch(`/api/source_skus/${src.db_id}`).then(r => r.json());
             if (res.skus && res.skus.length > 0) {
-                // 初始化每个规格的默认闲鱼价格 (进价 + 30) 并将库存最大限制在 9999
                 const initializedSkus = res.skus.map(s => ({
                     ...s,
                     xianyu_price: (parseFloat(s.price) + 30).toFixed(2),
@@ -785,50 +1255,87 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
         }
     };
 
-    const btnStyle = { padding: '6px 14px', borderRadius: '8px', border: 'none', cursor: 'pointer', fontSize: '0.8rem', fontWeight: '600', marginTop: '8px' };
-
     return (
         <div>
             {status === 'done' && (
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                    <a href={pubResult?.published_url} target="_blank" rel="noreferrer"
-                       style={{ ...btnStyle, display: 'inline-block', background: '#10B98120', color: '#10B981', textDecoration: 'none', margin: '8px 0 0 0' }}>
-                        ✅ 已发布
+                <div className="flex gap-2 items-center justify-end mt-1">
+                    <a 
+                        href={pubResult?.published_url} 
+                        target="_blank" 
+                        rel="noreferrer"
+                        className="px-3 py-1 bg-success/15 hover:bg-success/20 text-success rounded-lg font-sans text-xs font-semibold transition-colors flex items-center gap-1"
+                    >
+                        <span className="material-symbols-outlined text-[16px] icon-fill">done</span>
+                        已发布
                     </a>
-                    <button style={{ ...btnStyle, background: '#F59E0B20', color: '#F59E0B', margin: '8px 0 0 0' }} onClick={doDepublish}>
+                    <button 
+                        className="px-3 py-1 bg-warning/15 hover:bg-warning/20 text-warning rounded-lg font-sans text-xs font-semibold transition-colors flex items-center gap-1" 
+                        onClick={doDepublish}
+                    >
+                        <span className="material-symbols-outlined text-[16px]">pause_circle</span>
                         下架
                     </button>
                 </div>
             )}
             {status === 'depublished' && (
-                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                    <span style={{ ...btnStyle, display: 'inline-block', background: '#F59E0B20', color: '#F59E0B', margin: '8px 0 0 0' }}>
-                        ⚠️ 已下架
+                <div className="flex gap-2 items-center justify-end mt-1">
+                    <span className="px-3 py-1 bg-warning/15 text-warning rounded-lg font-sans text-xs font-semibold flex items-center gap-1">
+                        <span className="material-symbols-outlined text-[16px]">warning</span>
+                        已下架
                     </span>
-                    <button style={{ ...btnStyle, background: 'var(--primary)', color: '#fff', margin: '8px 0 0 0' }} onClick={openModal}>
-                        重新上架
+                    <button 
+                        className="px-3 py-1 bg-primary hover:bg-primary-container text-white rounded-lg font-sans text-xs font-semibold transition-colors flex items-center gap-1" 
+                        onClick={openModal}
+                    >
+                        <span className="material-symbols-outlined text-[16px]">publish</span>
+                        上架
                     </button>
-                    <button style={{ ...btnStyle, background: '#EF444420', color: '#EF4444', margin: '8px 0 0 0' }} onClick={doDelete}>
+                    <button 
+                        className="px-3 py-1 bg-error/15 hover:bg-error/20 text-error rounded-lg font-sans text-xs font-semibold transition-colors flex items-center gap-1" 
+                        onClick={doDelete}
+                    >
+                        <span className="material-symbols-outlined text-[16px]">delete</span>
                         删除
                     </button>
                 </div>
             )}
             {status === 'publishing' && (
-                <span style={{ ...btnStyle, display: 'inline-block', background: '#3B82F620', color: '#3B82F6' }}>🔄 操作中...</span>
+                <div className="flex justify-end mt-1">
+                    <span className="px-3 py-1 bg-processing/15 text-processing rounded-lg font-sans text-xs font-semibold flex items-center gap-1">
+                        <span className="material-symbols-outlined text-[16px] animate-spin">sync</span>
+                        云同步中...
+                    </span>
+                </div>
             )}
             {status === 'deleting' && (
-                <span style={{ ...btnStyle, display: 'inline-block', background: '#EF444420', color: '#EF4444' }}>🔄 删除中...</span>
+                <div className="flex justify-end mt-1">
+                    <span className="px-3 py-1 bg-error/15 text-error rounded-lg font-sans text-xs font-semibold flex items-center gap-1">
+                        <span className="material-symbols-outlined text-[16px] animate-spin">sync</span>
+                        注销中...
+                    </span>
+                </div>
             )}
             {status === 'failed' && (
-                <div>
-                    <span style={{ fontSize: '0.75rem', color: '#EF4444' }}>❌ {pubResult?.msg || '操作失败'}</span>
-                    <button style={{ ...btnStyle, background: '#EF444420', color: '#EF4444', marginLeft: '8px' }} onClick={openModal}>重试</button>
+                <div className="flex flex-col items-end gap-1 mt-1">
+                    <span className="text-[10px] text-error font-medium truncate max-w-[150px]">❌ {pubResult?.msg || '操作失败'}</span>
+                    <button 
+                        className="px-3 py-1 bg-error/15 hover:bg-error/20 text-error rounded-lg font-sans text-xs font-semibold transition-colors" 
+                        onClick={openModal}
+                    >
+                        重新尝试
+                    </button>
                 </div>
             )}
             {status === 'idle' && (
-                <button style={{ ...btnStyle, background: 'var(--primary)', color: '#fff' }} onClick={openModal}>
-                    发布至闲鱼 →
-                </button>
+                <div className="flex justify-end mt-1">
+                    <button 
+                        className="px-4 py-1.5 bg-primary hover:bg-primary-container text-white rounded-lg font-sans text-xs font-bold shadow-sm transition-all scale-100 active:scale-95 flex items-center gap-1" 
+                        onClick={openModal}
+                    >
+                        <span className="material-symbols-outlined text-[16px]">publish</span>
+                        上架闲鱼
+                    </button>
+                </div>
             )}
 
             {showModal && (
@@ -866,6 +1373,20 @@ const App = () => {
     const [batchStatusMap, setBatchStatusMap] = useState({});
     const [batchResultMap, setBatchResultMap] = useState({});
 
+    // 全局双主题状态机
+    const [theme, setTheme] = useState(() => localStorage.getItem("xianyu-theme") || "light");
+
+    useEffect(() => {
+        if (theme === "dark") {
+            document.documentElement.classList.add("dark");
+            document.documentElement.classList.remove("light");
+        } else {
+            document.documentElement.classList.add("light");
+            document.documentElement.classList.remove("dark");
+        }
+        localStorage.setItem("xianyu-theme", theme);
+    }, [theme]);
+
     // 当切换商品详情时，自动重置批量状态，并默认勾选全部未丢弃的货源
     useEffect(() => {
         if (selectedItem) {
@@ -900,7 +1421,17 @@ const App = () => {
         return () => { clearInterval(timerId); document.removeEventListener("visibilitychange", handleVisibilityChange); };
     }, []);
 
-    const createTask = async () => { if (!newKeyword) return; await fetch("/api/tasks", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ keyword: newKeyword }) }); setNewKeyword(""); setActiveView("tasks"); refreshData(); };
+    const createTask = async () => { 
+        if (!newKeyword) return; 
+        await fetch("/api/tasks", { 
+            method: "POST", 
+            headers: { "Content-Type": "application/json" }, 
+            body: JSON.stringify({ keyword: newKeyword }) 
+        }); 
+        setNewKeyword(""); 
+        setActiveView("tasks"); 
+        refreshData(); 
+    };
     const pauseTask = (id) => { fetch(`/api/tasks/${id}/pause`, { method: "POST" }).then(refreshData); };
     const retryTask = (id) => { fetch(`/api/tasks/${id}/retry`, { method: "POST" }).then(refreshData); };
     const deleteTask = (id) => { if (confirm("确定永久逻辑删除该任务吗?")) fetch(`/api/tasks/${id}`, { method: "DELETE" }).then(refreshData); };
@@ -1103,48 +1634,210 @@ const App = () => {
     const totalPages = selectedItem ? Math.ceil((selectedItem.sources?.length || 0) / pageSize) : 0;
     const paginatedSources = selectedItem ? (selectedItem.sources || []).slice((sourcePage - 1) * pageSize, sourcePage * pageSize) : [];
 
+    const navItemClass = (itemKey) => {
+        const isActive = (itemKey === 'results' && ['results', 'item_detail'].includes(view)) || view === itemKey;
+        return `flex items-center gap-3 px-4 py-3 rounded-xl font-sans text-xs transition-all duration-150 scale-100 active:scale-95 cursor-pointer ${
+            isActive 
+            ? 'text-primary font-bold bg-surface-container border-r-4 border-primary' 
+            : 'text-secondary hover:bg-surface-container-high transition-colors'
+        }`;
+    };
+
     return (
         <React.Fragment>
-            <aside className="sidebar">
-                <div className="logo-area">选品中枢 PRO</div>
-                <ul className="nav-menu">
-                    <li className={`nav-item ${view === 'dashboard' ? 'active' : ''}`} onClick={() => setActiveView("dashboard")}><i className="fas fa-chart-pie"></i><span>控制台</span></li>
-                    <li className={`nav-item ${view === 'tasks' ? 'active' : ''}`} onClick={() => setActiveView("tasks")}><i className="fas fa-tasks"></i><span>任务调度</span></li>
-                    <li className={`nav-item ${['results', 'item_detail'].includes(view) ? 'active' : ''}`} onClick={() => setActiveView("results")}><i className="fas fa-database"></i><span>决策资产</span></li>
-                    <li className={`nav-item ${view === 'published' ? 'active' : ''}`} onClick={() => setActiveView("published")}><i className="fas fa-shopping-bag"></i><span>闲鱼商品</span></li>
-                    <li className={`nav-item ${view === 'logs' ? 'active' : ''}`} onClick={() => setActiveView("logs")}><i className="fas fa-file-alt"></i><span>系统日志</span></li>
+            {/* SideNavBar */}
+            <aside className="w-[260px] h-screen bg-surface-container-lowest border-r border-border-hairline fixed left-0 top-0 flex flex-col py-6 z-20 transition-all duration-200">
+                <div className="px-6 mb-8 flex items-center gap-3">
+                    <div className="w-9 h-9 rounded bg-primary flex items-center justify-center text-on-primary">
+                        <span className="material-symbols-outlined text-[20px]" style={{fontVariationSettings: "'FILL' 1"}}>precision_manufacturing</span>
+                    </div>
+                    <div>
+                        <h1 className="font-sans text-base font-bold text-primary tracking-tight">选品中枢 PRO</h1>
+                        <p className="font-mono text-[9px] text-secondary uppercase tracking-wider">Automated Precision</p>
+                    </div>
+                </div>
+
+                <ul className="flex-1 px-4 space-y-1 w-full">
+                    <li className={navItemClass("dashboard")} onClick={() => setActiveView("dashboard")}>
+                        <span className="material-symbols-outlined text-[18px]">dashboard</span>
+                        <span>控制台中心</span>
+                    </li>
+                    <li className={navItemClass("tasks")} onClick={() => setActiveView("tasks")}>
+                        <span className="material-symbols-outlined text-[18px]">list_alt</span>
+                        <span>任务队列</span>
+                    </li>
+                    <li className={navItemClass("results")} onClick={() => setActiveView("results")}>
+                        <span className="material-symbols-outlined text-[18px]">travel_explore</span>
+                        <span>决策资产库</span>
+                    </li>
+                    <li className={navItemClass("published")} onClick={() => setActiveView("published")}>
+                        <span className="material-symbols-outlined text-[18px]">shopping_bag</span>
+                        <span>已发布管理</span>
+                    </li>
+                    <li className={navItemClass("logs")} onClick={() => setActiveView("logs")}>
+                        <span className="material-symbols-outlined text-[18px]">analytics</span>
+                        <span>日志日志</span>
+                    </li>
+                    <li className={navItemClass("token_stats")} onClick={() => setActiveView("token_stats")}>
+                        <span className="material-symbols-outlined text-[18px]">generating_tokens</span>
+                        <span>AI Token 计量舱</span>
+                    </li>
                 </ul>
-                <div className="sidebar-footer"><div className="label">SYSTEM STATUS</div><div style={{color: sysStatus["1688_login"] === '有效' ? 'var(--success)' : 'var(--danger)', fontWeight:'bold'}}>{sysStatus["1688_login"] || 'OFFLINE'}</div></div>
+
+                {/* 侧栏底部状态 */}
+                <div className="px-4 mt-auto space-y-3">
+                    <div className="p-3.5 rounded-xl bg-surface-container-low border border-border-hairline">
+                        <div className="flex items-center gap-2 mb-1.5">
+                            <span className={`material-symbols-outlined text-[16px] ${sysStatus["1688_login"] === '有效' ? 'text-success' : 'text-error'}`} style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
+                            <span className="font-sans text-[11px] text-secondary font-medium">1688 接入状态</span>
+                        </div>
+                        <div className="font-mono text-xs font-bold text-on-surface">
+                            {sysStatus["1688_login"] || 'OFFLINE'}
+                        </div>
+                    </div>
+
+                    <button 
+                        onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')}
+                        className="w-full flex items-center justify-center gap-2 py-2 bg-surface-container-high border border-border-hairline text-on-surface hover:text-primary rounded-lg transition-colors font-sans text-xs scale-100 active:scale-95 duration-100"
+                    >
+                        <span className="material-symbols-outlined text-[16px]">{theme === 'light' ? 'dark_mode' : 'light_mode'}</span>
+                        <span>{theme === 'light' ? '深色 midnight' : '浅色 efficient'}</span>
+                    </button>
+                </div>
             </aside>
 
-            <main className="main-container">
+            {/* TopNavBar */}
+            <header className="fixed top-0 right-0 left-[260px] h-16 bg-surface-container-lowest/80 backdrop-blur-md border-b border-border-hairline flex items-center justify-between px-6 z-10 w-[calc(100%-260px)] transition-all duration-200">
+                <div className="flex items-center gap-2 text-secondary">
+                    <span className="material-symbols-outlined text-[20px]">explore</span>
+                    <span className="font-sans text-xs font-bold capitalize">
+                        {view === 'item_detail' ? '决策资产 / 货源明细' : 
+                         view === 'token_stats' ? 'AI Token 计量舱 / 成本审计' : 
+                         view}
+                    </span>
+                </div>
+                <div className="flex items-center gap-4">
+                    <div className="hidden sm:flex items-center px-3 py-1 bg-surface-container-low border border-border-hairline rounded-full">
+                        <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse mr-2"></span>
+                        <span className="font-sans text-[10px] text-secondary">系统健康运行</span>
+                    </div>
+                    <div className="w-px h-6 bg-border-hairline"></div>
+                    <div className="flex items-center gap-2">
+                        <div className="w-7 h-7 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center text-primary font-mono text-[10px] font-bold">
+                            M
+                        </div>
+                        <span className="font-sans text-xs text-secondary font-medium">管理员用户</span>
+                    </div>
+                </div>
+            </header>
+
+            {/* Main Container */}
+            <main className="ml-[260px] mt-16 p-6 overflow-y-auto flex-1 min-h-[calc(100vh-64px)] transition-all duration-200">
                 {view === 'logs' ? <LogViewer tasks={tasks} /> : 
+                 view === 'token_stats' ? <TokenStatsView /> :
                  view === "dashboard" ? (() => {
                     const activeTasks = tasks.filter(t => t.status !== '已完成');
                     const runningCount = tasks.filter(t => ['执行中', '正在暂停'].includes(t.status)).length;
                     const pendingCount = tasks.filter(t => t.status === '排队中').length;
                     return (
                         <div className="view-content">
-                            <header><h1>仪表盘概览</h1><p>欢迎回来，系统当前运行平稳。</p></header>
-                            <div className="stats-grid">
-                                <div className="stat-card"><span className="label">活跃 Worker</span><span className="val">{sysStatus["active_workers"] || 0}</span></div>
-                                <div className="stat-card"><span className="label">已存选品</span><span className="val">{completedTasks.length}</span></div>
-                                <div className="stat-card"><span className="label">队列概览</span><div className="val" style={{fontSize: '1.5rem', display: 'flex', alignItems: 'center', gap: '15px'}}><div><span style={{color: 'var(--primary)'}}>{runningCount}</span> <span style={{fontSize: '1rem'}}>执行</span></div><div><span style={{color: 'var(--text-secondary)'}}>{pendingCount}</span> <span style={{fontSize: '1rem'}}>排队</span></div></div></div>
-                                <div className="stat-card"><span className="label">同步频率</span><span className="val">60s</span></div>
+                            <header className="mb-6">
+                                <h1 className="font-sans text-2xl font-bold text-on-surface">控制台中心</h1>
+                                <p className="font-sans text-sm text-secondary mt-1">全局扫描 Worker 统计面板及后台状态概览。</p>
+                            </header>
+
+                            {/* Bento Grid */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+                                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow glow-bg hover:border-primary transition-all duration-150 group relative overflow-hidden">
+                                    <div className="flex justify-between items-start mb-4">
+                                        <h3 className="font-sans text-xs font-semibold text-secondary uppercase tracking-wider">活跃调研任务</h3>
+                                        <button 
+                                            onClick={(e) => { e.stopPropagation(); refreshData(); }}
+                                            className="w-8 h-8 rounded-lg bg-processing/10 hover:bg-processing/20 flex items-center justify-center text-processing active:scale-90 transition-all cursor-pointer"
+                                            title="手动刷新状态"
+                                        >
+                                            <span className="material-symbols-outlined text-[18px] hover:rotate-180 transition-transform duration-500">autorenew</span>
+                                        </button>
+                                    </div>
+                                    <div className="flex items-baseline gap-2">
+                                        <span className="font-sans text-3xl font-black text-on-surface">{activeTasks.length}</span>
+                                        <span className="text-xs text-success font-semibold flex items-center gap-0.5"><span className="material-symbols-outlined text-[14px]">trending_up</span> 运行中</span>
+                                    </div>
+                                </div>
+
+                                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow glow-bg hover:border-primary transition-all duration-150 group relative overflow-hidden">
+                                    <div className="flex justify-between items-start mb-4">
+                                        <h3 className="font-sans text-xs font-semibold text-secondary uppercase tracking-wider">已存储爆款资产</h3>
+                                        <div className="w-8 h-8 rounded-lg bg-primary/10 flex items-center justify-center text-primary">
+                                            <span className="material-symbols-outlined text-[18px]">dataset</span>
+                                        </div>
+                                    </div>
+                                    <div className="flex items-baseline gap-2">
+                                        <span className="font-sans text-3xl font-black text-on-surface">{completedTasks.length}</span>
+                                        <span className="text-xs text-secondary">分类库</span>
+                                    </div>
+                                </div>
+
+                                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow glow-bg hover:border-primary transition-all duration-150 group relative overflow-hidden">
+                                    <div className="flex justify-between items-start mb-4">
+                                        <h3 className="font-sans text-xs font-semibold text-secondary uppercase tracking-wider">队列统计概览</h3>
+                                        <div className="w-8 h-8 rounded-lg bg-warning/10 flex items-center justify-center text-warning">
+                                            <span className="material-symbols-outlined text-[18px]">queue</span>
+                                        </div>
+                                    </div>
+                                    <div className="flex gap-4 items-baseline mt-1">
+                                        <div className="text-xs font-semibold"><span className="text-primary text-lg font-black">{runningCount}</span> 个执行</div>
+                                        <div className="text-xs font-semibold text-secondary"><span className="text-secondary text-lg font-black">{pendingCount}</span> 个排队</div>
+                                    </div>
+                                </div>
                             </div>
-                            <div className="task-card" style={{marginTop:'40px'}}><h3 style={{marginBottom:'20px'}}>新建深度扫描任务</h3><div style={{display: 'flex', gap: '15px'}}><input style={{flex:1, padding:'15px', borderRadius:'8px', border:'1px solid var(--border)'}} value={newKeyword} onChange={e => setNewKeyword(e.target.value)} placeholder="请输入要调研的商品品类关键词..." /><button className="pro-btn primary" style={{padding: '0 30px'}} onClick={createTask}>立即启动任务</button></div></div>
-                            {activeTasks.length > 0 && (<div className="task-card" style={{marginTop:'20px', cursor: 'pointer'}} onClick={() => setActiveView('tasks')}>
-                                    <h3 style={{marginBottom: '15px'}}>进行中任务 ({activeTasks.length})</h3>
-                                    <div style={{display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '15px'}}>
+
+                            {/* 新建调研表单 */}
+                            <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow">
+                                <div className="flex items-center gap-2 mb-4">
+                                    <span className="material-symbols-outlined text-primary">add_task</span>
+                                    <h3 className="font-sans text-sm font-bold text-on-surface">启动全新深度调研任务</h3>
+                                </div>
+                                <div className="flex gap-3">
+                                    <input 
+                                        className="flex-1 bg-surface-container-low border border-border-hairline text-on-surface placeholder-secondary/50 rounded-lg px-4 py-3 text-sm focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all"
+                                        value={newKeyword} 
+                                        onChange={e => setNewKeyword(e.target.value)} 
+                                        placeholder="支持输入品类关键词、闲鱼商品链接、淘口令或直接输入图片 URL 以图搜图比价..." 
+                                    />
+                                    <button 
+                                        className="bg-primary hover:bg-primary-container text-white font-sans text-sm font-semibold px-6 py-3 rounded-lg transition-colors scale-100 active:scale-95 shadow-[0_2px_8px_rgba(168,50,0,0.15)] flex items-center gap-2 shrink-0"
+                                        onClick={createTask}
+                                    >
+                                        <span className="material-symbols-outlined text-[18px]">play_arrow</span>
+                                        启动扫描 Worker
+                                    </button>
+                                </div>
+                            </div>
+
+                            {/* 进行中任务进度 */}
+                            {activeTasks.length > 0 && (
+                                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow mt-6 cursor-pointer" onClick={() => setActiveView('tasks')}>
+                                    <div className="flex justify-between items-center mb-4">
+                                        <h3 className="font-sans text-sm font-bold text-on-surface">运行中扫描任务 ({activeTasks.length})</h3>
+                                        <span className="text-xs text-primary font-semibold flex items-center gap-0.5">查看详情 <span className="material-symbols-outlined text-[14px]">arrow_forward</span></span>
+                                    </div>
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                         {activeTasks.slice(0, 4).map(t => (
-                                            <div key={t.id} style={{padding: '10px', border: '1px solid var(--border)', borderRadius: '8px'}}>
-                                                <div style={{fontWeight: 600, fontSize: '0.9rem'}}>{t.keyword}</div>
-                                                <div style={{color: 'var(--text-secondary)', fontSize: '0.8rem'}}>{t.status} ({t.progress}%)</div>
+                                            <div key={t.id} className="p-4 bg-surface-container-low border border-border-hairline rounded-lg">
+                                                <div className="font-semibold text-on-surface text-sm">{t.keyword}</div>
+                                                <div className="text-xs text-secondary mt-1 flex justify-between">
+                                                    <span>{t.status}</span>
+                                                    <span className="font-mono">{t.progress}%</span>
+                                                </div>
+                                                <div className="w-full h-1 bg-surface-container rounded-full overflow-hidden mt-2">
+                                                    <div className="h-full bg-primary transition-all duration-300" style={{ width: `${t.progress}%` }}></div>
+                                                </div>
                                             </div>
                                         ))}
                                     </div>
-                                    <div style={{textAlign: 'center', marginTop: '15px', color: 'var(--primary)', fontWeight: 'bold'}}>点击跳转到任务队列查看全部 →</div>
-                                </div>)}
+                                </div>
+                            )}
                         </div>
                     );
                  })() :
@@ -1152,173 +1845,459 @@ const App = () => {
                     const activeTasks = tasks.filter(t => t.status !== '已完成').sort((a, b) => a.created_at.localeCompare(b.created_at));
                     const completedTasks = tasks.filter(t => t.status === '已完成');
                     return (
-                        <div className="view-content"><header><h1>任务队列详情</h1><p>左侧为活动任务，右侧为已完成的历史归档。</p></header><div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '40px', alignItems: 'flex-start' }}>
-                            {/* 左栏：执行队列 (严格删除模式) */}
-                            <div><h3 style={{ marginBottom: '20px' }}>执行队列</h3><div className="task-list">{activeTasks.map(t => (
-                                <div className={`task-card ${t.status}`} key={t.id} style={{minHeight: '130px', display: 'flex', flexDirection: 'column', position: 'relative', justifyContent: 'space-between'}}>
-                                    <div style={{ position: 'absolute', top: '20px', right: '20px', display: 'flex', gap: '8px' }}>
-                                        {t.status === '执行中' ? <button className="pro-btn" onClick={(e) => { e.stopPropagation(); pauseTask(t.id); }}>暂停</button> : (t.status === '已暂停' || t.status === '失败') ? <button className="pro-btn primary" onClick={(e) => { e.stopPropagation(); retryTask(t.id); }}>恢复</button> : null}
-                                    </div>
-                                    <div style={{ paddingRight: '100px' }}><div className="task-kw">{t.keyword}</div><div className="task-msg">{t.msg}</div></div>
-                                    <div className="nano-progress"><div className="nano-bar" style={{width: `${t.progress}%`}}></div></div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '5px' }}>
-                                        <div style={{display: 'flex', gap: '15px', alignItems: 'center'}}>
-                                            <span style={{fontSize: '0.7rem', color: '#94A3B8', fontWeight: 'bold'}}>V.{t.version}</span>
-                                            <span style={{fontSize: '0.7rem', color: '#CBD5E1'}}>ID: {t.id}</span>
-                                        </div>
-                                        {/* 仅已暂停或失败的任务显示删除按钮 */}
-                                        <button className="pro-btn danger" style={{minWidth: '80px', padding: '4px 15px', display: (t.status === '已暂停' || t.status === '失败') ? 'block' : 'none'}} onClick={(e) => { e.stopPropagation(); deleteTask(t.id); }}><i className="fas fa-trash" style={{fontSize: '0.7rem'}}></i> 删除</button>
-                                    </div>
-                                </div>
-                            ))}{activeTasks.length === 0 && <div className="task-card" style={{textAlign: 'center', padding: '40px'}}>当前没有活动任务</div>}</div></div>
-                            {/* 右栏：完成队列 (开放删除模式) */}
-                            <div><h3 style={{ marginBottom: '20px' }}>完成队列</h3><div className="task-list">{completedTasks.map(t => (
-                                <div className={`task-card ${t.status}`} key={t.id} onClick={() => loadTaskResults(t)} style={{ cursor: 'pointer', minHeight: '130px', display: 'flex', flexDirection: 'column', position: 'relative', justifyContent: 'space-between' }}>
-                                    <div style={{ position: 'absolute', top: '20px', right: '20px' }}><button className="pro-btn" onClick={(e) => { e.stopPropagation(); retryTask(t.id); }}>重扫</button></div>
-                                    <div style={{paddingRight: '80px'}}><div className="task-kw">{t.keyword}</div><div className="task-msg">调研于 {t.created_at}</div></div>
-                                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '15px' }}>
-                                        <div style={{display: 'flex', gap: '15px', alignItems: 'center'}}>
-                                            <span style={{fontSize: '0.7rem', color: '#94A3B8', fontWeight: 'bold'}}>V.{t.version}</span>
-                                            <span style={{fontSize: '0.7rem', color: '#CBD5E1'}}>ID: {t.id}</span>
-                                        </div>
-                                        {/* 完成队列始终显示删除按钮 */}
-                                        <button className="pro-btn danger" style={{minWidth: '80px', padding: '4px 15px', display: 'block'}} onClick={(e) => { e.stopPropagation(); deleteTask(t.id); }}><i className="fas fa-trash" style={{fontSize: '0.7rem'}}></i> 删除</button>
-                                    </div>
-                                </div>
-                            ))}</div></div></div></div>
-                    )
-                 })() :
-                 view === "results" ? ( selectedTask ? ( <> <header style={{display:'flex', justifyContent:'space-between', alignItems:'center'}}><div><h1 onClick={() => setSelectedTask(null)} style={{cursor: 'pointer'}}>← {selectedTask.keyword} 深度报告</h1></div><button className="pro-btn primary" onClick={() => window.open(`/api/download/${selectedTask.id}`)}>导出 XLSX</button></header><div className="item-grid">{detailedItems.length > 0 ? detailedItems.map((group) => (<div className="item-card" key={group.rank} onClick={() => enterItemDetail(group)}><img src={group.xianyu_item?.image_url} referrerPolicy="no-referrer" /><div className="tile-body"><div className="tile-title">#{group.rank} {group.xianyu_item?.title}</div><div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px'}}><span className="tile-price">¥{group.xianyu_item?.price}</span><span style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>{group.sources?.length || 0} 个货源</span></div><div className="id-corner">ID: {group.xianyu_item?.db_id}</div></div></div>)) : (<div className="task-card" style={{gridColumn: '1/-1', textAlign: 'center', padding: '100px'}}><p>该任务尚未产生详情数据。</p></div>)}</div></> ) : (<div><header><h1>选品决策资产库</h1></header><div className="task-list">{completedTasks.map(t => (
-                                        <div className="task-card 已完成" key={t.id} style={{position: 'relative', minHeight: '120px', display: 'flex', flexDirection: 'column', justifyContent: 'center', margin: 0, padding: '20px'}} onClick={() => loadTaskResults(t)}>
-                                            <div className="task-kw" style={{textAlign: 'center', fontSize: '1.2rem', marginBottom: '10px', width: '100%'}}>{t.keyword}</div>
-                                            <div className="task-msg" style={{textAlign: 'left', fontSize: '0.8rem', width: '100%'}}>调研于 {t.created_at}</div>
-                                            <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', position:'absolute', bottom:'10px', left:'20px', right:'20px', pointerEvents:'none'}}>
-                                                <span style={{fontSize:'0.7rem', color:'#94A3B8', fontWeight:'bold'}}>V.{t.version}</span>
-                                                <span style={{fontSize:'0.7rem', color:'#CBD5E1'}}>ID: {t.id}</span>
+                        <div className="view-content">
+                            <header className="mb-6">
+                                <h1 className="font-sans text-2xl font-bold text-on-surface">任务队列中心</h1>
+                                <p className="font-sans text-sm text-secondary mt-1">查看和管理各个品类的深度爬取状态。左侧显示活跃进行中队列，右侧显示归档历史。</p>
+                            </header>
+
+                            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+                                {/* 左栏：执行队列 */}
+                                <div>
+                                    <h3 className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
+                                        <span className="w-2 h-2 rounded-full bg-primary animate-pulse"></span>
+                                        活跃执行队列
+                                    </h3>
+                                    <div className="space-y-4">
+                                        {activeTasks.map(t => {
+                                            let badgeColor = "bg-processing/10 text-processing border-processing/20";
+                                            if (t.status === '已暂停') badgeColor = "bg-secondary/15 text-secondary border-secondary/20";
+                                            if (t.status === '失败') badgeColor = "bg-error/10 text-error border-error/20";
+                                            return (
+                                                <div 
+                                                    className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 relative overflow-hidden ambient-shadow hover:border-primary transition-colors group"
+                                                    key={t.id}
+                                                >
+                                                    <div className="flex justify-between items-start mb-2">
+                                                        <div>
+                                                            <div className="font-bold text-on-surface text-base">{t.keyword}</div>
+                                                            <div className="flex items-center gap-2 mt-1.5">
+                                                                <span className="text-[10px] text-secondary font-mono">TASK_ID: {t.id}</span>
+                                                                {renderTaskTypeBadge(t.input_type)}
+                                                            </div>
+                                                        </div>
+                                                        
+                                                        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold border ${badgeColor}`}>
+                                                            {t.status}
+                                                        </span>
+                                                    </div>
+
+                                                    <p className="text-xs text-secondary line-clamp-2 min-h-[32px] mt-2 mb-3 bg-surface-container-low p-2 rounded border border-border-hairline/40">{t.msg || 'Worker 正在分配进程空间...'}</p>
+                                                    
+                                                    <div className="w-full h-1 bg-surface-container rounded-full overflow-hidden mb-4">
+                                                        <div className="h-full bg-primary transition-all duration-300" style={{ width: `${t.progress}%` }}></div>
+                                                    </div>
+
+                                                    <div className="flex justify-between items-center border-t border-border-hairline/60 pt-3">
+                                                        <div className="flex items-center gap-3">
+                                                            <span className="text-[10px] text-secondary font-mono">V.{t.version}</span>
+                                                            {t.total_tokens > 0 && (
+                                                                <span className="inline-flex items-center gap-0.5 text-[10px] text-success/80 dark:text-success/90 font-mono">
+                                                                    <span className="material-symbols-outlined text-[11px] leading-none">generating_tokens</span>
+                                                                    AI Tokens: {(t.total_tokens || 0).toLocaleString()}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex gap-2">
+                                                            {t.status === '执行中' ? (
+                                                                <button className="px-3 py-1 bg-surface-container border border-border-hairline hover:border-primary text-secondary hover:text-primary rounded text-xs font-semibold transition-colors" onClick={() => pauseTask(t.id)}>暂停</button>
+                                                            ) : (t.status === '已暂停' || t.status === '失败') ? (
+                                                                <button className="px-3 py-1 bg-primary hover:bg-primary-container text-white rounded text-xs font-semibold transition-colors" onClick={() => retryTask(t.id)}>恢复运行</button>
+                                                            ) : null}
+
+                                                            {/* 删除按钮 */}
+                                                            {(t.status === '已暂停' || t.status === '失败') && (
+                                                                <button 
+                                                                    className="px-3 py-1 bg-error/10 border border-error/20 hover:bg-error text-error hover:text-white rounded text-xs font-semibold transition-colors" 
+                                                                    onClick={() => deleteTask(t.id)}
+                                                                >
+                                                                    彻底删除
+                                                                </button>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                        {activeTasks.length === 0 && (
+                                            <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-12 text-center text-xs text-secondary">
+                                                当前暂无活跃的选品 Worker 任务
                                             </div>
-                                        </div>
-                                    ))}</div></div>) ) :
-                 view === "item_detail" && selectedItem ? ( <div className="view-content"><div onClick={() => setActiveView("results")} style={{cursor: 'pointer', marginBottom: '30px', color: 'var(--text-secondary)', fontSize: '0.9rem', fontWeight: '500'}}><i className="fas fa-arrow-left"></i> 返回 "{selectedTask.keyword}" 报告</div>
-                        <div className="task-card" style={{padding: '30px', marginBottom: '40px', position: 'relative', display: 'block'}}>
-                            <div style={{display: 'flex', gap: '30px', alignItems: 'center'}}>
-                                <img src={selectedItem.xianyu_item?.image_url} style={{width:'200px', height: '200px', borderRadius:'12px', objectFit:'cover'}} referrerPolicy="no-referrer" />
-                                <div style={{flex: 1}}>
-                                    <h2 style={{fontSize:'1.5rem', fontWeight: '700', marginBottom: '20px'}}>
-                                        <a href={selectedItem.xianyu_item?.item_url} target="_blank" className="hover-link" style={{textDecoration: 'none', color: 'inherit'}}>
-                                            {selectedItem.xianyu_item?.title} <i className="fas fa-external-link-alt" style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}></i>
-                                        </a>
-                                    </h2>
-                                    <div style={{display: 'flex', gap: '40px'}}>
-                                        <div className="stat-card" style={{padding: '0', border: 'none', background: 'none'}}><span className="label">闲鱼售价</span><div className="val" style={{fontSize: '1.8rem'}}>¥{selectedItem.xianyu_item?.price}</div></div>
-                                        <div className="stat-card" style={{padding: '0', border: 'none', background: 'none'}}><span className="label">“想要”人数</span><div className="val" style={{fontSize: '1.8rem'}}>{selectedItem.xianyu_item?.want_count}</div></div>
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* 右栏：完成归档 */}
+                                <div>
+                                    <h3 className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
+                                        <span className="w-2 h-2 rounded-full bg-success"></span>
+                                        已归档历史任务
+                                    </h3>
+                                    <div className="space-y-4">
+                                        {completedTasks.map(t => (
+                                            <div 
+                                                className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 relative overflow-hidden ambient-shadow hover:border-primary transition-colors cursor-pointer group"
+                                                key={t.id}
+                                                onClick={() => loadTaskResults(t)}
+                                            >
+                                                <div className="flex justify-between items-start mb-2">
+                                                    <div>
+                                                        <div className="font-bold text-on-surface text-base group-hover:text-primary transition-colors">{t.keyword}</div>
+                                                        <div className="flex items-center gap-2 mt-1.5">
+                                                            <span className="text-[10px] text-secondary font-mono">TASK_ID: {t.id}</span>
+                                                            {renderTaskTypeBadge(t.input_type)}
+                                                        </div>
+                                                    </div>
+                                                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-success/10 text-success border border-success/20">
+                                                        已完成
+                                                    </span>
+                                                </div>
+
+                                                <p className="text-xs text-secondary mt-2">调研时间: {t.created_at}</p>
+
+                                                <div className="flex justify-between items-center border-t border-border-hairline/60 pt-3 mt-4">
+                                                    <div className="flex items-center gap-3">
+                                                            <span className="text-[10px] text-secondary font-mono">V.{t.version}</span>
+                                                            {t.total_tokens > 0 && (
+                                                                <span className="inline-flex items-center gap-0.5 text-[10px] text-success/80 dark:text-success/90 font-mono">
+                                                                    <span className="material-symbols-outlined text-[11px] leading-none">generating_tokens</span>
+                                                                    AI Tokens: {(t.total_tokens || 0).toLocaleString()}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    <div className="flex gap-2">
+                                                        <button 
+                                                            className="px-3 py-1 bg-surface-container border border-border-hairline hover:border-primary text-secondary hover:text-primary rounded text-xs font-semibold transition-colors" 
+                                                            onClick={(e) => { e.stopPropagation(); retryTask(t.id); }}
+                                                        >
+                                                            重新扫描
+                                                        </button>
+                                                        <button 
+                                                            className="px-3 py-1 bg-error/10 border border-error/20 hover:bg-error hover:text-white text-error rounded text-xs font-semibold transition-all opacity-0 group-hover:opacity-100" 
+                                                            onClick={(e) => { e.stopPropagation(); deleteTask(t.id); }}
+                                                        >
+                                                            逻辑删除
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))}
+                                        {completedTasks.length === 0 && (
+                                            <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-12 text-center text-xs text-secondary">
+                                                当前暂无已归档的历史调研记录
+                                            </div>
+                                        )}
                                     </div>
                                 </div>
                             </div>
-                            <div className="id-corner">ID: {selectedItem.xianyu_item?.db_id}</div>
                         </div>
-                        <div>
-                            <header style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '20px', flexWrap: 'wrap', gap: '15px' }}>
-                                <h3 style={{ margin: 0 }}>1688 货源深度对比表 ({selectedItem.sources?.length || 0} 条)</h3>
-                                {selectedItem.sources?.filter(s => !s.drop_reason).length > 0 && (
-                                    <div style={{ display: 'flex', gap: '15px', alignItems: 'center' }}>
-                                        <label style={{ fontSize: '0.85rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '5px', color: 'var(--text-secondary)' }}>
-                                            <input 
-                                                type="checkbox" 
-                                                checked={selectedItem.sources.filter(s => !s.drop_reason).length > 0 && selectedItem.sources.filter(s => !s.drop_reason).every(s => selectedIds.includes(s.db_id))}
-                                                onChange={(e) => {
-                                                    if (e.target.checked) {
-                                                        setSelectedIds(selectedItem.sources.filter(s => !s.drop_reason).map(s => s.db_id));
-                                                    } else {
-                                                        setSelectedIds([]);
-                                                    }
-                                                }}
-                                                style={{ cursor: 'pointer' }}
-                                            />
-                                            全选未丢弃
-                                        </label>
-                                        <button 
-                                            className="pro-btn primary" 
-                                            disabled={batchPublishing || batchDepublishing || batchDeleting || selectedIds.length === 0} 
-                                            onClick={doBatchPublish}
-                                            style={{ padding: '6px 16px', fontSize: '0.8rem', marginRight: '10px' }}
-                                        >
-                                            {batchPublishing ? "🔄 批量发布中..." : `🚀 批量发布所选 (${selectedIds.length})`}
-                                        </button>
-                                        <button 
-                                            className="pro-btn warn" 
-                                            disabled={batchPublishing || batchDepublishing || batchDeleting || selectedIds.length === 0} 
-                                            onClick={doBatchDepublish}
-                                            style={{ padding: '6px 16px', fontSize: '0.8rem', backgroundColor: '#e67e22', color: '#fff', marginRight: '10px' }}
-                                        >
-                                            {batchDepublishing ? "🔄 批量下架中..." : `⚠️ 批量下架所选 (${selectedIds.length})`}
-                                        </button>
-                                        <button 
-                                            className="pro-btn danger" 
-                                            disabled={batchPublishing || batchDepublishing || batchDeleting || selectedIds.length === 0} 
-                                            onClick={doBatchDelete}
-                                            style={{ padding: '6px 16px', fontSize: '0.8rem', backgroundColor: '#e74c3c', color: '#fff' }}
-                                        >
-                                            {batchDeleting ? "🔄 批量删除中..." : `🗑️ 批量删除所选 (${selectedIds.length})`}
-                                        </button>
-                                    </div>
-                                )}
-                            </header>
-                            {paginatedSources.map((src, i) => { 
-                                const margin = (selectedItem.xianyu_item?.price - src.min_price - 20).toFixed(2); 
-                                const isDropped = !!src.drop_reason;
-                                const isChecked = selectedIds.includes(src.db_id);
-                                return (
-                                    <div className={`task-card ${isDropped ? 'dropped' : ''}`} key={i} style={{display:'flex', justifyContent:'space-between', alignItems:'center', padding: '15px', marginBottom: '15px'}}>
-                                        <div style={{display:'flex', gap:'15px', alignItems:'center', flex: 1}}>
-                                            {!isDropped && (
-                                                <input 
-                                                    type="checkbox" 
-                                                    checked={isChecked}
-                                                    onChange={(e) => {
-                                                        if (e.target.checked) {
-                                                            setSelectedIds(prev => [...prev, src.db_id]);
-                                                        } else {
-                                                            setSelectedIds(prev => prev.filter(id => id !== src.db_id));
-                                                        }
-                                                    }}
-                                                    style={{ width: '18px', height: '18px', cursor: 'pointer', marginRight: '5px' }}
-                                                />
-                                            )}
-                                            {src.images && src.images.length > 0 && (
-                                                <img src={src.images[0]} style={{width:'60px', height:'60px', borderRadius:'4px', objectFit:'cover'}} referrerPolicy="no-referrer" />
-                                            )}
-                                            <div style={{flex:1}}>
-                                                <a href={src.url} target="_blank" className={isDropped ? 'text-muted' : 'hover-link'} style={{textDecoration: isDropped ? 'line-through' : 'none', color:'inherit', fontWeight:'600', display: 'block', marginBottom: '5px'}}>{src.title}</a>
-                                                <div style={{ display: 'flex', gap: '15px', alignItems: 'center' }}>
-                                                    <span style={{fontSize: '0.8rem', color: 'var(--text-secondary)'}}>{src.sku_count > 0 ? `${src.sku_count} 个 SKU 规格` : '无 SKU 规格'}</span>
-                                                    <span style={{fontSize: '0.7rem', color: 'var(--text-secondary)', background: '#F1F5F9', padding: '1px 6px', borderRadius: '4px'}}>ID: {src.db_id}</span>
-                                                </div>
+                    );
+                 })() :
+                 view === "results" ? ( 
+                     selectedTask ? ( 
+                         <div> 
+                             <header className="mb-6 flex justify-between items-end">
+                                 <div>
+                                     <button onClick={() => setSelectedTask(null)} className="text-secondary hover:text-primary text-xs font-bold flex items-center gap-1 mb-2">
+                                         <span className="material-symbols-outlined text-[16px]">arrow_back</span>
+                                         返回决策资产列表
+                                     </button>
+                                     <h1 className="font-sans text-2xl font-bold text-on-surface">“{selectedTask.keyword}” 爆款深度对比报告</h1>
+                                 </div>
+                                 <button 
+                                     className="px-4 py-2 bg-primary hover:bg-primary-container text-white font-sans text-xs font-semibold rounded-lg shadow-sm transition-colors flex items-center gap-1"
+                                     onClick={() => window.open(`/api/download/${selectedTask.id}`)}
+                                 >
+                                     <span className="material-symbols-outlined text-[16px]">download</span>
+                                     导出分析 Excel
+                                 </button>
+                             </header>
 
-                                            </div>
-                                        </div>
-                                        <div style={{textAlign:'right', paddingLeft:'20px', minWidth: '170px'}}>
-                                            {isDropped ? (
-                                                <span className="drop-badge">已丢弃: {src.drop_reason}</span>
-                                            ) : (
-                                                <>
-                                                    <div style={{fontSize:'1.2rem', fontWeight:'700'}}>¥{src.min_price}</div>
-                                                    <div style={{fontSize:'0.9rem', color: margin > 50 ? 'var(--success)' : 'var(--danger)', fontWeight:'bold'}}>利润: ¥{margin}</div>
-                                                    <PublishButton 
-                                                        src={src} 
-                                                        xianyuPrice={selectedItem.xianyu_item?.price} 
-                                                        onStatusLoaded={handleStatusLoaded} 
-                                                        batchStatus={batchStatusMap[src.db_id]}
-                                                        batchResult={batchResultMap[src.db_id]}
-                                                    />
-                                                </>
-                                            )}
-                                        </div>
-                                    </div>
-                                );
-                            })}
-                            {selectedItem.sources?.length === 0 && <div className="task-card"><p>该商品暂未找到匹配的 1688 货源。</p></div>}
-                            {totalPages > 1 && (<div style={{display: 'flex', justifyContent: 'center', alignItems: 'center', gap: '15px', marginTop: '30px'}}><button className="pro-btn" disabled={sourcePage <= 1} onClick={() => setSourcePage(p => p - 1)}>上一页</button><span style={{fontSize: '0.9rem', color: 'var(--text-secondary)'}}>第 {sourcePage} / {totalPages} 页</span><button className="pro-btn" disabled={sourcePage >= totalPages} onClick={() => setSourcePage(p => p + 1)}>下一页</button></div>)}
-                        </div></div> ) : view === "published" ? <PublishedManager /> : null
+                             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
+                                 {detailedItems.length > 0 ? detailedItems.map((group) => (
+                                     <div 
+                                         className="bg-surface-container-lowest border border-border-hairline rounded-xl overflow-hidden cursor-pointer hover:-translate-y-1 hover:shadow-lg transition-all relative group" 
+                                         key={group.rank} 
+                                         onClick={() => enterItemDetail(group)}
+                                     >
+                                         <div className="relative h-56 bg-surface-container-low border-b border-border-hairline overflow-hidden">
+                                             <img 
+                                                 src={group.xianyu_item?.image_url} 
+                                                 referrerPolicy="no-referrer" 
+                                                 className="w-full h-full object-cover transition-transform group-hover:scale-105 duration-300"
+                                             />
+                                             <div className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded bg-primary/90 text-white font-mono text-[10px] font-black">
+                                                 RANK #{group.rank}
+                                             </div>
+                                             <div className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded bg-success text-white font-sans text-[9px] font-bold shadow">
+                                                 98% Match
+                                             </div>
+                                         </div>
+                                         
+                                         <div className="p-4">
+                                             <h3 className="text-xs font-bold text-on-surface line-clamp-2 h-9 leading-relaxed">
+                                                 {group.xianyu_item?.title}
+                                             </h3>
+                                             
+                                             <div className="flex justify-between items-center mt-4 border-t border-border-hairline/60 pt-3">
+                                                 <span className="text-base font-black text-primary">¥{group.xianyu_item?.price}</span>
+                                                 <span className="text-[10px] text-secondary font-semibold bg-surface-container px-2 py-0.5 rounded-full border border-border-hairline">
+                                                     {group.sources?.length || 0} 个比价货源
+                                                 </span>
+                                             </div>
+                                         </div>
+                                         <div className="id-corner">DB_ID: {group.xianyu_item?.db_id}</div>
+                                     </div>
+                                 )) : (
+                                     <div className="col-span-full bg-surface-container-lowest border border-border-hairline rounded-xl py-24 text-center">
+                                         <p className="text-secondary text-sm">该分析任务尚未产生可匹配的比价数据。</p>
+                                     </div>
+                                 )}
+                             </div>
+                         </div> 
+                     ) : (
+                         <div>
+                             <header className="mb-6">
+                                 <h1 className="font-sans text-2xl font-bold text-on-surface">选品决策资产库</h1>
+                                 <p className="font-sans text-sm text-secondary mt-1">系统已完成的爆款数据中心。点击各个品类卡片，可直接穿透查看商品的 1688 源头采购价与深度分析。</p>
+                             </header>
+                             
+                             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
+                                 {completedTasks.map(t => (
+                                     <div 
+                                         className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 relative overflow-hidden ambient-shadow hover:border-primary transition-all duration-150 cursor-pointer group" 
+                                         key={t.id} 
+                                         onClick={() => loadTaskResults(t)}
+                                     >
+                                         <div className="flex flex-col justify-between h-28">
+                                             <div className="text-center">
+                                                 <div className="font-black text-on-surface text-lg group-hover:text-primary transition-colors">{t.keyword}</div>
+                                                 <div className="text-xs text-secondary mt-2">调研时间: {t.created_at}</div>
+                                             </div>
+                                             
+                                             <div className="flex justify-between items-end border-t border-border-hairline/60 pt-2 font-mono text-[9px] text-secondary/60 mt-3">
+                                                 <span>V.{t.version}</span>
+                                                 <span>ID: {t.id}</span>
+                                             </div>
+                                         </div>
+                                     </div>
+                                 ))}
+                             </div>
+                         </div>
+                     ) 
+                 ) :
+                 view === "item_detail" && selectedItem ? ( 
+                     <div className="view-content">
+                         <div onClick={() => setActiveView("results")} className="text-secondary hover:text-primary text-xs font-bold flex items-center gap-1 mb-6 cursor-pointer">
+                             <span className="material-symbols-outlined text-[16px]">arrow_back</span>
+                             返回 "{selectedTask.keyword}" 分析报告
+                         </div>
+                         
+                         {/* 爆款卡片头部 */}
+                         <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 mb-8 relative ambient-shadow">
+                             <div className="flex flex-col md:flex-row gap-6 items-start md:items-center">
+                                 {selectedItem.xianyu_item?.image_url ? (
+                                     <img 
+                                         src={selectedItem.xianyu_item?.image_url} 
+                                         className="w-32 h-32 rounded-xl object-cover border border-border-hairline shadow shrink-0"
+                                         referrerPolicy="no-referrer" 
+                                     />
+                                 ) : (
+                                     <div className="w-32 h-32 rounded-xl bg-surface-container border border-border-hairline shrink-0 flex items-center justify-center text-secondary text-xs">暂无图片</div>
+                                 )}
+                                 
+                                 <div className="flex-grow min-w-0">
+                                     <h2 className="text-lg font-bold text-on-surface leading-snug">
+                                         <a href={selectedItem.xianyu_item?.item_url} target="_blank" className="hover:text-primary transition-all flex items-center gap-1.5">
+                                             {selectedItem.xianyu_item?.title}
+                                             <span className="material-symbols-outlined text-sm text-secondary">open_in_new</span>
+                                         </a>
+                                     </h2>
+                                     
+                                     <div className="flex gap-8 mt-5">
+                                         <div>
+                                             <span className="text-[10px] text-secondary block font-semibold uppercase">闲鱼售价</span>
+                                             <span className="text-2xl font-black text-primary mt-1 block">¥{selectedItem.xianyu_item?.price}</span>
+                                         </div>
+                                         <div className="w-px h-8 bg-border-hairline self-end"></div>
+                                         <div>
+                                             <span className="text-[10px] text-secondary block font-semibold uppercase">买家想要数</span>
+                                             <span className="text-2xl font-bold text-on-surface mt-1 block">{selectedItem.xianyu_item?.want_count} 人</span>
+                                         </div>
+                                     </div>
+                                 </div>
+                             </div>
+                             <div className="id-corner">DB_ID: {selectedItem.xianyu_item?.db_id}</div>
+                         </div>
+
+                         {/* 货源比价区域 */}
+                         <div>
+                             <header className="flex justify-between items-center mb-4 flex-wrap gap-4 border-b border-border-hairline pb-4">
+                                 <h3 className="font-sans text-sm font-bold text-on-surface">1688 货源深度对比表 ({selectedItem.sources?.length || 0} 条匹配)</h3>
+                                 
+                                 {/* 批量处理 */}
+                                 {selectedItem.sources?.filter(s => !s.drop_reason).length > 0 && (
+                                     <div className="flex items-center gap-4 bg-surface-container border border-border-hairline px-4 py-2 rounded-xl ambient-shadow">
+                                         <label className="text-xs text-secondary font-semibold cursor-pointer flex items-center gap-1">
+                                             <input 
+                                                 type="checkbox" 
+                                                 className="rounded border-secondary text-primary focus:ring-primary/20 w-4 h-4 cursor-pointer"
+                                                 checked={selectedItem.sources.filter(s => !s.drop_reason).length > 0 && selectedItem.sources.filter(s => !s.drop_reason).every(s => selectedIds.includes(s.db_id))}
+                                                 onChange={(e) => {
+                                                     if (e.target.checked) {
+                                                         setSelectedIds(selectedItem.sources.filter(s => !s.drop_reason).map(s => s.db_id));
+                                                     } else {
+                                                         setSelectedIds([]);
+                                                     }
+                                                 }}
+                                             />
+                                             全选未丢弃
+                                         </label>
+                                         <div className="w-px h-5 bg-border-hairline/60"></div>
+                                         
+                                         <div className="flex gap-2">
+                                             <button 
+                                                 className="px-3.5 py-1.5 bg-primary hover:bg-primary-container text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
+                                                 disabled={batchPublishing || batchDepublishing || batchDeleting || selectedIds.length === 0} 
+                                                 onClick={doBatchPublish}
+                                             >
+                                                 {batchPublishing ? "云同步中..." : `🚀 批量发布 (${selectedIds.length})`}
+                                             </button>
+                                             <button 
+                                                 className="px-3.5 py-1.5 bg-warning hover:bg-warning/80 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
+                                                 disabled={batchPublishing || batchDepublishing || batchDeleting || selectedIds.length === 0} 
+                                                 onClick={doBatchDepublish}
+                                             >
+                                                 {batchDepublishing ? "云同步中..." : `⚠️ 批量下架 (${selectedIds.length})`}
+                                             </button>
+                                             <button 
+                                                 className="px-3.5 py-1.5 bg-error hover:bg-error/85 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
+                                                 disabled={batchPublishing || batchDepublishing || batchDeleting || selectedIds.length === 0} 
+                                                 onClick={doBatchDelete}
+                                             >
+                                                 {batchDeleting ? "云注销中..." : `🗑️ 批量删除 (${selectedIds.length})`}
+                                             </button>
+                                         </div>
+                                     </div>
+                                 )}
+                             </header>
+
+                             {/* 货源列表卡片 */}
+                             <div className="space-y-4">
+                                 {paginatedSources.map((src, i) => { 
+                                     const marginVal = (selectedItem.xianyu_item?.price - src.min_price - 20).toFixed(2); 
+                                     const isDropped = !!src.drop_reason;
+                                     const isChecked = selectedIds.includes(src.db_id);
+                                     return (
+                                         <div 
+                                             className={`bg-surface-container-lowest border rounded-xl p-4 ambient-shadow flex justify-between items-center relative overflow-hidden group ${
+                                                 isDropped ? 'border-dashed border-outline-variant/60 opacity-60 bg-surface-container-low' : 'border-border-hairline hover:border-primary transition-colors'
+                                             }`} 
+                                             key={i}
+                                         >
+                                             <div className="flex gap-4 items-center flex-1 min-w-0">
+                                                 {!isDropped && (
+                                                     <input 
+                                                         type="checkbox" 
+                                                         className="rounded border-secondary text-primary focus:ring-primary/20 w-4 h-4 cursor-pointer shrink-0"
+                                                         checked={isChecked}
+                                                         onChange={(e) => {
+                                                             if (e.target.checked) {
+                                                                 setSelectedIds(prev => [...prev, src.db_id]);
+                                                             } else {
+                                                                 setSelectedIds(prev => prev.filter(id => id !== src.db_id));
+                                                             }
+                                                         }}
+                                                     />
+                                                 )}
+                                                 {src.images && src.images.length > 0 ? (
+                                                     <img 
+                                                         src={src.images[0]} 
+                                                         className="w-16 h-16 rounded-lg object-cover border border-border-hairline shrink-0" 
+                                                         referrerPolicy="no-referrer" 
+                                                     />
+                                                 ) : (
+                                                     <div className="w-16 h-16 rounded-lg bg-surface-container border border-border-hairline shrink-0 flex items-center justify-center text-secondary text-xs">无图</div>
+                                                 )}
+                                                 
+                                                 <div className="flex-1 min-w-0">
+                                                     <a 
+                                                         href={src.url} 
+                                                         target="_blank" 
+                                                         className={`font-semibold text-on-surface block text-sm leading-snug ${isDropped ? 'line-through text-secondary' : 'hover:text-primary transition-colors'}`}
+                                                     >
+                                                         {src.title}
+                                                     </a>
+                                                     <div className="flex gap-3 items-center mt-2.5 text-xs text-secondary">
+                                                         <span>{src.sku_count > 0 ? `${src.sku_count} 个多属性 SKU 规格` : '一口价商品'}</span>
+                                                         <span className="w-1.5 h-1.5 rounded-full bg-border-hairline"></span>
+                                                         <span className="font-mono bg-surface-container px-2 py-0.5 rounded text-[10px]">ID: {src.db_id}</span>
+                                                     </div>
+                                                 </div>
+                                             </div>
+
+                                             <div className="text-right pl-6 shrink-0 min-w-[200px] flex flex-col justify-between h-16">
+                                                 {isDropped ? (
+                                                     <div className="flex justify-end items-center h-full">
+                                                         <span className="px-2.5 py-1 rounded bg-error/10 text-error border border-error/20 font-sans text-xs font-bold">
+                                                             已过滤丢弃: {src.drop_reason}
+                                                         </span>
+                                                     </div>
+                                                 ) : (
+                                                     <>
+                                                         <div className="flex justify-end gap-3 items-baseline">
+                                                             <span className="font-mono text-lg font-black text-on-surface">¥{src.min_price}</span>
+                                                             <span className={`text-xs font-bold ${parseFloat(marginVal) > 50 ? 'text-success' : 'text-error'}`}>
+                                                                 预估纯利: ¥{marginVal}
+                                                             </span>
+                                                         </div>
+                                                         
+                                                         <PublishButton 
+                                                             src={src} 
+                                                             xianyuPrice={selectedItem.xianyu_item?.price} 
+                                                             onStatusLoaded={handleStatusLoaded} 
+                                                             batchStatus={batchStatusMap[src.db_id]}
+                                                             batchResult={batchResultMap[src.db_id]}
+                                                         />
+                                                     </>
+                                                 )}
+                                             </div>
+                                         </div>
+                                     );
+                                 })}
+
+                                 {selectedItem.sources?.length === 0 && (
+                                     <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-12 text-center text-xs text-secondary">
+                                         该爆款商品暂未匹配到对应的 1688 采购货源。
+                                     </div>
+                                 )}
+
+                                 {/* 分页 */}
+                                 {totalPages > 1 && (
+                                     <div className="flex justify-center items-center gap-1.5 mt-8">
+                                         <button 
+                                             className="w-8 h-8 flex items-center justify-center rounded border border-border-hairline text-secondary hover:bg-surface-container-low transition-colors disabled:opacity-40" 
+                                             disabled={sourcePage <= 1} 
+                                             onClick={() => setSourcePage(p => p - 1)}
+                                         >
+                                             <span className="material-symbols-outlined text-[18px]">chevron_left</span>
+                                         </button>
+                                         <span className="font-mono text-xs font-bold px-3 py-1 bg-primary/10 border border-primary/20 text-primary rounded">
+                                             第 {sourcePage} / {totalPages} 页
+                                         </span>
+                                         <button 
+                                             className="w-8 h-8 flex items-center justify-center rounded border border-border-hairline text-secondary hover:bg-surface-container-low transition-colors disabled:opacity-40" 
+                                             disabled={sourcePage >= totalPages} 
+                                             onClick={() => setSourcePage(p => p + 1)}
+                                         >
+                                             <span className="material-symbols-outlined text-[18px]">chevron_right</span>
+                                         </button>
+                                     </div>
+                                 )}
+                             </div>
+                         </div>
+                     </div> 
+                 ) : view === "published" ? <PublishedManager /> : null
                 }
             </main>
         </React.Fragment>

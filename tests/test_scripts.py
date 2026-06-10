@@ -593,6 +593,127 @@ def test_run_xianyu_hot_items_passes_launch_args(monkeypatch, capsys) -> None:
     assert output["xianyu_market"]["category_keyword"] == "升降桌"
 
 
+def test_run_xianyu_hot_items_routing(monkeypatch, capsys) -> None:
+    script_path = Path("/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_xianyu_hot_items.py")
+    spec = importlib.util.spec_from_file_location("run_xianyu_hot_items_script", script_path)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def clean_json(stdout_str):
+        import re
+        match = re.search(r'(\{.*"(?:hot_items|error)".*\})', stdout_str, re.DOTALL)
+        return json.loads(match.group(1)) if match else json.loads(stdout_str)
+
+    # 1. 测试图片分支 (IMAGE 模式)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_xianyu_hot_items.py",
+            "--keyword",
+            "https://example.com/test_product.png?version=1",
+            "--state-file",
+            "./xianyu_state.json",
+        ],
+    )
+    assert module.main() == 0
+    output_img = clean_json(capsys.readouterr().out)
+    assert output_img["hot_items"][0]["hot_item_id"] == "img_search"
+    assert "test_product.png" in output_img["hot_items"][0]["title"]
+    assert output_img["hot_items"][0]["image_url"] == "https://example.com/test_product.png?version=1"
+
+    # 2. 测试链接分支 (URL 模式)
+    class FakeDetailItem:
+        item_id = "800991122"
+        title = "测试闲鱼单品宝贝"
+        price = 45.5
+        want_count = 12
+        item_url = "https://h5.m.goofish.com/item?id=800991122"
+        images = ["https://img.alicdn.com/img1.jpg"]
+
+    class FakeAdapter:
+        def detail(self, target_id_or_url):
+            assert target_id_or_url == "800991122"
+            return FakeDetailItem()
+
+    class FakeFactory:
+        @staticmethod
+        def from_browser(config):
+            return FakeAdapter()
+
+    monkeypatch.setattr(module, "PlaywrightXianyuAdapter", FakeFactory)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_xianyu_hot_items.py",
+            "--keyword",
+            "【闲鱼】https://m.tb.cn/h.xxxxx?id=800991122 「我在闲鱼发布了...」",
+            "--state-file",
+            "./xianyu_state.json",
+        ],
+    )
+    monkeypatch.setattr(module, "extract_item_url_or_id", lambda x, y: "800991122")
+
+    assert module.main() == 0
+    output_url = clean_json(capsys.readouterr().out)
+    assert output_url["hot_items"][0]["hot_item_id"] == "800991122"
+    assert output_url["hot_items"][0]["title"] == "测试闲鱼单品宝贝"
+    assert output_url["hot_items"][0]["price"] == 45.5
+    assert output_url["hot_items"][0]["image_url"] == "https://img.alicdn.com/img1.jpg"
+
+    # 3. 测试无效链接分支 (INVALID_URL 模式)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_xianyu_hot_items.py",
+            "--keyword",
+            "【闲鱼】无链接口令￥无链接口令￥",
+            "--state-file",
+            "./xianyu_state.json",
+        ],
+    )
+    monkeypatch.setattr(module, "extract_item_url_or_id", lambda x, y: "goofish_invalid")
+    assert module.main() == 1
+    output_err1 = clean_json(capsys.readouterr().out)
+    assert output_err1["error"] == "INVALID_URL"
+    assert "解析闲鱼链接失败" in output_err1["msg"]
+
+
+
+    # 4. 测试抓取单品详情超时或异常 (DETAIL_FETCH_FAILED 模式)
+    class FakeAdapterError:
+        def detail(self, target_id_or_url):
+            raise Exception("Timeout when connecting to goofish detail service")
+
+    class FakeFactoryError:
+        @staticmethod
+        def from_browser(config):
+            return FakeAdapterError()
+
+    monkeypatch.setattr(module, "PlaywrightXianyuAdapter", FakeFactoryError)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "run_xianyu_hot_items.py",
+            "--keyword",
+            "https://m.tb.cn/h.xxxxx?id=999999",
+            "--state-file",
+            "./xianyu_state.json",
+        ],
+    )
+    monkeypatch.setattr(module, "extract_item_url_or_id", lambda x, y: "999999")
+    assert module.main() == 1
+    output_err2 = clean_json(capsys.readouterr().out)
+    assert output_err2["error"] == "DETAIL_FETCH_FAILED"
+    assert "获取宝贝详情超时" in output_err2["msg"]
+
+
+
+
 def test_run_source_resolution_from_urls_outputs_summary(monkeypatch, capsys, tmp_path) -> None:
     script_path = Path(
         "/Users/mac/PycharmProjects/mytools/xianyu-tools/scripts/run_source_resolution_from_urls.py"

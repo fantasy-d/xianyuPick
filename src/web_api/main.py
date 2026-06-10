@@ -42,6 +42,20 @@ def init_db_schema():
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         """)
         
+        # 1.5 创建 llm_token_logs 表
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS llm_token_logs (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                task_id VARCHAR(50) DEFAULT NULL,
+                feature VARCHAR(50) NOT NULL,
+                model VARCHAR(100) NOT NULL,
+                prompt_tokens INT DEFAULT 0,
+                completion_tokens INT DEFAULT 0,
+                total_tokens INT DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """)
+        
         # 2. 丢弃不需要的库内 HTML 表 ali1688_source_htmls
         cursor.execute("DROP TABLE IF EXISTS ali1688_source_htmls;")
         
@@ -57,9 +71,26 @@ def init_db_schema():
         except Exception as alter_err:
             logger.warning(f"[DB] Failed to modify publish_status enum: {alter_err}")
             
+        # 5. 自愈添加 input_type 字段以支持任务类型的细化展示
+        try:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN input_type VARCHAR(20) DEFAULT 'keyword';")
+        except Exception:
+            pass
+        # 6. 自愈添加 total_tokens 字段以支持 Token 的计量
+        try:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN total_tokens INT DEFAULT 0;")
+        except Exception:
+            pass
+        # 7. 物理刷新历史数据，防止 NULL 导致前端 React 渲染 crash
+        try:
+            cursor.execute("UPDATE tasks SET total_tokens = 0 WHERE total_tokens IS NULL;")
+            cursor.execute("UPDATE tasks SET input_type = 'keyword' WHERE input_type IS NULL;")
+        except Exception as update_err:
+            logger.warning(f"[DB] Failed to refresh historical tasks null values: {update_err}")
+            
         conn.commit()
         conn.close()
-        logger.info("[DB] Schema initialization complete (ensured html_path and 'depublished' in ENUM xianyu_published_items).")
+        logger.info("[DB] Schema initialization complete (ensured tasks.input_type, total_tokens, and fixed NULL values).")
     except Exception as e:
         logger.error(f"[DB] Schema initialization failed: {e}")
 
@@ -97,14 +128,17 @@ class Task:
     @staticmethod
     def add(keyword: str):
         try:
+            from scripts.run_xianyu_hot_items import detect_input_type
+            input_type = detect_input_type(keyword)
+            
             task_id, now = str(uuid.uuid4())[:8], datetime.now()
             version = now.strftime("%Y%m%d")
             root_dir = str(OUTPUTS_DIR / f"{sanitize_dir_name(keyword)}_{version}")
             conn = get_db_conn(); cursor = conn.cursor()
-            cursor.execute("INSERT INTO tasks (id, keyword, status, progress, msg, created_at, root_dir, version, is_deleted) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0)",
-                         (task_id, keyword, "排队中", 0, "等待调度", now, root_dir, version))
+            cursor.execute("INSERT INTO tasks (id, keyword, status, progress, msg, created_at, root_dir, version, is_deleted, input_type) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, %s)",
+                         (task_id, keyword, "排队中", 0, "等待调度", now, root_dir, version, input_type))
             conn.commit(); conn.close()
-            logger.info(f"Task added: {keyword} ({task_id})")
+            logger.info(f"Task added: {keyword} ({task_id}), type: {input_type}")
             return task_id
         except Exception as e:
             logger.error(f"Failed to add task for {keyword}: {e}")
@@ -171,7 +205,7 @@ async def startup():
 def list_tasks():
     try:
         conn = get_db_conn(); cursor = conn.cursor()
-        cursor.execute("SELECT id, keyword, status, progress, msg, created_at, version FROM tasks WHERE is_deleted = 0 ORDER BY created_at DESC")
+        cursor.execute("SELECT id, keyword, status, progress, msg, created_at, version, input_type, total_tokens FROM tasks WHERE is_deleted = 0 ORDER BY created_at DESC")
         rows = cursor.fetchall(); conn.close()
         for r in rows:
             if isinstance(r['created_at'], datetime): r['created_at'] = r['created_at'].strftime("%Y-%m-%d %H:%M")
@@ -941,6 +975,89 @@ def get_logs(task_id: str):
     except Exception as e:
         logger.error(f"Failed to fetch logs for task {task_id}: {e}")
         return f"Error reading logs: {e}"
+
+@app.get("/api/token/stats")
+def get_token_stats():
+    try:
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        
+        # 1. 汇总数据
+        cursor.execute("""
+            SELECT 
+                COUNT(*) as total_calls,
+                IFNULL(SUM(prompt_tokens), 0) as total_prompt_tokens,
+                IFNULL(SUM(completion_tokens), 0) as total_completion_tokens,
+                IFNULL(SUM(total_tokens), 0) as total_tokens,
+                COUNT(DISTINCT model) as model_count,
+                COUNT(DISTINCT feature) as feature_count
+            FROM llm_token_logs
+        """)
+        summary = cursor.fetchone()
+        if not summary or summary.get("total_calls") == 0:
+            summary = {
+                "total_calls": 0, "total_prompt_tokens": 0, "total_completion_tokens": 0, 
+                "total_tokens": 0, "model_count": 0, "feature_count": 0
+            }
+        
+        # 2. 按模型统计
+        cursor.execute("""
+            SELECT 
+                model,
+                COUNT(*) as calls,
+                IFNULL(SUM(prompt_tokens), 0) as prompt_tokens,
+                IFNULL(SUM(completion_tokens), 0) as completion_tokens,
+                IFNULL(SUM(total_tokens), 0) as total_tokens
+            FROM llm_token_logs
+            GROUP BY model
+            ORDER BY total_tokens DESC
+        """)
+        by_model = cursor.fetchall()
+        
+        # 3. 按功能统计
+        cursor.execute("""
+            SELECT 
+                feature,
+                COUNT(*) as calls,
+                IFNULL(SUM(prompt_tokens), 0) as prompt_tokens,
+                IFNULL(SUM(completion_tokens), 0) as completion_tokens,
+                IFNULL(SUM(total_tokens), 0) as total_tokens
+            FROM llm_token_logs
+            GROUP BY feature
+            ORDER BY total_tokens DESC
+        """)
+        by_feature = cursor.fetchall()
+        
+        # 4. 最近 20 条明细日志 (关联任务关键词)
+        cursor.execute("""
+            SELECT 
+                l.id,
+                l.task_id,
+                t.keyword as task_keyword,
+                l.feature,
+                l.model,
+                l.prompt_tokens,
+                l.completion_tokens,
+                l.total_tokens,
+                DATE_FORMAT(l.created_at, '%Y-%m-%d %H:%i:%s') as created_at
+            FROM llm_token_logs l
+            LEFT JOIN tasks t ON l.task_id = t.id
+            ORDER BY l.id DESC
+            LIMIT 20
+        """)
+        recent_logs = cursor.fetchall()
+        
+        conn.close()
+        return {
+            "status": "success",
+            "summary": summary,
+            "by_model": by_model,
+            "by_feature": by_feature,
+            "recent_logs": recent_logs
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch token stats: {e}")
+        return {"status": "error", "message": str(e)}
 
 @app.get("/api/sys/status")
 def system_status(): 

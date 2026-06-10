@@ -28,16 +28,47 @@ def load_llm_configs():
         logger.error(f"Error loading llm.json: {e}")
         return []
 
-def ask_llm_relevance(source_title, search_keyword, external_logger=None):
+def record_token_usage(feature: str, model: str, prompt_tokens: int, completion_tokens: int, total_tokens: int, task_id: str = None):
     """
-    模型级轮询判定，支持外部 Logger 透传
+    记录一次大模型调用的 Token 消耗详情
+    """
+    try:
+        import pymysql
+        config_path = Path(__file__).resolve().parents[2] / "config" / "database.json"
+        if not config_path.exists():
+            return
+        config = json.load(open(config_path))
+        conn = pymysql.connect(**config)
+        cursor = conn.cursor()
+        
+        # 1. 插入明细日志到数据库
+        cursor.execute("""
+            INSERT INTO llm_token_logs (task_id, feature, model, prompt_tokens, completion_tokens, total_tokens)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (task_id, feature, model, prompt_tokens, completion_tokens, total_tokens))
+        
+        # 2. 如果关联了任务，累加该任务的 total_tokens
+        if task_id:
+            try:
+                cursor.execute("UPDATE tasks SET total_tokens = total_tokens + %s WHERE id = %s", (total_tokens, task_id))
+            except Exception as e:
+                logger.warning(f"Failed to increment task total_tokens in record_token_usage: {e}")
+                
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Failed to record token usage in DB: {e}")
+
+def ask_llm_relevance_with_usage(source_title, search_keyword, task_id=None, feature="source_relevance", external_logger=None):
+    """
+    模型级轮询判定，支持外部 Logger 透传，返回 (是否相关, 本次消耗token)
     """
     # 优先使用透传的 logger，否则使用模块内置的 logger
     log = external_logger or logger
 
     configs = load_llm_configs()
     if not configs:
-        return None
+        return None, 0
 
     # 遍历所有配置项（每个配置对应一个厂商/Key）
     for cfg_idx, cfg in enumerate(configs):
@@ -98,12 +129,24 @@ def ask_llm_relevance(source_title, search_keyword, external_logger=None):
                     continue
 
                 raw_content = res_json['choices'][0]['message']['content'].strip()
-                log.info(f"[AI Result]: {raw_content}")
+                usage = res_json.get("usage", {})
+                prompt_tokens = usage.get("prompt_tokens", 0)
+                completion_tokens = usage.get("completion_tokens", 0)
+                total_tokens = usage.get("total_tokens", 0)
+                
+                log.info(f"[AI Result]: {raw_content} (Prompt: {prompt_tokens}, Completion: {completion_tokens}, Total: {total_tokens})")
                 log.info("-" * 20)
 
-                return "YES" in raw_content.upper()
+                # 自动落库记录与累加
+                record_token_usage(feature, current_model, prompt_tokens, completion_tokens, total_tokens, task_id)
+
+                return "YES" in raw_content.upper(), total_tokens
             except Exception as e:
                 log.warning(f"[AI Failed] {current_model}: {e}")
                 continue
                 
-    return None 
+    return None, 0
+
+def ask_llm_relevance(source_title, search_keyword, external_logger=None):
+    res, _ = ask_llm_relevance_with_usage(source_title, search_keyword, external_logger=external_logger)
+    return res
