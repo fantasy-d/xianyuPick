@@ -958,7 +958,7 @@ const PublishedManager = () => {
                             <select 
                                 value={filterStatus}
                                 onChange={e => { setFilterStatus(e.target.value); setPage(1); }}
-                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-4 pr-10 py-2 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all cursor-pointer appearance-none animate-none"
+                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-4 pr-10 py-2 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all cursor-pointer appearance-none animate-none bg-none"
                             >
                                 <option value="">-- 系统同步状态 (全部) --</option>
                                 <option value="success">已上架</option>
