@@ -863,7 +863,18 @@ async def delete_from_xianyu(source_id: int):
         return {"status": "failed", "msg": str(e)}
 
 @app.get("/api/xianyu_products")
-def get_xianyu_products(page: int = 1, limit: int = 10, keyword: str = "", sort_by: str = "publish_time", sort_order: str = "desc"):
+def get_xianyu_products(
+    page: int = 1, 
+    limit: int = 10, 
+    keyword: str = "", 
+    sort_by: str = "publish_time", 
+    sort_order: str = "desc",
+    publish_status: str = "",
+    min_source_price: float = None,
+    max_source_price: float = None,
+    min_ref_price: float = None,
+    max_ref_price: float = None
+):
     offset = (page - 1) * limit
     conn = get_db_conn(); cursor = conn.cursor()
 
@@ -884,6 +895,27 @@ def get_xianyu_products(page: int = 1, limit: int = 10, keyword: str = "", sort_
     if keyword:
         query_base += " AND (s.title LIKE %s OR xi.title LIKE %s)"
         params.extend([f"%{keyword}%", f"%{keyword}%"])
+
+    if publish_status:
+        if publish_status == 'success':
+            query_base += " AND p.publish_status IN ('success', 'done')"
+        else:
+            query_base += " AND p.publish_status = %s"
+            params.append(publish_status)
+
+    if min_source_price is not None:
+        query_base += " AND s.min_price >= %s"
+        params.append(min_source_price)
+    if max_source_price is not None:
+        query_base += " AND s.min_price <= %s"
+        params.append(max_source_price)
+
+    if min_ref_price is not None:
+        query_base += " AND xi.price >= %s"
+        params.append(min_ref_price)
+    if max_ref_price is not None:
+        query_base += " AND xi.price <= %s"
+        params.append(max_ref_price)
 
     count_query = f"SELECT COUNT(*) as count {query_base}"
     cursor.execute(count_query, tuple(params))

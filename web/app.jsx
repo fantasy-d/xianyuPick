@@ -824,6 +824,11 @@ const PublishedManager = () => {
     const [page, setPage] = useState(1);
     const [limit] = useState(10);
     const [keyword, setKeyword] = useState('');
+    const [filterStatus, setFilterStatus] = useState('');
+    const [minSourcePrice, setMinSourcePrice] = useState('');
+    const [maxSourcePrice, setMaxSourcePrice] = useState('');
+    const [minRefPrice, setMinRefPrice] = useState('');
+    const [maxRefPrice, setMaxRefPrice] = useState('');
     const [loading, setLoading] = useState(false);
     const [refreshTrigger, setRefreshTrigger] = useState(0);
     const [selectedProduct, setSelectedProduct] = useState(null); // 记录当前查看详情的已发布商品
@@ -837,8 +842,14 @@ const PublishedManager = () => {
     const fetchPublishedProducts = async () => {
         setLoading(true);
         try {
-            const res = await fetch(`/api/xianyu_products?page=${page}&limit=${limit}&keyword=${encodeURIComponent(keyword)}&sort_by=${sortBy}&sort_order=${sortOrder}`)
-                .then(r => r.json());
+            let url = `/api/xianyu_products?page=${page}&limit=${limit}&keyword=${encodeURIComponent(keyword)}&sort_by=${sortBy}&sort_order=${sortOrder}`;
+            if (filterStatus) url += `&publish_status=${filterStatus}`;
+            if (minSourcePrice) url += `&min_source_price=${minSourcePrice}`;
+            if (maxSourcePrice) url += `&max_source_price=${maxSourcePrice}`;
+            if (minRefPrice) url += `&min_ref_price=${minRefPrice}`;
+            if (maxRefPrice) url += `&max_ref_price=${maxRefPrice}`;
+
+            const res = await fetch(url).then(r => r.json());
             setItems(res.items || []);
             setTotal(res.total || 0);
         } catch (e) {
@@ -850,7 +861,7 @@ const PublishedManager = () => {
 
     useEffect(() => {
         fetchPublishedProducts();
-    }, [page, keyword, sortBy, sortOrder, refreshTrigger]);
+    }, [page, keyword, filterStatus, minSourcePrice, maxSourcePrice, minRefPrice, maxRefPrice, sortBy, sortOrder, refreshTrigger]);
 
     const handleStatusLoaded = (dbId, status, result) => {
         setBatchStatusMap(prev => {
@@ -914,23 +925,103 @@ const PublishedManager = () => {
                 <p className="font-sans text-sm text-secondary mt-1">管理并监控已经在闲鱼铺货成功的商品，支持与 1688 源头采购价、物流信息实时联动。点击行项目可展开详情数据与下架控制。</p>
             </header>
 
-            {/* 搜索栏 */}
-            <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-4 mb-6 ambient-shadow flex gap-3">
-                <div className="relative flex-1">
-                    <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-secondary text-[20px]">search</span>
-                    <input 
-                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-10 pr-4 py-2 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all placeholder-secondary/50"
-                        value={keyword}
-                        onChange={e => { setKeyword(e.target.value); setPage(1); }}
-                        placeholder="输入货源源标题、闲鱼发布标题或者商品数据库 ID 进行深度搜索..."
-                    />
+            {/* 多维筛选功能区 */}
+            <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 mb-6 ambient-shadow space-y-4">
+                {/* 第一排：文本搜索与同步状态 */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    {/* 文字检索 */}
+                    <div className="md:col-span-2 relative">
+                        <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-secondary text-[20px]">search</span>
+                        <input 
+                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-10 pr-4 py-2.5 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all placeholder-secondary/40"
+                            value={keyword}
+                            onChange={e => { setKeyword(e.target.value); setPage(1); }}
+                            placeholder="输入货源标题、闲鱼发布标题或者商品 ID 进行搜索..."
+                        />
+                    </div>
+                    {/* 状态下拉框 */}
+                    <div className="relative">
+                        <select 
+                            value={filterStatus}
+                            onChange={e => { setFilterStatus(e.target.value); setPage(1); }}
+                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-4 pr-10 py-2.5 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all cursor-pointer appearance-none animate-none"
+                        >
+                            <option value="">-- 系统同步状态 (全部) --</option>
+                            <option value="success">已上架</option>
+                            <option value="depublished">已下架</option>
+                            <option value="pending">同步中</option>
+                            <option value="failed">同步失败</option>
+                        </select>
+                        <span className="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-secondary pointer-events-none">expand_more</span>
+                    </div>
                 </div>
-                <button 
-                    className="bg-primary hover:bg-primary-container text-white px-5 py-2 rounded-lg font-sans text-sm font-semibold transition-colors flex items-center gap-2 shadow-[0_2px_8px_rgba(168,50,0,0.15)]"
-                    onClick={() => { setPage(1); fetchPublishedProducts(); }}
-                >
-                    立即筛选
-                </button>
+
+                {/* 第二排：进价区间、参考价区间与操作按钮 */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
+                    {/* 拿货进价价格区间 */}
+                    <div className="flex items-center gap-2">
+                        <span className="font-sans text-xs font-semibold text-secondary whitespace-nowrap w-16">拿货进价:</span>
+                        <input 
+                            type="number" 
+                            placeholder="Min"
+                            value={minSourcePrice}
+                            onChange={e => { setMinSourcePrice(e.target.value); setPage(1); }}
+                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
+                        />
+                        <span className="text-secondary text-xs">~</span>
+                        <input 
+                            type="number" 
+                            placeholder="Max"
+                            value={maxSourcePrice}
+                            onChange={e => { setMaxSourcePrice(e.target.value); setPage(1); }}
+                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
+                        />
+                    </div>
+                    {/* 爆款参考价价格区间 */}
+                    <div className="flex items-center gap-2">
+                        <span className="font-sans text-xs font-semibold text-secondary whitespace-nowrap w-16">参考价:</span>
+                        <input 
+                            type="number" 
+                            placeholder="Min"
+                            value={minRefPrice}
+                            onChange={e => { setMinRefPrice(e.target.value); setPage(1); }}
+                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
+                        />
+                        <span className="text-secondary text-xs">~</span>
+                        <input 
+                            type="number" 
+                            placeholder="Max"
+                            value={maxRefPrice}
+                            onChange={e => { setMaxRefPrice(e.target.value); setPage(1); }}
+                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
+                        />
+                    </div>
+                    {/* 按钮控制区 */}
+                    <div className="flex justify-end gap-2.5">
+                        <button 
+                            className="px-4 py-2 bg-surface-container-high border border-border-hairline hover:bg-surface-container-highest text-on-surface rounded-lg font-sans text-sm font-semibold transition-colors flex items-center gap-1.5"
+                            onClick={() => {
+                                setKeyword('');
+                                setFilterStatus('');
+                                setMinSourcePrice('');
+                                setMaxSourcePrice('');
+                                setMinRefPrice('');
+                                setMaxRefPrice('');
+                                setPage(1);
+                            }}
+                        >
+                            <span className="material-symbols-outlined text-[18px]">clear_all</span>
+                            <span>重置</span>
+                        </button>
+                        <button 
+                            className="bg-primary hover:bg-primary-container text-white px-5 py-2 rounded-lg font-sans text-sm font-semibold transition-colors flex items-center gap-1.5 shadow-[0_2px_8px_rgba(168,50,0,0.15)]"
+                            onClick={() => { setPage(1); fetchPublishedProducts(); }}
+                        >
+                            <span className="material-symbols-outlined text-[18px]">filter_alt</span>
+                            <span>立即筛选</span>
+                        </button>
+                    </div>
+                </div>
             </div>
 
             {loading ? (
@@ -1732,7 +1823,7 @@ const App = () => {
             </header>
 
             {/* Main Container */}
-            <main className="ml-[260px] mt-16 p-6 overflow-y-auto flex-1 min-h-[calc(100vh-64px)] transition-all duration-200">
+            <main className="ml-[260px] mt-16 p-6 overflow-y-auto flex-1 h-[calc(100vh-64px)] transition-all duration-200">
                 {view === 'logs' ? <LogViewer tasks={tasks} /> : 
                  view === 'token_stats' ? <TokenStatsView /> :
                  view === "dashboard" ? (() => {
