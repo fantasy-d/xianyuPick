@@ -1034,6 +1034,7 @@ const PublishedManager = () => {
                                 <span>立即筛选</span>
                             </button>
                         </div>
+                    </div>
                 )}
             </div>
 
