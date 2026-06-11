@@ -829,6 +829,7 @@ const PublishedManager = () => {
     const [maxSourcePrice, setMaxSourcePrice] = useState('');
     const [minRefPrice, setMinRefPrice] = useState('');
     const [maxRefPrice, setMaxRefPrice] = useState('');
+    const [isExpanded, setIsExpanded] = useState(false); // 控制高级筛选展开折叠
     const [loading, setLoading] = useState(false);
     const [refreshTrigger, setRefreshTrigger] = useState(0);
     const [selectedProduct, setSelectedProduct] = useState(null); // 记录当前查看详情的已发布商品
@@ -926,103 +927,115 @@ const PublishedManager = () => {
             </header>
 
             {/* 多维筛选功能区 */}
-            <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 mb-6 ambient-shadow space-y-4">
-                {/* 第一排：文本搜索与同步状态 */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    {/* 文字检索 */}
-                    <div className="md:col-span-2 relative">
+            <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-4 mb-6 ambient-shadow space-y-4">
+                {/* 第一排：主搜索框与高级筛选控制按钮 */}
+                <div className="flex gap-3">
+                    <div className="relative flex-1">
                         <span className="material-symbols-outlined absolute left-3 top-1/2 -translate-y-1/2 text-secondary text-[20px]">search</span>
                         <input 
-                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-10 pr-4 py-2.5 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all placeholder-secondary/40"
+                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-10 pr-4 py-2 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all placeholder-secondary/50"
                             value={keyword}
                             onChange={e => { setKeyword(e.target.value); setPage(1); }}
                             placeholder="输入货源标题、闲鱼发布标题或者商品 ID 进行搜索..."
                         />
                     </div>
-                    {/* 状态下拉框 */}
-                    <div className="relative">
-                        <select 
-                            value={filterStatus}
-                            onChange={e => { setFilterStatus(e.target.value); setPage(1); }}
-                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-4 pr-10 py-2.5 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all cursor-pointer appearance-none animate-none"
-                        >
-                            <option value="">-- 系统同步状态 (全部) --</option>
-                            <option value="success">已上架</option>
-                            <option value="depublished">已下架</option>
-                            <option value="pending">同步中</option>
-                            <option value="failed">同步失败</option>
-                        </select>
-                        <span className="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-secondary pointer-events-none">expand_more</span>
-                    </div>
+                    {/* 高级筛选控制 */}
+                    <button 
+                        onClick={() => setIsExpanded(!isExpanded)}
+                        className={`px-4 py-2 rounded-lg font-sans text-sm font-semibold transition-all flex items-center gap-1.5 border border-border-hairline hover:bg-surface-container-high ${isExpanded ? 'bg-primary/10 text-primary border-primary/20' : 'bg-surface-container-low text-on-surface'}`}
+                    >
+                        <span className="material-symbols-outlined text-[18px]">tune</span>
+                        <span>高级筛选</span>
+                        <span className="material-symbols-outlined text-[16px] transition-transform duration-200" style={{ transform: isExpanded ? 'rotate(180deg)' : 'rotate(0)' }}>expand_more</span>
+                    </button>
                 </div>
 
-                {/* 第二排：进价区间、参考价区间与操作按钮 */}
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
-                    {/* 拿货进价价格区间 */}
-                    <div className="flex items-center gap-2">
-                        <span className="font-sans text-xs font-semibold text-secondary whitespace-nowrap w-16">拿货进价:</span>
-                        <input 
-                            type="number" 
-                            placeholder="Min"
-                            value={minSourcePrice}
-                            onChange={e => { setMinSourcePrice(e.target.value); setPage(1); }}
-                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
-                        />
-                        <span className="text-secondary text-xs">~</span>
-                        <input 
-                            type="number" 
-                            placeholder="Max"
-                            value={maxSourcePrice}
-                            onChange={e => { setMaxSourcePrice(e.target.value); setPage(1); }}
-                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
-                        />
+                {/* 展开的更多筛选项区域 */}
+                {isExpanded && (
+                    <div className="pt-4 border-t border-border-hairline/60 grid grid-cols-1 md:grid-cols-3 gap-4 items-center">
+                        {/* 状态下拉框 */}
+                        <div className="relative">
+                            <select 
+                                value={filterStatus}
+                                onChange={e => { setFilterStatus(e.target.value); setPage(1); }}
+                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-4 pr-10 py-2 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all cursor-pointer appearance-none animate-none"
+                            >
+                                <option value="">-- 系统同步状态 (全部) --</option>
+                                <option value="success">已上架</option>
+                                <option value="depublished">已下架</option>
+                                <option value="pending">同步中</option>
+                                <option value="failed">同步失败</option>
+                            </select>
+                            <span className="material-symbols-outlined absolute right-3 top-1/2 -translate-y-1/2 text-secondary pointer-events-none">expand_more</span>
+                        </div>
+                        
+                        {/* 拿货进价价格区间 */}
+                        <div className="flex items-center gap-2">
+                            <span className="font-sans text-xs font-semibold text-secondary whitespace-nowrap w-16">拿货进价:</span>
+                            <input 
+                                type="number" 
+                                placeholder="Min"
+                                value={minSourcePrice}
+                                onChange={e => { setMinSourcePrice(e.target.value); setPage(1); }}
+                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
+                            />
+                            <span className="text-secondary text-xs">~</span>
+                            <input 
+                                type="number" 
+                                placeholder="Max"
+                                value={maxSourcePrice}
+                                onChange={e => { setMaxSourcePrice(e.target.value); setPage(1); }}
+                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
+                            />
+                        </div>
+
+                        {/* 爆款参考价价格区间 */}
+                        <div className="flex items-center gap-2">
+                            <span className="font-sans text-xs font-semibold text-secondary whitespace-nowrap w-16">参考价:</span>
+                            <input 
+                                type="number" 
+                                placeholder="Min"
+                                value={minRefPrice}
+                                onChange={e => { setMinRefPrice(e.target.value); setPage(1); }}
+                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
+                            />
+                            <span className="text-secondary text-xs">~</span>
+                            <input 
+                                type="number" 
+                                placeholder="Max"
+                                value={maxRefPrice}
+                                onChange={e => { setMaxRefPrice(e.target.value); setPage(1); }}
+                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
+                            />
+                        </div>
+
+                        {/* 操作按钮组 (强行放到第三列) */}
+                        <div className="md:col-start-3 flex justify-end gap-2.5">
+                            <button 
+                                className="px-4 py-2 bg-surface-container-high border border-border-hairline hover:bg-surface-container-highest text-on-surface rounded-lg font-sans text-sm font-semibold transition-colors flex items-center gap-1.5"
+                                onClick={() => {
+                                    setKeyword('');
+                                    setFilterStatus('');
+                                    setMinSourcePrice('');
+                                    setMaxSourcePrice('');
+                                    setMinRefPrice('');
+                                    setMaxRefPrice('');
+                                    setPage(1);
+                                }}
+                            >
+                                <span className="material-symbols-outlined text-[18px]">clear_all</span>
+                                <span>重置</span>
+                            </button>
+                            <button 
+                                className="bg-primary hover:bg-primary-container text-white px-5 py-2 rounded-lg font-sans text-sm font-semibold transition-colors flex items-center gap-1.5 shadow-[0_2px_8px_rgba(168,50,0,0.15)]"
+                                onClick={() => { setPage(1); fetchPublishedProducts(); }}
+                            >
+                                <span className="material-symbols-outlined text-[18px]">filter_alt</span>
+                                <span>立即筛选</span>
+                            </button>
+                        </div>
                     </div>
-                    {/* 爆款参考价价格区间 */}
-                    <div className="flex items-center gap-2">
-                        <span className="font-sans text-xs font-semibold text-secondary whitespace-nowrap w-16">参考价:</span>
-                        <input 
-                            type="number" 
-                            placeholder="Min"
-                            value={minRefPrice}
-                            onChange={e => { setMinRefPrice(e.target.value); setPage(1); }}
-                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
-                        />
-                        <span className="text-secondary text-xs">~</span>
-                        <input 
-                            type="number" 
-                            placeholder="Max"
-                            value={maxRefPrice}
-                            onChange={e => { setMaxRefPrice(e.target.value); setPage(1); }}
-                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:border-primary transition-all font-mono"
-                        />
-                    </div>
-                    {/* 按钮控制区 */}
-                    <div className="flex justify-end gap-2.5">
-                        <button 
-                            className="px-4 py-2 bg-surface-container-high border border-border-hairline hover:bg-surface-container-highest text-on-surface rounded-lg font-sans text-sm font-semibold transition-colors flex items-center gap-1.5"
-                            onClick={() => {
-                                setKeyword('');
-                                setFilterStatus('');
-                                setMinSourcePrice('');
-                                setMaxSourcePrice('');
-                                setMinRefPrice('');
-                                setMaxRefPrice('');
-                                setPage(1);
-                            }}
-                        >
-                            <span className="material-symbols-outlined text-[18px]">clear_all</span>
-                            <span>重置</span>
-                        </button>
-                        <button 
-                            className="bg-primary hover:bg-primary-container text-white px-5 py-2 rounded-lg font-sans text-sm font-semibold transition-colors flex items-center gap-1.5 shadow-[0_2px_8px_rgba(168,50,0,0.15)]"
-                            onClick={() => { setPage(1); fetchPublishedProducts(); }}
-                        >
-                            <span className="material-symbols-outlined text-[18px]">filter_alt</span>
-                            <span>立即筛选</span>
-                        </button>
-                    </div>
-                </div>
-            </div>
+                )}
 
             {loading ? (
                 <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-24 text-center ambient-shadow">
