@@ -1034,8 +1034,8 @@ const PublishedManager = () => {
                                 <span>立即筛选</span>
                             </button>
                         </div>
-                    </div>
                 )}
+            </div>
 
             {loading ? (
                 <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-24 text-center ambient-shadow">
