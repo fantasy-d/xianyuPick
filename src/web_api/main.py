@@ -781,12 +781,16 @@ async def batch_depublish_from_xianyu(req: dict = {}):
         # 2. 执行下架
         try:
             result = publisher.depublish_item(xianyu_item_id)
-            if result.get("status") == "success":
+            is_success = result.get("status") == "success"
+            is_invalid_state = "不满足下架条件" in result.get("msg", "")
+            
+            if is_success or is_invalid_state:
                 # 3. 记账
+                msg = '已下架' if is_success else f"已下架 ({result.get('msg')})"
                 cursor.execute("""
                     INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
                     VALUES (%s, %s, %s, %s, %s, %s)
-                """, (task_id, sid, xianyu_item_id, 'depublished', '已下架', None))
+                """, (task_id, sid, xianyu_item_id, 'depublished', msg, None))
                 success_list.append({"source_id": sid})
             else:
                 failed_list.append({"source_id": sid, "msg": result.get("msg", "下架失败")})
@@ -826,15 +830,21 @@ async def depublish_from_xianyu(source_id: int, req: dict = {}):
         publisher = PublisherV3(account_id=account_id)
         result = publisher.depublish_item(xianyu_item_id)
         
-        if result.get("status") == "success":
+        is_success = result.get("status") == "success"
+        is_invalid_state = "不满足下架条件" in result.get("msg", "")
+        
+        if is_success or is_invalid_state:
             # 3. 在发布表插入已下架状态，完成流水记账
+            msg = '已下架' if is_success else f"已下架 ({result.get('msg')})"
             cursor.execute("""
                 INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
                 VALUES (%s, %s, %s, %s, %s, %s)
-            """, (task_id, source_id, xianyu_item_id, 'depublished', '已下架', None))
+            """, (task_id, source_id, xianyu_item_id, 'depublished', msg, None))
             conn.commit()
             conn.close()
-            return {"status": "success", "msg": "下架成功"}
+            
+            return_msg = "下架成功" if is_success else f"已从本地强行下架/同步状态 (闲鱼提示: {result.get('msg')})"
+            return {"status": "success", "msg": return_msg}
         else:
             conn.close()
             return {"status": "failed", "msg": result.get("msg", "下架失败")}
