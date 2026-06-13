@@ -8,6 +8,7 @@ __pycache__/
 # Local runtime artifacts
 tmp/
 outputs/
+tests/
 
 # Local browser profiles / session state
 profiles/
