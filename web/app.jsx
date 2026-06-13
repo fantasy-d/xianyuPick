@@ -1,4 +1,4 @@
-const { useState, useEffect, useRef } = React;
+const { useState, useEffect, useRef, useMemo } = React;
 
 // --- 任务类型标签组件 ---
 const renderTaskTypeBadge = (inputType) => {
@@ -1461,6 +1461,1234 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
     );
 };
 
+// --- 系统配置管理视图组件 ---
+const SystemSettingsView = () => {
+    const createOpenapiAccount = (index = 1) => ({
+        id: `account-${Date.now()}-${index}`,
+        name: `闲鱼账号 ${index}`,
+        base_url: 'https://open.goofish.pro',
+        appid: '',
+        app_secret: '',
+        show_secret: false,
+        state_file: '',
+        default_config: {
+            user_name: '',
+            province: 110000,
+            city: 110100,
+            district: 110101,
+            item_biz_type: 2,
+            sp_biz_type: 2,
+            channel_cat_id: '',
+            stuff_status: 100,
+            express_fee: 0
+        }
+    });
+
+    const [configs, setConfigs] = useState({
+        openapi: {
+            active_account_id: 'account-1',
+            accounts: [createOpenapiAccount(1)]
+        }
+    });
+    
+    // 多大模型配置列表状态
+    const [llmList, setLlmList] = useState([]);
+    
+    // 卡片折叠状态，默认收起
+    const [llmCollapsed, setLlmCollapsed] = useState(true);
+    const [openapiCollapsed, setOpenapiCollapsed] = useState(true);
+    const [sessionCollapsed, setSessionCollapsed] = useState(false);
+    const [crawlCollapsed, setCrawlCollapsed] = useState(false);
+    const [crawlConfig, setCrawlConfig] = useState({
+        source_limit_1688: 10,
+        source_filter_models: []
+    });
+
+    // 从 llmList 中聚合出所有保存的模型名称
+    const availableModels = useMemo(() => {
+        const modelsSet = new Set();
+        llmList.forEach(item => {
+            if (item.models_str) {
+                item.models_str.split(',')
+                    .map(m => m.trim())
+                    .filter(m => m)
+                    .forEach(m => modelsSet.add(m));
+            }
+        });
+        return Array.from(modelsSet);
+    }, [llmList]);
+
+    // 级联选择下拉框数据 (从后端获取)
+    const [regions, setRegions] = useState([]);
+    
+    // 下拉级联选择当前选中的 adcode 状态
+    const [selectedProv, setSelectedProv] = useState("110000");
+    const [selectedCity, setSelectedCity] = useState("110100");
+    const [selectedDist, setSelectedDist] = useState("110101");
+    const [isCustomRegion, setIsCustomRegion] = useState(false);
+
+    // 类目数据 (从后端获取)
+    const [catGroups, setCatGroups] = useState([]); 
+    const [catList, setCatList] = useState([]); 
+    const [selectedGroup, setSelectedGroup] = useState(""); 
+    const [catQuery, setCatQuery] = useState(""); 
+    const [selectedCat, setSelectedCat] = useState(""); 
+    const [isCustomCat, setIsCustomCat] = useState(false);
+
+    // 系统基础请求及消息状态
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [message, setMessage] = useState(null);
+    const [error, setError] = useState(null);
+
+    const [xianyuLoginStatus, setXianyuLoginStatus] = useState(null);
+    const [isXianyuLoggingIn, setIsXianyuLoggingIn] = useState(false);
+    const [xianyuLoginSuccessMessage, setXianyuLoginSuccessMessage] = useState(null);
+    const [persistedOpenapiAccountIds, setPersistedOpenapiAccountIds] = useState([]);
+    const xianyuLoginFlowRef = useRef(false);
+    const prevXianyuLoggingInRef = useRef(false);
+    const noticeTimerRef = useRef(null);
+    const xianyuLoginSuccessTimerRef = useRef(null);
+    const currentOpenapiAccounts = configs.openapi?.accounts || [];
+    const activeOpenapiAccountId = configs.openapi?.active_account_id || currentOpenapiAccounts[0]?.id || '';
+    const currentOpenapiAccount = currentOpenapiAccounts.find(item => item.id === activeOpenapiAccountId) || currentOpenapiAccounts[0] || createOpenapiAccount(1);
+
+    const setCurrentOpenapiAccount = (updater) => {
+        setConfigs(prev => {
+            const openapi = prev.openapi || {};
+            const accounts = openapi.accounts || [];
+            const activeId = openapi.active_account_id || accounts[0]?.id;
+            return {
+                ...prev,
+                openapi: {
+                    ...openapi,
+                    accounts: accounts.map(account => {
+                        if (account.id !== activeId) return account;
+                        return typeof updater === 'function' ? updater(account) : { ...account, ...updater };
+                    })
+                }
+            };
+        });
+    };
+
+    const fetchXianyuLoginStatus = async () => {
+        try {
+            const accountId = activeOpenapiAccountId || '';
+            if (!persistedOpenapiAccountIds.includes(accountId)) {
+                setXianyuLoginStatus({ account_name: '', is_usable: false });
+                setIsXianyuLoggingIn(false);
+                return;
+            }
+            const resp = await fetch(`/api/system/xianyu_login_status?account_id=${encodeURIComponent(accountId)}`);
+            const res = await resp.json();
+            if (res.status === 'success') {
+                setXianyuLoginStatus(res.data.report || {});
+                setIsXianyuLoggingIn(res.data.is_logging_in || false);
+            }
+        } catch (err) {
+            console.error("Failed to fetch Xianyu login status:", err);
+        }
+    };
+
+    const handleXianyuLoginTrigger = async () => {
+        try {
+            if (!persistedOpenapiAccountIds.includes(activeOpenapiAccountId)) {
+                alert("请先保存当前账号配置，再执行登录授权。");
+                return;
+            }
+            xianyuLoginFlowRef.current = true;
+            setIsXianyuLoggingIn(true);
+            const resp = await fetch('/api/system/xianyu_login_trigger', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ account_id: activeOpenapiAccountId })
+            });
+            const res = await resp.json();
+            if (res.status === 'success') {
+                setMessage(res.msg || "已启动闲鱼登录，请完成手机扫码");
+                setError(null);
+                fetchXianyuLoginStatus();
+            } else {
+                alert(res.msg || "启动登录失败");
+                xianyuLoginFlowRef.current = false;
+                setIsXianyuLoggingIn(false);
+            }
+        } catch (err) {
+            console.error("Trigger login failed:", err);
+            xianyuLoginFlowRef.current = false;
+            setIsXianyuLoggingIn(false);
+        }
+    };
+
+    const handleOpenapiAccountSwitch = (accountId) => {
+        setConfigs(prev => ({
+            ...prev,
+            openapi: {
+                ...prev.openapi,
+                active_account_id: accountId
+            }
+        }));
+        setMessage(null);
+        setError(null);
+    };
+
+    const handleAddOpenapiAccount = () => {
+        setConfigs(prev => {
+            const accounts = prev.openapi?.accounts || [];
+            const nextAccount = createOpenapiAccount(accounts.length + 1);
+            return {
+                ...prev,
+                openapi: {
+                    ...prev.openapi,
+                    active_account_id: nextAccount.id,
+                    accounts: [...accounts, nextAccount]
+                }
+            };
+        });
+        setXianyuLoginStatus(null);
+    };
+
+    const handleRemoveOpenapiAccount = (accountId) => {
+        setConfigs(prev => {
+            const accounts = (prev.openapi?.accounts || []).filter(item => item.id !== accountId);
+            const nextAccounts = accounts.length ? accounts : [createOpenapiAccount(1)];
+            const nextActiveId = nextAccounts.some(item => item.id === prev.openapi?.active_account_id)
+                ? prev.openapi.active_account_id
+                : nextAccounts[0].id;
+            return {
+                ...prev,
+                openapi: {
+                    ...prev.openapi,
+                    active_account_id: nextActiveId,
+                    accounts: nextAccounts
+                }
+            };
+        });
+        setMessage(null);
+        setError(null);
+        setXianyuLoginStatus(null);
+    };
+
+    // 异步加载基础省市区和类目数据
+    const initMetadata = async (currentCatId) => {
+        try {
+            // 1. 获取全量省市区
+            const regResp = await fetch('/api/system/regions');
+            const regRes = await regResp.json();
+            let loadedRegions = [];
+            if (regRes.status === 'success') {
+                loadedRegions = regRes.data || [];
+                setRegions(loadedRegions);
+            }
+
+            // 2. 获取大类列表和默认类目列表
+            const catResp = await fetch('/api/system/openapi_categories');
+            const catRes = await catResp.json();
+            if (catRes.status === 'success') {
+                setCatGroups(catRes.data.groups || []);
+                setCatList(catRes.data.categories || []);
+            }
+
+            // 3. 如果当前存在 channel_cat_id，反查该 ID 的大类和类目名以便下拉框回显
+            if (currentCatId) {
+                const queryResp = await fetch(`/api/system/openapi_categories?cat_id=${encodeURIComponent(currentCatId)}`);
+                const queryRes = await queryResp.json();
+                if (queryRes.status === 'success' && queryRes.data.categories && queryRes.data.categories.length > 0) {
+                    const matchedCat = queryRes.data.categories[0];
+                    setSelectedCat(currentCatId);
+                    setSelectedGroup(matchedCat.group || "");
+                    setIsCustomCat(false);
+                    
+                    // 补充该大类下的子类目列表到下拉列表中
+                    if (matchedCat.group) {
+                        const subResp = await fetch(`/api/system/openapi_categories?group=${encodeURIComponent(matchedCat.group)}`);
+                        const subRes = await subResp.json();
+                        if (subRes.status === 'success') {
+                            setCatList(subRes.data.categories || []);
+                        }
+                    }
+                } else {
+                    setSelectedCat("custom");
+                    setIsCustomCat(true);
+                }
+            } else {
+                if (catRes.status === 'success' && catRes.data.categories && catRes.data.categories.length > 0) {
+                    setSelectedCat(catRes.data.categories[0].id);
+                    setSelectedGroup(catRes.data.categories[0].group || "");
+                }
+            }
+
+            return loadedRegions;
+        } catch (err) {
+            console.error("Failed to initialize metadata:", err);
+            return [];
+        }
+    };
+
+    const searchCategories = async (groupName, queryStr) => {
+        try {
+            let url = '/api/system/openapi_categories';
+            const params = [];
+            if (groupName) params.push(`group=${encodeURIComponent(groupName)}`);
+            if (queryStr) params.push(`query=${encodeURIComponent(queryStr)}`);
+            if (params.length > 0) {
+                url += '?' + params.join('&');
+            }
+            
+            const resp = await fetch(url);
+            const res = await resp.json();
+            if (res.status === 'success') {
+                setCatList(res.data.categories || []);
+            }
+        } catch (err) {
+            console.error("Failed to query categories:", err);
+        }
+    };
+
+    const handleGroupChange = (groupName) => {
+        setSelectedGroup(groupName);
+        searchCategories(groupName, catQuery);
+    };
+
+    const handleQueryChange = (val) => {
+        setCatQuery(val);
+        searchCategories(selectedGroup, val);
+    };
+
+    const handleProvChange = (pCode) => {
+        setSelectedProv(pCode);
+        const prov = regions.find(p => p.code.toString() === pCode);
+        if (prov && prov.cities.length > 0) {
+            const firstCity = prov.cities[0];
+            setSelectedCity(firstCity.code.toString());
+            if (firstCity.districts.length > 0) {
+                const firstDist = firstCity.districts[0];
+                setSelectedDist(firstDist.code.toString());
+                
+                setCurrentOpenapiAccount(prev => ({
+                    ...prev,
+                    default_config: {
+                        ...prev.default_config,
+                        province: prov.code,
+                        city: firstCity.code,
+                        district: firstDist.code
+                    }
+                }));
+            }
+        }
+    };
+
+    const handleCityChange = (cCode) => {
+        setSelectedCity(cCode);
+        const prov = regions.find(p => p.code.toString() === selectedProv);
+        const city = prov ? prov.cities.find(c => c.code.toString() === cCode) : null;
+        if (city && city.districts.length > 0) {
+            const firstDist = city.districts[0];
+            setSelectedDist(firstDist.code.toString());
+            
+            setCurrentOpenapiAccount(prev => ({
+                ...prev,
+                default_config: {
+                    ...prev.default_config,
+                    city: city.code,
+                    district: firstDist.code
+                }
+            }));
+        }
+    };
+
+    const handleDistChange = (dCode) => {
+        setSelectedDist(dCode);
+        setCurrentOpenapiAccount(prev => ({
+            ...prev,
+            default_config: {
+                ...prev.default_config,
+                district: parseInt(dCode) || 0
+            }
+        }));
+    };
+
+    const handleCatChange = (catId) => {
+        if (catId === "custom") {
+            setIsCustomCat(true);
+            setSelectedCat("custom");
+        } else {
+            setIsCustomCat(false);
+            setSelectedCat(catId);
+            setCurrentOpenapiAccount(prev => ({
+                ...prev,
+                default_config: {
+                    ...prev.default_config,
+                    channel_cat_id: catId
+                }
+            }));
+        }
+    };
+
+    const handleCustomCatChange = (val) => {
+        setCurrentOpenapiAccount(prev => ({
+            ...prev,
+            default_config: {
+                ...prev.default_config,
+                channel_cat_id: val
+            }
+        }));
+    };
+
+    const fetchConfigs = async ({ silent = false } = {}) => {
+        try {
+            if (!silent) {
+                setLoading(true);
+            }
+            const resp = await fetch('/api/system/configs');
+            const res = await resp.json();
+            if (res.status === 'success') {
+                const data = res.data;
+                const rawOpenapi = data.openapi || {};
+                const accounts = (rawOpenapi.accounts || []).map((account, idx) => ({
+                    id: account.id || `account-${idx + 1}`,
+                    name: account.name || `闲鱼账号 ${idx + 1}`,
+                    base_url: account.base_url || 'https://open.goofish.pro',
+                    appid: account.appid || '',
+                    app_secret: account.app_secret || '',
+                    show_secret: false,
+                    state_file: account.state_file || '',
+                    session_report: account.session_report || {},
+                    default_config: {
+                        user_name: account.default_config?.user_name || account.session_report?.account_name || '',
+                        province: parseInt(account.default_config?.province) || 110000,
+                        city: parseInt(account.default_config?.city) || 110100,
+                        district: parseInt(account.default_config?.district) || 110101,
+                        item_biz_type: parseInt(account.default_config?.item_biz_type) || 2,
+                        sp_biz_type: parseInt(account.default_config?.sp_biz_type) || 2,
+                        channel_cat_id: account.default_config?.channel_cat_id || '',
+                        stuff_status: parseInt(account.default_config?.stuff_status) || 100,
+                        express_fee: parseInt(account.default_config?.express_fee) || 0
+                    }
+                }));
+                const openapiData = {
+                    active_account_id: rawOpenapi.active_account_id || accounts[0]?.id || 'account-1',
+                    accounts: accounts.length ? accounts : [createOpenapiAccount(1)]
+                };
+                setConfigs({ openapi: openapiData });
+                setPersistedOpenapiAccountIds(openapiData.accounts.map(item => item.id));
+                
+                // 初始化加载动态元数据并在完成后回显示发货地址省市区
+                const activeAccount = openapiData.accounts.find(item => item.id === openapiData.active_account_id) || openapiData.accounts[0];
+                setXianyuLoginStatus(activeAccount?.session_report || {
+                    account_name: activeAccount?.default_config?.user_name || '',
+                    is_usable: false
+                });
+                await initMetadata(activeAccount?.default_config?.channel_cat_id);
+                
+                if (data.llm && data.llm.length > 0) {
+                    const mapped = data.llm.map(item => ({
+                        api_key: item.api_key || '',
+                        base_url: item.base_url || '',
+                        models_str: (item.models || []).join(', ')
+                    }));
+                    setLlmList(mapped);
+                } else {
+                    setLlmList([{ api_key: '', base_url: '', models_str: '' }]);
+                }
+
+                if (data.crawl) {
+                    setCrawlConfig({
+                        source_limit_1688: parseInt(data.crawl.source_limit_1688) || 10,
+                        source_filter_models: data.crawl.source_filter_models || []
+                    });
+                }
+                setError(null);
+            } else {
+                setError(res.msg || '加载配置失败');
+            }
+        } catch (err) {
+            setError('获取配置网络请求失败');
+        } finally {
+            if (!silent) {
+                setLoading(false);
+            }
+        }
+    };
+
+    useEffect(() => {
+        fetchConfigs();
+    }, []);
+
+    useEffect(() => {
+        fetchXianyuLoginStatus();
+        const pollInterval = isXianyuLoggingIn ? 1000 : 3000;
+        const timer = setInterval(() => {
+            fetchXianyuLoginStatus();
+        }, pollInterval);
+
+        return () => clearInterval(timer);
+    }, [isXianyuLoggingIn, activeOpenapiAccountId, persistedOpenapiAccountIds.join('|')]);
+
+    useEffect(() => {
+        const cfg = currentOpenapiAccount?.default_config;
+        if (!cfg) return;
+
+        initMetadata(cfg.channel_cat_id || '');
+        if (regions.length === 0) return;
+
+        const provCode = parseInt(cfg.province) || 0;
+        const cityCode = parseInt(cfg.city) || 0;
+        const distCode = parseInt(cfg.district) || 0;
+        const foundProv = regions.find(p => p.code === provCode);
+        const foundCity = foundProv ? foundProv.cities.find(c => c.code === cityCode) : null;
+        const foundDist = foundCity ? foundCity.districts.find(d => d.code === distCode) : null;
+
+        if (foundProv && foundCity && foundDist) {
+            setSelectedProv(provCode.toString());
+            setSelectedCity(cityCode.toString());
+            setSelectedDist(distCode.toString());
+            setIsCustomRegion(false);
+        } else {
+            setIsCustomRegion(true);
+        }
+        setSelectedCat(cfg.channel_cat_id || '');
+    }, [currentOpenapiAccount?.id, regions.length]);
+
+    useEffect(() => {
+        const wasLoggingIn = prevXianyuLoggingInRef.current;
+        const isNowUsable = !!xianyuLoginStatus?.is_usable;
+
+        if (xianyuLoginFlowRef.current && wasLoggingIn && !isXianyuLoggingIn) {
+            if (isNowUsable) {
+                setMessage(null);
+                setXianyuLoginSuccessMessage(`闲鱼账号登录成功，当前会话已同步${xianyuLoginStatus?.account_name ? `：${xianyuLoginStatus.account_name}` : ''}`);
+                setError(null);
+            } else {
+                setMessage(null);
+            }
+            xianyuLoginFlowRef.current = false;
+        }
+
+        prevXianyuLoggingInRef.current = isXianyuLoggingIn;
+    }, [isXianyuLoggingIn, xianyuLoginStatus]);
+
+    useEffect(() => {
+        if (!message && !error) return undefined;
+
+        if (noticeTimerRef.current) {
+            clearTimeout(noticeTimerRef.current);
+        }
+
+        noticeTimerRef.current = setTimeout(() => {
+            setMessage(null);
+            setError(null);
+            noticeTimerRef.current = null;
+        }, error ? 3200 : 2200);
+
+        return () => {
+            if (noticeTimerRef.current) {
+                clearTimeout(noticeTimerRef.current);
+                noticeTimerRef.current = null;
+            }
+        };
+    }, [message, error]);
+
+    useEffect(() => {
+        if (!xianyuLoginSuccessMessage) return undefined;
+
+        if (xianyuLoginSuccessTimerRef.current) {
+            clearTimeout(xianyuLoginSuccessTimerRef.current);
+        }
+
+        xianyuLoginSuccessTimerRef.current = setTimeout(() => {
+            setXianyuLoginSuccessMessage(null);
+            xianyuLoginSuccessTimerRef.current = null;
+        }, 2200);
+
+        return () => {
+            if (xianyuLoginSuccessTimerRef.current) {
+                clearTimeout(xianyuLoginSuccessTimerRef.current);
+                xianyuLoginSuccessTimerRef.current = null;
+            }
+        };
+    }, [xianyuLoginSuccessMessage]);
+
+    const handleAddLlm = () => {
+        setLlmList([...llmList, { api_key: '', base_url: '', models_str: '' }]);
+    };
+
+    const handleRemoveLlm = (index) => {
+        const copy = [...llmList];
+        copy.splice(index, 1);
+        setLlmList(copy);
+    };
+
+    const handleLlmChange = (index, field, value) => {
+        const copy = [...llmList];
+        copy[index][field] = value;
+        setLlmList(copy);
+    };
+
+    const handleSave = async (e) => {
+        e?.preventDefault?.();
+        setSaving(true);
+        setMessage(null);
+        setError(null);
+
+        const updatedLlm = llmList.map(item => ({
+            api_key: item.api_key.trim ? item.api_key.trim() : item.api_key,
+            base_url: item.base_url.trim ? item.base_url.trim() : item.base_url,
+            models: item.models_str.split(',').map(m => m.trim()).filter(m => m)
+        })).filter(item => item.api_key || item.base_url);
+
+        if (updatedLlm.length === 0) {
+            setError('请至少配置一个有效的大模型接口密钥');
+            setSaving(false);
+            return;
+        }
+
+        const payload = {
+            llm: updatedLlm,
+            openapi: configs.openapi,
+            crawl: crawlConfig
+        };
+
+        try {
+            const resp = await fetch('/api/system/configs', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+            const res = await resp.json();
+            if (res.status === 'success') {
+                setMessage(res.msg || '配置已成功保存并同步！');
+                fetchConfigs({ silent: true });
+            } else {
+                setError(res.msg || '保存配置失败');
+            }
+        } catch (err) {
+            setError('网络连接异常，保存失败');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    if (loading) {
+        return (
+            <div className="flex flex-col items-center justify-center h-[50vh] gap-4">
+                <span className="material-symbols-outlined text-[48px] text-primary animate-spin">autorenew</span>
+                <p className="font-sans text-sm text-secondary">正在读取系统配置参数...</p>
+            </div>
+        );
+    }
+
+    const systemNotice = error
+        ? {
+            title: '操作失败',
+            text: error,
+            icon: 'error',
+            iconWrapClass: 'bg-error/12 text-error',
+            titleClass: 'text-red-700',
+            textClass: 'text-red-600',
+            panelClass: 'border border-error/20 bg-[radial-gradient(circle_at_top,_rgba(239,68,68,0.14),_transparent_62%),linear-gradient(135deg,#fff1f2,#ffffff_58%)]'
+        }
+        : message
+            ? {
+                title: '操作成功',
+                text: message,
+                icon: 'check_circle',
+                iconWrapClass: 'bg-success/12 text-success',
+                titleClass: 'text-slate-900',
+                textClass: 'text-slate-600',
+                panelClass: 'border border-success/20 bg-[radial-gradient(circle_at_top,_rgba(34,197,94,0.16),_transparent_62%),linear-gradient(135deg,#f0fdf4,#ffffff_58%)]'
+            }
+            : null;
+
+    return (
+        <div className="view-content max-w-4xl">
+            {xianyuLoginSuccessMessage && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/72 backdrop-blur-sm px-6">
+                    <div className="w-full max-w-lg rounded-[28px] border border-success/25 bg-white shadow-[0_32px_120px_rgba(15,23,42,0.35)] overflow-hidden animate-[fadeIn_180ms_ease-out]">
+                        <div className="bg-[radial-gradient(circle_at_top,_rgba(34,197,94,0.18),_transparent_60%),linear-gradient(135deg,#f0fdf4,#ffffff_58%)] px-8 py-12 text-center">
+                            <div className="mx-auto mb-5 flex h-20 w-20 items-center justify-center rounded-full bg-success/12 text-success">
+                                <span className="material-symbols-outlined text-[42px]">verified</span>
+                            </div>
+                            <h2 className="font-sans text-[28px] font-bold text-slate-900">登录成功</h2>
+                            <p className="mt-3 font-sans text-sm leading-6 text-slate-600">{xianyuLoginSuccessMessage}</p>
+                            <div className="mt-6 flex items-center justify-center gap-2 text-[11px] font-sans text-slate-400">
+                                <span className="inline-block h-1.5 w-1.5 rounded-full bg-success animate-pulse"></span>
+                                <span>会自动返回当前页面</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {systemNotice && (
+                <div className="fixed inset-0 z-40 flex items-center justify-center bg-slate-950/44 backdrop-blur-[3px] px-6 pointer-events-none">
+                    <div className={`w-full max-w-md rounded-[26px] bg-white shadow-[0_28px_100px_rgba(15,23,42,0.28)] overflow-hidden animate-[fadeIn_180ms_ease-out] ${systemNotice.panelClass}`}>
+                        <div className="px-8 py-10 text-center">
+                            <div className={`mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full ${systemNotice.iconWrapClass}`}>
+                                <span className="material-symbols-outlined text-[34px]">{systemNotice.icon}</span>
+                            </div>
+                            <h3 className={`font-sans text-[24px] font-bold ${systemNotice.titleClass}`}>{systemNotice.title}</h3>
+                            <p className={`mt-3 font-sans text-sm leading-6 ${systemNotice.textClass}`}>{systemNotice.text}</p>
+                            <div className="mt-5 flex items-center justify-center gap-2 text-[11px] font-sans text-slate-400">
+                                <span className={`inline-block h-1.5 w-1.5 rounded-full ${error ? 'bg-error' : 'bg-success'} animate-pulse`}></span>
+                                <span>提示会自动关闭</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            <header className="mb-6 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
+                <div>
+                    <h1 className="font-sans text-2xl font-bold text-on-surface">系统参数配置</h1>
+                    <p className="font-sans text-sm text-secondary mt-1">全局管理大模型服务密钥及闲鱼 OpenAPI 的各类配置。</p>
+                </div>
+                <div className="flex justify-end gap-3 md:shrink-0">
+                    <button
+                        type="button"
+                        onClick={fetchConfigs}
+                        className="px-5 py-2.5 bg-surface-container-high border border-border-hairline hover:bg-surface-container-highest text-on-surface rounded-xl font-sans text-xs font-semibold transition-colors active:scale-95 duration-100"
+                    >
+                        放弃更改
+                    </button>
+                    <button
+                        type="button"
+                        onClick={handleSave}
+                        disabled={saving}
+                        className="px-6 py-2.5 bg-primary hover:bg-primary-hover disabled:bg-primary/50 text-on-primary rounded-xl font-sans text-xs font-bold transition-colors shadow-lg shadow-primary/20 flex items-center gap-1.5 active:scale-95 duration-100"
+                    >
+                        {saving ? (
+                            <>
+                                <span className="material-symbols-outlined text-[16px] animate-spin">autorenew</span>
+                                <span>正在同步保存...</span>
+                            </>
+                        ) : (
+                            <>
+                                <span className="material-symbols-outlined text-[16px]">save</span>
+                                <span>保存并同步配置</span>
+                            </>
+                        )}
+                    </button>
+                </div>
+            </header>
+
+            <form id="system-settings-form" onSubmit={handleSave} className="space-y-6">
+                {/* 1. 大模型配置 Bento 卡片 */}
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow space-y-6">
+                    <div className="flex justify-between items-center border-b border-border-hairline pb-2.5">
+                        <div 
+                            className="flex items-center gap-2 cursor-pointer select-none group/title"
+                            onClick={() => setLlmCollapsed(!llmCollapsed)}
+                        >
+                            <span className="material-symbols-outlined text-primary">generating_tokens</span>
+                            <span className="font-sans text-sm font-bold text-on-surface group-hover/title:text-primary transition-colors">大模型接口设置 (LLM API)</span>
+                            <span className="material-symbols-outlined text-secondary text-[20px] transition-transform duration-200" style={{ transform: llmCollapsed ? 'rotate(0deg)' : 'rotate(180deg)' }}>
+                                expand_more
+                            </span>
+                        </div>
+                        
+                        <div className="flex items-center gap-3">
+                            {!llmCollapsed && (
+                                <button 
+                                    type="button"
+                                    onClick={handleAddLlm}
+                                    className="flex items-center gap-1 px-3 py-1.5 bg-primary/10 hover:bg-primary/20 text-primary rounded-lg font-sans text-xs font-semibold active:scale-95 transition-all"
+                                >
+                                    <span className="material-symbols-outlined text-[14px]">add</span>
+                                    <span>添加模型接口</span>
+                                </button>
+                            )}
+                        </div>
+                    </div>
+
+                    {!llmCollapsed && (
+                        <div className="space-y-6">
+                            {llmList.map((item, idx) => (
+                                <div key={idx} className="p-4 rounded-xl bg-surface-container-low border border-border-hairline relative group ambient-shadow hover:border-primary/40 transition-colors">
+                                    {llmList.length > 1 && (
+                                        <button 
+                                            type="button"
+                                            onClick={() => handleRemoveLlm(idx)}
+                                            className="absolute top-3 right-3 text-secondary hover:text-error transition-colors flex items-center justify-center cursor-pointer"
+                                            title="删除此接口"
+                                        >
+                                            <span className="material-symbols-outlined text-[18px]">delete</span>
+                                        </button>
+                                    )}
+
+                                    <div className="font-sans text-xs font-bold text-primary mb-3 flex items-center gap-1.5">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-primary"></span>
+                                        <span>接口 #{idx + 1}</span>
+                                    </div>
+
+                                    <div className="space-y-4">
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                            <div className="space-y-1">
+                                                <label className="block font-sans text-[10px] text-secondary font-semibold">API 代理端点 (Base URL)</label>
+                                                <input 
+                                                    type="text"
+                                                    value={item.base_url}
+                                                    onChange={(e) => handleLlmChange(idx, 'base_url', e.target.value)}
+                                                    placeholder="https://api.deepseek.com/v1"
+                                                    className="w-full bg-surface-container-lowest border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                                    required
+                                                />
+                                            </div>
+                                            <div className="space-y-1">
+                                                <label className="block font-sans text-[10px] text-secondary font-semibold">API 调用密钥 (API Key)</label>
+                                                <div className="relative">
+                                                    <input 
+                                                        type={item.show_key ? 'text' : 'password'}
+                                                        value={item.api_key}
+                                                        onChange={(e) => handleLlmChange(idx, 'api_key', e.target.value)}
+                                                        placeholder="请填写 API 密钥"
+                                                        className="w-full bg-surface-container-lowest border border-border-hairline text-on-surface text-xs rounded-lg pl-3 pr-10 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                                        required
+                                                    />
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleLlmChange(idx, 'show_key', !item.show_key)}
+                                                        className="absolute inset-y-0 right-0 flex items-center pr-3 text-secondary hover:text-primary transition-colors cursor-pointer"
+                                                        title={item.show_key ? '隐藏密钥' : '显示密钥'}
+                                                    >
+                                                        <span className="material-symbols-outlined text-[18px]">
+                                                            {item.show_key ? 'visibility' : 'visibility_off'}
+                                                        </span>
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        </div>
+                                        <div className="space-y-1">
+                                            <label className="block font-sans text-[10px] text-secondary font-semibold">支持的模型列表 (逗号隔开)</label>
+                                            <input 
+                                                type="text"
+                                                value={item.models_str}
+                                                onChange={(e) => handleLlmChange(idx, 'models_str', e.target.value)}
+                                                placeholder="deepseek-chat, deepseek-reasoner"
+                                                className="w-full bg-surface-container-lowest border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                                required
+                                            />
+                                        </div>
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+                    )}
+                </div>
+
+                {/* 3. 闲鱼 OpenAPI 配置 Bento 卡片 */}
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow space-y-6">
+                    <div className="flex justify-between items-center border-b border-border-hairline pb-2.5 mb-4">
+                        <div 
+                            className="flex items-center gap-2 cursor-pointer select-none group/title"
+                            onClick={() => setOpenapiCollapsed(!openapiCollapsed)}
+                        >
+                            <span className="material-symbols-outlined text-primary">travel_explore</span>
+                            <span className="font-sans text-sm font-bold text-on-surface group-hover/title:text-primary transition-colors">闲鱼 OpenAPI 与默认发布项配置</span>
+                            <span className="material-symbols-outlined text-secondary text-[20px] transition-transform duration-200" style={{ transform: openapiCollapsed ? 'rotate(0deg)' : 'rotate(180deg)' }}>
+                                expand_more
+                            </span>
+                        </div>
+                    </div>
+
+                    {!openapiCollapsed && (
+                        <div className="space-y-4">
+                            <div className="space-y-3">
+                                <div className="flex flex-wrap items-center gap-2 pb-1">
+                                {(configs.openapi.accounts || []).map((account, idx) => {
+                                    const isActive = account.id === activeOpenapiAccountId;
+                                    return (
+                                        <div
+                                            key={account.id}
+                                            className={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-[11px] font-sans ${isActive ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border-hairline bg-surface-container-low text-secondary'}`}
+                                        >
+                                            <button
+                                                type="button"
+                                                onClick={() => handleOpenapiAccountSwitch(account.id)}
+                                                className="font-semibold cursor-pointer"
+                                            >
+                                                {account.name || `闲鱼账号 ${idx + 1}`}
+                                            </button>
+                                            {(configs.openapi.accounts || []).length > 1 && (
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleRemoveOpenapiAccount(account.id)}
+                                                    className="material-symbols-outlined text-[14px] cursor-pointer opacity-70 hover:opacity-100"
+                                                    title="删除账号"
+                                                >
+                                                    close
+                                                </button>
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                                <button
+                                    type="button"
+                                    onClick={handleAddOpenapiAccount}
+                                    className="px-3 py-1.5 rounded-full border border-dashed border-primary/35 text-primary text-[11px] font-sans font-semibold hover:bg-primary/5 transition-colors"
+                                >
+                                    + 新增账号
+                                </button>
+                                </div>
+                                <h4 className="font-sans text-sm font-bold text-on-surface">闲管家OpenAPI配置</h4>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div className="space-y-1">
+                                    <label className="block font-sans text-xs text-secondary font-semibold">账号备注</label>
+                                    <input 
+                                        type="text"
+                                        value={currentOpenapiAccount.name || ''}
+                                        onChange={(e) => setCurrentOpenapiAccount(prev => ({ ...prev, name: e.target.value }))}
+                                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans"
+                                        placeholder="例如：主账号 / 店铺 A"
+                                    />
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="block font-sans text-xs text-secondary font-semibold">开放平台地址 (Base URL)</label>
+                                    <input 
+                                        type="text"
+                                        value={currentOpenapiAccount.base_url || ''}
+                                        onChange={(e) => setCurrentOpenapiAccount(prev => ({ ...prev, base_url: e.target.value }))}
+                                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                        required
+                                    />
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="block font-sans text-xs text-secondary font-semibold">应用公钥 (AppID / App Key)</label>
+                                    <input 
+                                        type="text"
+                                        value={currentOpenapiAccount.appid || ''}
+                                        onChange={(e) => setCurrentOpenapiAccount(prev => ({ ...prev, appid: e.target.value }))}
+                                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                        required
+                                    />
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="block font-sans text-xs text-secondary font-semibold">应用私钥 (App Secret)</label>
+                                    <div className="relative">
+                                        <input 
+                                            type={currentOpenapiAccount.show_secret ? 'text' : 'password'}
+                                            value={currentOpenapiAccount.app_secret || ''}
+                                            onChange={(e) => setCurrentOpenapiAccount(prev => ({ ...prev, app_secret: e.target.value }))}
+                                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg pl-3 pr-10 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                            required
+                                        />
+                                        <button
+                                            type="button"
+                                            onClick={() => setCurrentOpenapiAccount(prev => ({ ...prev, show_secret: !prev.show_secret }))}
+                                            className="absolute inset-y-0 right-0 flex items-center pr-3 text-secondary hover:text-primary transition-colors cursor-pointer"
+                                            title={currentOpenapiAccount.show_secret ? '隐藏密钥' : '显示密钥'}
+                                        >
+                                            <span className="material-symbols-outlined text-[18px]">
+                                                {currentOpenapiAccount.show_secret ? 'visibility' : 'visibility_off'}
+                                            </span>
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="border-t border-border-hairline/80 pt-4 mb-4">
+                                <h4 className="font-sans text-sm font-bold text-on-surface mb-3">闲鱼账号信息</h4>
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div className="space-y-1">
+                                        <label className="block font-sans text-xs text-secondary font-semibold">闲鱼会员名</label>
+                                        <div className="w-[271px] h-[34px] bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 flex items-center">
+                                            <div className="min-w-0 flex items-center gap-2 text-xs">
+                                                <div className="font-mono text-on-surface truncate">
+                                                    {xianyuLoginStatus?.account_name || "未从当前 Session 识别到账号"}
+                                                </div>
+                                                <div className="text-[10px] text-secondary flex items-center gap-1.5 font-sans shrink-0">
+                                                    {xianyuLoginStatus?.is_usable ? (
+                                                        <>
+                                                            <span className="w-1.5 h-1.5 rounded-full bg-success"></span>
+                                                            <span className="text-success font-semibold">登录正常 (已同步)</span>
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <span className="w-1.5 h-1.5 rounded-full bg-error animate-ping"></span>
+                                                            <span className="text-error font-semibold">未检测到登录 (或凭证已过期)</span>
+                                                        </>
+                                                    )}
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="block font-sans text-xs text-secondary font-semibold opacity-0 select-none">登录操作</label>
+                                        <div className="min-h-[38px] flex items-center">
+                                            {isXianyuLoggingIn ? (
+                                                <button
+                                                    type="button"
+                                                    disabled
+                                                    className="px-3 py-1.5 bg-secondary/10 text-secondary text-[11px] font-bold rounded-lg flex items-center gap-1 opacity-70 cursor-not-allowed select-none"
+                                                >
+                                                    <span className="material-symbols-outlined text-[14px] animate-spin">sync</span>
+                                                    <span>等待登录...</span>
+                                                </button>
+                                            ) : (
+                                                <button
+                                                    type="button"
+                                                    onClick={handleXianyuLoginTrigger}
+                                                    className="px-3 py-1.5 bg-primary hover:bg-primary-hover text-on-primary text-[11px] font-bold rounded-lg flex items-center gap-1 active:scale-95 transition-all cursor-pointer"
+                                                >
+                                                    <span className="material-symbols-outlined text-[14px]">open_in_new</span>
+                                                    <span>{xianyuLoginStatus?.is_usable ? "重新登录" : "立即登录"}</span>
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+                                    <div className="hidden md:block"></div>
+                                </div>
+                            </div>
+
+                            <div className="border-t border-border-hairline/80 pt-4">
+                                <h4 className="font-sans text-sm font-bold text-on-surface mb-3">闲鱼宝贝发布默认参数</h4>
+                                
+                                {isCustomRegion ? (
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                                        <div className="space-y-1">
+                                            <label className="block font-sans text-xs text-secondary font-semibold">发货省份代码</label>
+                                            <input 
+                                                type="number"
+                                                value={currentOpenapiAccount.default_config?.province}
+                                                onChange={(e) => setCurrentOpenapiAccount(prev => ({
+                                                    ...prev,
+                                                    default_config: { ...prev.default_config, province: parseInt(e.target.value) || 0 }
+                                                }))}
+                                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                                required
+                                            />
+                                        </div>
+                                        <div className="space-y-1">
+                                            <label className="block font-sans text-xs text-secondary font-semibold">发货城市代码</label>
+                                            <input 
+                                                type="number"
+                                                value={currentOpenapiAccount.default_config?.city}
+                                                onChange={(e) => setCurrentOpenapiAccount(prev => ({
+                                                    ...prev,
+                                                    default_config: { ...prev.default_config, city: parseInt(e.target.value) || 0 }
+                                                }))}
+                                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                                required
+                                            />
+                                        </div>
+                                        <div className="space-y-1">
+                                            <div className="flex justify-between items-center">
+                                                <label className="block font-sans text-xs text-secondary font-semibold">发货区县代码</label>
+                                                <button 
+                                                    type="button" 
+                                                    onClick={() => {
+                                                        setIsCustomRegion(false);
+                                                        setSelectedProv("110000");
+                                                        setSelectedCity("110100");
+                                                        setSelectedDist("110101");
+                                                        setCurrentOpenapiAccount(prev => ({
+                                                            ...prev,
+                                                            default_config: {
+                                                                ...prev.default_config,
+                                                                province: 110000,
+                                                                city: 110100,
+                                                                district: 110101
+                                                            }
+                                                        }));
+                                                    }}
+                                                    className="text-[10px] text-primary hover:underline cursor-pointer"
+                                                >
+                                                    返回选择
+                                                </button>
+                                            </div>
+                                            <input 
+                                                type="number"
+                                                value={currentOpenapiAccount.default_config?.district}
+                                                onChange={(e) => setCurrentOpenapiAccount(prev => ({
+                                                    ...prev,
+                                                    default_config: { ...prev.default_config, district: parseInt(e.target.value) || 0 }
+                                                }))}
+                                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                                required
+                                            />
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+                                        <div className="space-y-1">
+                                            <label className="block font-sans text-xs text-secondary font-semibold">发货省份</label>
+                                            <select
+                                                value={selectedProv}
+                                                onChange={(e) => {
+                                                    if (e.target.value === "custom") {
+                                                        setIsCustomRegion(true);
+                                                    } else {
+                                                        handleProvChange(e.target.value);
+                                                    }
+                                                }}
+                                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans cursor-pointer"
+                                            >
+                                                {regions.map(p => (
+                                                    <option key={p.code} value={p.code}>{p.name}</option>
+                                                ))}
+                                                <option value="custom">[手动输入 Adcode 代码]</option>
+                                            </select>
+                                        </div>
+                                        <div className="space-y-1">
+                                            <label className="block font-sans text-xs text-secondary font-semibold">发货城市</label>
+                                            <select
+                                                value={selectedCity}
+                                                onChange={(e) => handleCityChange(e.target.value)}
+                                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans cursor-pointer"
+                                            >
+                                                {(regions.find(p => p.code.toString() === selectedProv)?.cities || []).map(c => (
+                                                    <option key={c.code} value={c.code}>{c.name}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                        <div className="space-y-1">
+                                            <label className="block font-sans text-xs text-secondary font-semibold">发货区县</label>
+                                            <select
+                                                value={selectedDist}
+                                                onChange={(e) => handleDistChange(e.target.value)}
+                                                className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans cursor-pointer"
+                                            >
+                                                {((regions.find(p => p.code.toString() === selectedProv)?.cities || []).find(c => c.code.toString() === selectedCity)?.districts || []).map(d => (
+                                                    <option key={d.code} value={d.code}>{d.name}</option>
+                                                ))}
+                                            </select>
+                                        </div>
+                                    </div>
+                                )}
+
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div className="space-y-1">
+                                        <label className="block font-sans text-xs text-secondary font-semibold">默认运费 (分)</label>
+                                        <input 
+                                            type="number"
+                                            value={currentOpenapiAccount.default_config?.express_fee}
+                                            onChange={(e) => setCurrentOpenapiAccount(prev => ({
+                                                ...prev,
+                                                default_config: { ...prev.default_config, express_fee: parseInt(e.target.value) || 0 }
+                                            }))}
+                                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                        />
+                                    </div>
+                                    <div className="hidden md:block"></div>
+                                    <div className="hidden md:block"></div>
+                                </div>
+                            </div>
+
+                        </div>
+                    )}
+                </div>
+
+                {/* 4. 商品爬取与筛选配置 Bento 卡片 */}
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow space-y-6 mt-6">
+                    <div className="flex justify-between items-center border-b border-border-hairline pb-2.5">
+                        <div 
+                            className="flex items-center gap-2 cursor-pointer select-none group/title"
+                            onClick={() => setCrawlCollapsed(!crawlCollapsed)}
+                        >
+                            <span className="material-symbols-outlined text-primary">travel_explore</span>
+                            <span className="font-sans text-sm font-bold text-on-surface group-hover/title:text-primary transition-colors">商品爬取与筛选配置</span>
+                            <span className="material-symbols-outlined text-secondary text-[20px] transition-transform duration-200" style={{ transform: crawlCollapsed ? 'rotate(0deg)' : 'rotate(180deg)' }}>
+                                expand_more
+                            </span>
+                        </div>
+                    </div>
+
+                    {!crawlCollapsed && (
+                        <div className="space-y-6">
+                            {/* 1688 商品爬取数量 */}
+                            <div className="space-y-2">
+                                <div className="flex justify-between items-center">
+                                    <label className="font-sans text-xs text-secondary font-semibold">1688 商品爬取数量</label>
+                                    <span className="font-mono text-xs font-bold text-primary bg-primary/10 px-2 py-0.5 rounded">
+                                        {crawlConfig.source_limit_1688} 条
+                                    </span>
+                                </div>
+                                <p className="font-sans text-[11px] text-secondary leading-relaxed">
+                                    控制每个闲鱼爆款商品去 1688 抓取的最大候选商品深度（合理区间：5 - 50）。数值越大扫描更彻底，但也会消耗更多抓取时间与资源。
+                                </p>
+                                <div className="flex items-center gap-4">
+                                    <input 
+                                        type="range"
+                                        min="5"
+                                        max="50"
+                                        step="1"
+                                        value={crawlConfig.source_limit_1688}
+                                        onChange={(e) => setCrawlConfig(prev => ({ ...prev, source_limit_1688: parseInt(e.target.value) || 10 }))}
+                                        className="flex-1 h-1.5 bg-surface-container rounded-lg appearance-none cursor-pointer accent-primary"
+                                    />
+                                    <input 
+                                        type="number"
+                                        min="5"
+                                        max="50"
+                                        value={crawlConfig.source_limit_1688}
+                                        onChange={(e) => {
+                                            let val = parseInt(e.target.value) || 10;
+                                            if (val < 5) val = 5;
+                                            if (val > 50) val = 50;
+                                            setCrawlConfig(prev => ({ ...prev, source_limit_1688: val }));
+                                        }}
+                                        className="w-16 bg-surface-container-low border border-border-hairline text-on-surface text-center font-mono text-xs rounded-lg px-2 py-1 focus:outline-none focus:border-primary"
+                                    />
+                                </div>
+                            </div>
+
+                            {/* 商品筛选使用的模型 */}
+                            <div className="space-y-3 pt-2">
+                                <label className="block font-sans text-xs text-secondary font-semibold">商品相关性筛选模型（支持多选轮询）</label>
+                                <p className="font-sans text-[11px] text-secondary leading-relaxed">
+                                    多选大模型后，系统将对选中的模型做全局负载轮询（Round-Robin），以摊平单个模型接口 of Token 额度消耗。若为空，则默认轮询大模型接口设置下的全部有效模型。
+                                </p>
+                                
+                                {availableModels.length === 0 ? (
+                                    <div className="p-4 bg-error/5 border border-error/15 rounded-xl flex items-center gap-3 text-error">
+                                        <span className="material-symbols-outlined text-[20px]">warning</span>
+                                        <div className="font-sans text-xs leading-relaxed">
+                                            未在上方大模型接口中检测到已保存的候选模型。请在 <strong>“大模型接口设置”</strong> 中先添加并保存至少一个模型，然后在此多选。
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-3">
+                                        {availableModels.map(modelName => {
+                                            const isChecked = crawlConfig.source_filter_models.includes(modelName);
+                                            return (
+                                                <div 
+                                                    key={modelName}
+                                                    onClick={() => {
+                                                        const currentList = [...crawlConfig.source_filter_models];
+                                                        if (isChecked) {
+                                                            const idx = currentList.indexOf(modelName);
+                                                            if (idx !== -1) currentList.splice(idx, 1);
+                                                        } else {
+                                                            currentList.push(modelName);
+                                                        }
+                                                        setCrawlConfig(prev => ({ ...prev, source_filter_models: currentList }));
+                                                    }}
+                                                    className={`p-3 border rounded-xl flex items-center gap-2.5 transition-all select-none cursor-pointer scale-100 active:scale-95 ${
+                                                        isChecked 
+                                                        ? 'bg-primary/5 border-primary/45 text-primary shadow-sm shadow-primary/5' 
+                                                        : 'bg-surface-container-low border-border-hairline hover:bg-surface-container hover:border-secondary-container text-on-surface'
+                                                    }`}
+                                                >
+                                                    <span className={`material-symbols-outlined text-[18px] ${isChecked ? 'text-primary' : 'text-secondary'}`}>
+                                                        {isChecked ? 'check_box' : 'check_box_outline_blank'}
+                                                    </span>
+                                                    <span className="font-sans text-xs font-semibold truncate leading-none" title={modelName}>{modelName}</span>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </form>
+        </div>
+    );
+};
+
 const App = () => {
     const [view, setActiveView] = useState("dashboard"); 
     const [tasks, setTasks] = useState([]);
@@ -1787,6 +3015,10 @@ const App = () => {
                         <span className="material-symbols-outlined text-[18px]">generating_tokens</span>
                         <span>AI Token 计量舱</span>
                     </li>
+                    <li className={navItemClass("settings")} onClick={() => setActiveView("settings")}>
+                        <span className="material-symbols-outlined text-[18px]">settings</span>
+                        <span>系统设置</span>
+                    </li>
                 </ul>
 
                 {/* 侧栏底部状态 */}
@@ -1818,6 +3050,7 @@ const App = () => {
                     <span className="font-sans text-xs font-bold capitalize">
                         {view === 'item_detail' ? '决策资产 / 货源明细' : 
                          view === 'token_stats' ? 'AI Token 计量舱 / 成本审计' : 
+                         view === 'settings' ? '系统参数配置 / 密钥管理' : 
                          view}
                     </span>
                 </div>
@@ -1840,6 +3073,7 @@ const App = () => {
             <main className="ml-[260px] mt-16 p-6 overflow-y-auto flex-1 h-[calc(100vh-64px)] transition-all duration-200">
                 {view === 'logs' ? <LogViewer tasks={tasks} /> : 
                  view === 'token_stats' ? <TokenStatsView /> :
+                 view === 'settings' ? <SystemSettingsView /> :
                  view === "dashboard" ? (() => {
                     const activeTasks = tasks.filter(t => t.status !== '已完成');
                     const runningCount = tasks.filter(t => ['执行中', '正在暂停'].includes(t.status)).length;
@@ -2408,6 +3642,7 @@ const App = () => {
         </React.Fragment>
     );
 };
+
 
 const root = ReactDOM.createRoot(document.getElementById('root'));
 root.render(<App />);
