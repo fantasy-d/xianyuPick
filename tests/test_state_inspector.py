@@ -8,7 +8,10 @@ def test_inspect_state_file_reports_extension_snapshot(tmp_path) -> None:
     state_file.write_text(
         json.dumps(
             {
-                "cookies": [{"name": "cna", "value": "abc", "domain": ".goofish.com", "path": "/"}],
+                "cookies": [
+                    {"name": "cna", "value": "abc", "domain": ".goofish.com", "path": "/"},
+                    {"name": "tracknick", "value": "tb4884575_2012", "domain": ".goofish.com", "path": "/"},
+                ],
                 "origins": [],
                 "headers": {"User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X)"},
                 "env": {
@@ -23,7 +26,8 @@ def test_inspect_state_file_reports_extension_snapshot(tmp_path) -> None:
     )
     report = inspect_state_file(state_file)
     assert report["exists"] is True
-    assert report["cookie_count"] == 1
+    assert report["cookie_count"] == 2
+    assert report["account_name"] == "tb4884575_2012"
     assert report["has_headers"] is True
     assert report["context_overrides"]["is_mobile"] is True
     assert report["is_usable"] is True
@@ -54,3 +58,21 @@ def test_inspect_state_file_reports_missing_cookies(tmp_path) -> None:
     report = inspect_state_file(state_file)
     assert report["is_usable"] is False
     assert "missing_cookies" in report["issues"]
+
+
+def test_inspect_state_file_decodes_account_name(tmp_path) -> None:
+    state_file = tmp_path / "xianyu_state.json"
+    state_file.write_text(
+        json.dumps(
+            {
+                "cookies": [{"name": "tracknick", "value": "%E6%B5%8B%E8%AF%95%E8%B4%A6%E5%8F%B7", "domain": ".goofish.com", "path": "/"}],
+                "origins": [],
+                "headers": {"User-Agent": "Mozilla/5.0"},
+                "env": {"navigator": {"userAgent": "Mozilla/5.0"}, "screen": {}, "intl": {}},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    report = inspect_state_file(state_file)
+    assert report["account_name"] == "测试账号"

@@ -3,6 +3,38 @@ import pytest
 from pathlib import Path
 from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
 
+
+def test_publisher_v3_uses_explicit_account_id_from_settings(monkeypatch) -> None:
+    from xianyu_tools import config as config_module
+
+    selected_account_ids = []
+
+    monkeypatch.setattr(Path, "exists", lambda self: False)
+    monkeypatch.setattr(
+        config_module.settings,
+        "get",
+        lambda key, default=None: {"accounts": [{"id": "acc-1"}, {"id": "acc-2"}]} if key == "openapi" else default,
+    )
+
+    def fake_get_openapi_config(account_id=None):
+        selected_account_ids.append(account_id)
+        return {
+            "base_url": "https://open.goofish.pro",
+            "appid": f"appid-for-{account_id}",
+            "app_secret": f"secret-for-{account_id}",
+            "default_config": {"user_name": f"user-{account_id}"},
+        }
+
+    monkeypatch.setattr(config_module.settings, "get_openapi_config", fake_get_openapi_config)
+
+    pub = PublisherV3(account_id="acc-2")
+
+    assert selected_account_ids == ["acc-2"]
+    assert pub.appid == "appid-for-acc-2"
+    assert pub.app_secret == "secret-for-acc-2"
+    assert pub.defaults["user_name"] == "user-acc-2"
+
+
 def test_publisher_v3_format_sku_text_truncates_property_names() -> None:
     # 临时覆盖配置文件不存在的异常，只用来测试 _format_sku_text
     class DummyPublisher(PublisherV3):
@@ -651,8 +683,6 @@ def test_publisher_v3_delete_item_success_and_fail(monkeypatch) -> None:
     res_fail = pub.delete_item("99999")
     assert res_fail["status"] == "failed"
     assert "Mock deletion failure" in res_fail["msg"]
-
-
 
 
 

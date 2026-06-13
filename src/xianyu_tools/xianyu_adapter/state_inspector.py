@@ -3,8 +3,27 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote
 
 from xianyu_tools.xianyu_adapter.browser_transport import PlaywrightBrowserTransport, PlaywrightBrowserConfig
+
+
+def _extract_account_name(payload: dict[str, Any]) -> str:
+    cookies = payload.get("cookies")
+    if not isinstance(cookies, list):
+        return ""
+    preferred_cookie_names = ("tracknick", "lgc")
+    for cookie_name in preferred_cookie_names:
+        for cookie in cookies:
+            if not isinstance(cookie, dict) or cookie.get("name") != cookie_name:
+                continue
+            raw_value = str(cookie.get("value") or "").strip()
+            if not raw_value:
+                continue
+            decoded_value = unquote(raw_value).strip()
+            if decoded_value:
+                return decoded_value
+    return ""
 
 
 def inspect_state_file(path: str | Path) -> dict[str, Any]:
@@ -15,6 +34,7 @@ def inspect_state_file(path: str | Path) -> dict[str, Any]:
             "exists": False,
             "is_playwright_storage_state": False,
             "cookie_count": 0,
+            "account_name": "",
             "origin_count": 0,
             "has_headers": False,
             "has_env": False,
@@ -31,6 +51,7 @@ def inspect_state_file(path: str | Path) -> dict[str, Any]:
     issues: list[str] = []
     cookie_count = len(storage_state["cookies"]) if storage_state else 0
     origin_count = len(storage_state["origins"]) if storage_state else 0
+    account_name = _extract_account_name(payload)
     has_env = isinstance(payload.get("env"), dict)
     has_headers = bool(headers)
     if cookie_count == 0:
@@ -44,6 +65,7 @@ def inspect_state_file(path: str | Path) -> dict[str, Any]:
         "exists": True,
         "is_playwright_storage_state": transport._is_playwright_storage_state(payload),
         "cookie_count": cookie_count,
+        "account_name": account_name,
         "origin_count": origin_count,
         "has_headers": has_headers,
         "has_env": has_env,

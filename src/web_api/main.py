@@ -12,14 +12,15 @@ logger = get_unified_logger("WebAPI")
 
 app = FastAPI(title="Xianyu-1688 Management System")
 
+from xianyu_tools.config import settings
+
 # --- 常量 ---
 BASE_DIR = Path(__file__).resolve().parents[2]
 WEB_DIR = BASE_DIR / "web"
 OUTPUTS_DIR = BASE_DIR / "outputs"
-CONFIG_PATH = BASE_DIR / "config" / "database.json"
 
 # --- 辅助函数 ---
-DB_CONFIG = json.load(open(CONFIG_PATH))
+DB_CONFIG = settings.get_database_config()
 DB_CONFIG["cursorclass"] = pymysql.cursors.DictCursor
 def get_db_conn(): return pymysql.connect(**DB_CONFIG)
 
@@ -88,6 +89,31 @@ def init_db_schema():
         except Exception as update_err:
             logger.warning(f"[DB] Failed to refresh historical tasks null values: {update_err}")
             
+        # 8. 自愈创建 system_configs 配置表，并进行旧配置数据的零感自动入库
+        try:
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS system_configs (
+                    cfg_key VARCHAR(50) PRIMARY KEY,
+                    cfg_value TEXT NOT NULL
+                ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+            """)
+            
+            cursor.execute("SELECT COUNT(*) AS total FROM system_configs")
+            row = cursor.fetchone()
+            total = row["total"] if isinstance(row, dict) else row[0]
+            if total == 0:
+                # 首次运行，将本地 config.json 的配置同步到 DB 里
+                from xianyu_tools.config import settings
+                llm_data = settings.get("llm")
+                if llm_data:
+                    cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s)", ("llm", json.dumps(llm_data)))
+                openapi_data = settings.get("openapi")
+                if openapi_data:
+                    cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s)", ("openapi", json.dumps(openapi_data)))
+                logger.info("[DB] Initial configurations successfully synchronized to system_configs table.")
+        except Exception as config_db_err:
+            logger.error(f"[DB] Failed to initialize system_configs table or sync initial data: {config_db_err}")
+            
         conn.commit()
         conn.close()
         logger.info("[DB] Schema initialization complete (ensured tasks.input_type, total_tokens, and fixed NULL values).")
@@ -110,6 +136,68 @@ def _clean_html_span(text: str) -> str:
     text = text.replace(">", ";")
     parts = [p.strip() for p in text.split(";") if p.strip()]
     return ";".join(parts)
+
+DEFAULT_OPENAPI_ACCOUNT = {
+    "id": "account-1",
+    "name": "闲鱼账号 1",
+    "base_url": "https://open.goofish.pro",
+    "appid": "",
+    "app_secret": "",
+    "state_file": "xianyu_state_account-1.json",
+    "default_config": {
+        "user_name": "",
+        "province": 110000,
+        "city": 110100,
+        "district": 110101,
+        "item_biz_type": 2,
+        "sp_biz_type": 2,
+        "channel_cat_id": "",
+        "stuff_status": 100,
+        "express_fee": 0,
+    },
+}
+
+def normalize_openapi_multi_account(raw_cfg: dict | None) -> dict:
+    raw_cfg = dict(raw_cfg or {})
+    accounts = raw_cfg.get("accounts")
+    if isinstance(accounts, list) and accounts:
+        normalized_accounts = []
+        for index, account in enumerate(accounts, start=1):
+            merged = json.loads(json.dumps(DEFAULT_OPENAPI_ACCOUNT, ensure_ascii=False))
+            incoming = dict(account or {})
+            merged.update({k: v for k, v in incoming.items() if k != "default_config"})
+            merged_default = dict(DEFAULT_OPENAPI_ACCOUNT["default_config"])
+            merged_default.update(dict(incoming.get("default_config") or {}))
+            merged["default_config"] = merged_default
+            merged["id"] = merged.get("id") or f"account-{index}"
+            merged["name"] = merged.get("name") or f"闲鱼账号 {index}"
+            merged["state_file"] = merged.get("state_file") or f"xianyu_state_{merged['id']}.json"
+            normalized_accounts.append(merged)
+        active_account_id = raw_cfg.get("active_account_id") or normalized_accounts[0]["id"]
+        if not any(item["id"] == active_account_id for item in normalized_accounts):
+            active_account_id = normalized_accounts[0]["id"]
+        return {"active_account_id": active_account_id, "accounts": normalized_accounts}
+
+    merged = json.loads(json.dumps(DEFAULT_OPENAPI_ACCOUNT, ensure_ascii=False))
+    merged.update({k: v for k, v in raw_cfg.items() if k != "default_config"})
+    merged_default = dict(DEFAULT_OPENAPI_ACCOUNT["default_config"])
+    merged_default.update(dict(raw_cfg.get("default_config") or {}))
+    merged["default_config"] = merged_default
+    merged["state_file"] = raw_cfg.get("state_file") or "xianyu_state.json"
+    return {"active_account_id": merged["id"], "accounts": [merged]}
+
+def get_openapi_account(raw_cfg: dict | None, account_id: str | None = None) -> dict:
+    normalized = normalize_openapi_multi_account(raw_cfg)
+    target_id = account_id or normalized.get("active_account_id")
+    selected = next((item for item in normalized["accounts"] if item["id"] == target_id), None)
+    return selected or normalized["accounts"][0]
+
+
+def get_request_openapi_account_id(payload: dict | None = None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    account_id = payload.get("account_id")
+    return str(account_id).strip() if account_id else None
 
 # --- 任务模型 ---
 class Task:
@@ -476,6 +564,7 @@ def get_source_skus(source_id: int):
 async def batch_publish_to_xianyu(req: dict = {}):
     logger.info(f"OpenAPI batch publish request: {req}")
     source_ids = req.get("source_ids", [])
+    account_id = get_request_openapi_account_id(req)
     if not source_ids:
         return {"success": [], "failed": [{"source_id": 0, "msg": "未选中任何商品"}]}
 
@@ -549,7 +638,7 @@ async def batch_publish_to_xianyu(req: dict = {}):
     # 调用批量上架自愈核心
     from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
     try:
-        publisher = PublisherV3()
+        publisher = PublisherV3(account_id=account_id)
         batch_res = publisher.publish_items_batch(items_to_publish)
         
         # 将结果写回数据库记录并整合返回
@@ -603,6 +692,7 @@ async def batch_publish_to_xianyu(req: dict = {}):
 @app.post("/api/publish/{source_id}")
 async def publish_to_xianyu(source_id: int, req: dict = {}):
     logger.info(f"OpenAPI publish request for source_id: {source_id}, custom={req}")
+    account_id = get_request_openapi_account_id(req)
     conn = get_db_conn(); cursor = conn.cursor()
     cursor.execute("SELECT * FROM ali1688_sources WHERE id = %s", (source_id,))
     source = cursor.fetchone()
@@ -636,7 +726,7 @@ async def publish_to_xianyu(source_id: int, req: dict = {}):
         item_data["sku_images"] = sku_images
     from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
     try:
-        publisher = PublisherV3()
+        publisher = PublisherV3(account_id=account_id)
         result = publisher.publish_item(item_data)
         pub_url = f"https://www.goofish.com/item?id={result.get('xianyu_item_id')}" if result.get('status') == 'success' else None
         cursor.execute("INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url) VALUES (%s,%s,%s,%s,%s,%s)",
@@ -656,12 +746,13 @@ def get_published_status(source_id: int):
 async def batch_depublish_from_xianyu(req: dict = {}):
     logger.info(f"OpenAPI batch depublish request: {req}")
     source_ids = req.get("source_ids", [])
+    account_id = get_request_openapi_account_id(req)
     if not source_ids:
         return {"success": [], "failed": [{"source_id": 0, "msg": "未选中任何商品"}]}
 
     from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
     try:
-        publisher = PublisherV3()
+        publisher = PublisherV3(account_id=account_id)
     except Exception as e:
         logger.error(f"Failed to initialize PublisherV3: {e}")
         return {"success": [], "failed": [{"source_id": sid, "msg": f"初始化发布器失败: {e}"} for sid in source_ids]}
@@ -708,8 +799,9 @@ async def batch_depublish_from_xianyu(req: dict = {}):
     return {"success": success_list, "failed": failed_list}
 
 @app.post("/api/depublish/{source_id}")
-async def depublish_from_xianyu(source_id: int):
+async def depublish_from_xianyu(source_id: int, req: dict = {}):
     logger.info(f"OpenAPI depublish request for source_id: {source_id}")
+    account_id = get_request_openapi_account_id(req)
     conn = get_db_conn(); cursor = conn.cursor()
     
     # 1. 查找此货源最近成功的上架记录
@@ -731,7 +823,7 @@ async def depublish_from_xianyu(source_id: int):
     # 2. 调用 PublisherV3 执行下架
     from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
     try:
-        publisher = PublisherV3()
+        publisher = PublisherV3(account_id=account_id)
         result = publisher.depublish_item(xianyu_item_id)
         
         if result.get("status") == "success":
@@ -756,12 +848,13 @@ async def depublish_from_xianyu(source_id: int):
 async def batch_delete_from_xianyu(req: dict = {}):
     logger.info(f"OpenAPI batch delete request: {req}")
     source_ids = req.get("source_ids", [])
+    account_id = get_request_openapi_account_id(req)
     if not source_ids:
         return {"success": [], "failed": [{"source_id": 0, "msg": "未选中任何商品"}]}
 
     from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
     try:
-        publisher = PublisherV3()
+        publisher = PublisherV3(account_id=account_id)
     except Exception as e:
         logger.error(f"Failed to initialize PublisherV3 for delete: {e}")
         return {"success": [], "failed": [{"source_id": sid, "msg": f"初始化发布器失败: {e}"} for sid in source_ids]}
@@ -813,8 +906,9 @@ async def batch_delete_from_xianyu(req: dict = {}):
     return {"success": success_list, "failed": failed_list}
 
 @app.post("/api/delete/{source_id}")
-async def delete_from_xianyu(source_id: int):
+async def delete_from_xianyu(source_id: int, req: dict = {}):
     logger.info(f"OpenAPI delete request for source_id: {source_id}")
+    account_id = get_request_openapi_account_id(req)
     conn = get_db_conn(); cursor = conn.cursor()
 
     # 1. 查找此货源最新的一条发布流水记录，校验状态必须为 'depublished'
@@ -841,7 +935,7 @@ async def delete_from_xianyu(source_id: int):
     # 2. 调用 PublisherV3 执行删除
     from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
     try:
-        publisher = PublisherV3()
+        publisher = PublisherV3(account_id=account_id)
         result = publisher.delete_item(xianyu_item_id)
 
         if result.get("status") == "success":
@@ -1101,5 +1195,496 @@ def system_status():
     except Exception as e:
         logger.error(f"Failed to get system status: {e}")
         return {"error": str(e)}
+
+@app.get("/api/system/configs")
+def get_system_configs():
+    try:
+        from xianyu_tools.config import settings
+        from xianyu_tools.xianyu_adapter.state_inspector import inspect_state_file
+
+        openapi_cfg = normalize_openapi_multi_account(settings.get_openapi_raw_config())
+        for account in openapi_cfg["accounts"]:
+            try:
+                session_report = inspect_state_file(account.get("state_file") or "xianyu_state.json")
+                account_name = session_report.get("account_name") or ""
+                is_usable = bool(session_report.get("is_usable"))
+            except Exception:
+                account_name = ""
+                is_usable = False
+            account["default_config"]["user_name"] = account_name
+            account["session_report"] = {
+                "account_name": account_name,
+                "is_usable": is_usable,
+            }
+
+        return {
+            "status": "success",
+            "data": {
+                "llm": settings.get_llm_config(),
+                "openapi": openapi_cfg,
+                "crawl": settings.get_crawl_config()
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch system configs API: {e}")
+        return {"status": "failed", "msg": str(e)}
+
+@app.post("/api/system/configs")
+async def update_system_configs(payload: dict):
+    try:
+        from xianyu_tools.config import settings
+        from xianyu_tools.xianyu_adapter.state_inspector import inspect_state_file
+        import json
+        
+        llm_cfg = payload.get("llm", [])
+        openapi_cfg = normalize_openapi_multi_account(payload.get("openapi", {}))
+        crawl_cfg = payload.get("crawl", {})
+        
+        logger.info(
+            "[OpenAPI Save] active_account_id=%s accounts=%s",
+            openapi_cfg.get("active_account_id"),
+            [item.get("id") for item in openapi_cfg.get("accounts", [])]
+        )
+        for account in openapi_cfg["accounts"]:
+            account.pop("session_report", None)
+            try:
+                session_report = inspect_state_file(account.get("state_file") or "xianyu_state.json")
+                account_name = session_report.get("account_name") or ""
+            except Exception:
+                account_name = ""
+            account["default_config"]["user_name"] = account_name
+            
+        # --- 校验并规范化 crawl 配置 ---
+        source_limit = crawl_cfg.get("source_limit_1688", 10)
+        try:
+            source_limit = int(source_limit)
+            if source_limit <= 0:
+                source_limit = 10
+            elif source_limit > 100:
+                source_limit = 100
+        except (ValueError, TypeError):
+            source_limit = 10
+        crawl_cfg["source_limit_1688"] = source_limit
+
+        # 过滤模型子集，确保其中每一个都存在于 llm 配置的白名单中
+        models_subset = crawl_cfg.get("source_filter_models", [])
+        if not isinstance(models_subset, list):
+            models_subset = []
+        valid_models = []
+        for cfg in llm_cfg:
+            raw_models = cfg.get("models") or cfg.get("model") or []
+            model_arr = raw_models if isinstance(raw_models, list) else [raw_models]
+            for m in model_arr:
+                if m and isinstance(m, str) and m not in valid_models:
+                    valid_models.append(m)
+        filtered_models = [m for m in models_subset if m in valid_models]
+        crawl_cfg["source_filter_models"] = filtered_models
+        
+        # 1. 动态加载本地已有的 config.json 文件，以完整保留原有 database 配置！
+        config_file = settings.config_file
+        existing_config = {}
+        if config_file.exists():
+            try:
+                with open(config_file, "r", encoding="utf-8") as f:
+                    existing_config = json.load(f)
+            except Exception:
+                pass
+                
+        db_cfg = existing_config.get("database", {})
+        # 如果读取失败或者原本没有，则采用 settings 的默认后备数据库配置
+        if not db_cfg:
+            db_cfg = settings.get_database_config()
+            
+        new_config_data = {
+            "database": db_cfg,
+            "llm": llm_cfg,
+            "openapi": openapi_cfg,
+            "crawl": crawl_cfg
+        }
+        
+        config_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(config_file, "w", encoding="utf-8") as f:
+            json.dump(new_config_data, f, ensure_ascii=False, indent=4)
+            
+        # 2. 同步写入数据库表中
+        conn = get_db_conn()
+        cursor = conn.cursor()
+        
+        # 确保表一定存在
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS system_configs (
+                cfg_key VARCHAR(50) PRIMARY KEY,
+                cfg_value TEXT NOT NULL
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """)
+        
+        cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("llm", json.dumps(llm_cfg)))
+        cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("openapi", json.dumps(openapi_cfg)))
+        cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("crawl", json.dumps(crawl_cfg)))
+        conn.commit()
+        conn.close()
+        
+        # 3. 清理 settings 的数据库缓存，并重新触发 load()
+        settings._db_cache.clear()
+        settings.load()
+        
+        return {"status": "success", "msg": "配置已保存并同步成功"}
+    except Exception as e:
+        logger.error(f"Failed to save system configs API: {e}")
+        return {"status": "failed", "msg": f"保存配置发生异常: {str(e)}"}
+
+@app.get("/api/system/regions")
+def get_system_regions():
+    import urllib.request
+    import urllib.parse
+    import openpyxl
+    import os
+    import json
+    from pathlib import Path
+    
+    json_path = Path("config/goofish_regions.json")
+    if json_path.exists():
+        try:
+            with open(json_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return {"status": "success", "data": data}
+        except Exception as e:
+            logger.error(f"Failed to read regions cache: {e}")
+            
+    # 如果缓存不存在，尝试自动从闲管家下载解析并缓存
+    url_base = "https://file.goofish.pro/doc/"
+    filename = "闲管家省市区.xlsx"
+    encoded_url = url_base + urllib.parse.quote(filename)
+    dest_path = Path("config/goofish_regions.xlsx")
+    
+    try:
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        req = urllib.request.Request(
+            encoded_url, 
+            headers={'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
+        )
+        with urllib.request.urlopen(req) as response:
+            with open(dest_path, "wb") as f:
+                f.write(response.read())
+                
+        wb = openpyxl.load_workbook(dest_path, read_only=True)
+        sheet = wb.active
+        
+        regions = {}
+        # Header: ('省份ID', '省份名称', '城市ID', '城市名称', '地区ID', '地区名称')
+        for r_idx, row in enumerate(sheet.iter_rows(values_only=True)):
+            if r_idx == 0:
+                continue
+            if not row or len(row) < 6:
+                continue
+                
+            prov_id, prov_name, city_id, city_name, dist_id, dist_name = row
+            if not prov_id or not prov_name:
+                continue
+                
+            prov_id = int(prov_id)
+            prov_name = str(prov_name).strip()
+            
+            if prov_id not in regions:
+                regions[prov_id] = {
+                    "name": prov_name,
+                    "code": prov_id,
+                    "cities": {}
+                }
+                
+            if not city_id or not city_name:
+                continue
+                
+            city_id = int(city_id)
+            city_name = str(city_name).strip()
+            
+            if city_id not in regions[prov_id]["cities"]:
+                regions[prov_id]["cities"][city_id] = {
+                    "name": city_name,
+                    "code": city_id,
+                    "districts": {}
+                }
+                
+            if not dist_id or not dist_name:
+                continue
+                
+            dist_id = int(dist_id)
+            dist_name = str(dist_name).strip()
+            
+            regions[prov_id]["cities"][city_id]["districts"][dist_id] = {
+                "name": dist_name,
+                "code": dist_id
+            }
+
+        sorted_regions = []
+        for p_id in sorted(regions.keys()):
+            p_data = regions[p_id]
+            sorted_cities = []
+            for c_id in sorted(p_data["cities"].keys()):
+                c_data = p_data["cities"][c_id]
+                sorted_districts = []
+                for d_id in sorted(c_data["districts"].keys()):
+                    sorted_districts.append(c_data["districts"][d_id])
+                c_data["districts"] = sorted_districts
+                sorted_cities.append(c_data)
+            p_data["cities"] = sorted_cities
+            sorted_regions.append(p_data)
+            
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(sorted_regions, f, ensure_ascii=False, indent=4)
+            
+        return {"status": "success", "data": sorted_regions}
+    except Exception as e:
+        logger.error(f"Failed to auto download/parse goofish regions: {e}")
+        return {"status": "failed", "msg": f"获取省市区失败: {str(e)}"}
+    finally:
+        if dest_path.exists():
+            os.remove(dest_path)
+
+@app.get("/api/system/openapi_categories")
+def get_openapi_categories(group: str = None, query: str = None, cat_id: str = None, account_id: str = None):
+    import json
+    from pathlib import Path
+    
+    cache_path = Path("config/xianyu_categories.json")
+    if not cache_path.exists():
+        try:
+            from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+            pub = PublisherV3(account_id=account_id)
+            categories = pub._load_categories()
+        except Exception as e:
+            logger.error(f"Failed to trigger categories download: {e}")
+            categories = []
+    else:
+        try:
+            with open(cache_path, "r", encoding="utf-8") as f:
+                categories = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to read category cache: {e}")
+            categories = []
+            
+    if not categories:
+        return {"status": "failed", "msg": "获取类目失败，缓存为空且同步异常"}
+        
+    # 提取所有大类分组 sp_biz_name
+    groups_set = set()
+    for item in categories:
+        g_name = item.get("sp_biz_name")
+        if g_name:
+            groups_set.add(g_name)
+    groups = sorted(list(groups_set))
+    
+    # 根据 group, query, cat_id 进行过滤
+    filtered = []
+    query_lower = query.lower().strip() if query else None
+    
+    seen_ids = set()
+    for item in categories:
+        item_group = item.get("sp_biz_name")
+        item_name = item.get("channel_cat_name", "")
+        item_id = item.get("channel_cat_id")
+        
+        # 0. 精准过滤 ID (如果提供了 cat_id)
+        if cat_id and item_id != cat_id:
+            continue
+            
+        # 1. 过滤大类
+        if not cat_id and group and item_group != group:
+            continue
+            
+        # 2. 模糊匹配关键字
+        if not cat_id and query_lower and query_lower not in item_name.lower():
+            continue
+            
+        # 3. 对发布类目 ID 进行去重，避免相同类目由于被重复分发在多个大类下而导致前端显示重复项
+        if item_id in seen_ids:
+            continue
+        seen_ids.add(item_id)
+            
+        filtered.append({
+            "id": item_id,
+            "name": f"{item_group} - {item_name}" if item_group else item_name,
+            "group": item_group
+        })
+        
+    # 限制返回的前 100 条
+    limited_data = filtered[:100]
+    
+    return {
+        "status": "success",
+        "data": {
+            "groups": groups,
+            "categories": limited_data,
+            "total_matches": len(filtered),
+            "is_truncated": len(filtered) > 100
+        }
+    }
+
+# --- 闲鱼登录态自动捕获逻辑与接口 ---
+is_logging_in = False
+logging_in_account_id = ""
+login_err_msg = ""
+
+async def run_xianyu_login_capture(account_id: str | None = None):
+    global is_logging_in, logging_in_account_id, login_err_msg
+    is_logging_in = True
+    logging_in_account_id = account_id or ""
+    login_err_msg = ""
+    
+    from xianyu_tools.xianyu_adapter.browser_transport import PlaywrightBrowserTransport, PlaywrightBrowserConfig, default_desktop_context_options
+    from xianyu_tools.config import settings
+    account_cfg = get_openapi_account(settings.get_openapi_raw_config(), account_id)
+    state_file = account_cfg.get("state_file") or f"xianyu_state_{account_cfg.get('id') or 'default'}.json"
+    
+    transport = PlaywrightBrowserTransport(
+        config=PlaywrightBrowserConfig(
+            headless=False,
+            browser_channel="chrome",
+            launch_args=["--start-maximized"],
+            context_options=default_desktop_context_options(),
+        )
+    )
+    
+    try:
+        async with transport._playwright_context() as playwright:
+            browser = await playwright.chromium.launch(
+                channel="chrome",
+                headless=False,
+                args=["--start-maximized"],
+            )
+            try:
+                context = await transport._new_context(browser)
+                page = await context.new_page()
+                
+                logger.info("[Xianyu Login] Opening Goofish homepage for QR login...")
+                await page.goto(
+                    "https://www.goofish.com/",
+                    wait_until="domcontentloaded",
+                    timeout=60000,
+                )
+
+                await page.wait_for_timeout(2500)
+
+                # 直接点击闲鱼首页头部右上角登录入口，优先避开页面其它同名文案。
+                login_selectors = [
+                    'div[class*="user-order-container"] a:has-text("登录")',
+                    'a:has-text("登录")',
+                    "text=立即登录",
+                    "text=登录",
+                ]
+                login_opened = False
+                for selector in login_selectors:
+                    try:
+                        locator = page.locator(selector).first
+                        if await locator.count():
+                            logger.info(f"[Xianyu Login] Trying QR login opener selector: {selector}")
+                            await locator.click(timeout=3000)
+                            await page.wait_for_timeout(1200)
+                            if await page.locator("text=手机扫码安全登录").count():
+                                logger.info(f"[Xianyu Login] Opened QR login modal via selector: {selector}")
+                                login_opened = True
+                                break
+                    except Exception:
+                        continue
+
+                if not login_opened:
+                    logger.warning("[Xianyu Login] QR login modal was not auto-opened; page remains on Goofish homepage.")
+                
+                logged_in = False
+                # 轮询 10 分钟，登录进行中时用更短间隔尽快感知成功状态
+                for _ in range(1200):
+                    await asyncio.sleep(0.5)
+                    
+                    if page.is_closed():
+                        break
+                        
+                    cookies = await context.cookies("https://www.goofish.com/")
+                    cookie_names = {c["name"] for c in cookies}
+                    
+                    # 检查是否包含 unb 或者是 tracknick，表明已登录成功
+                    if "unb" in cookie_names or "tracknick" in cookie_names:
+                        logger.info("[Xianyu Login] Login detected! Capturing state snapshot...")
+                        await asyncio.sleep(0.3)
+                        
+                        from xianyu_tools.xianyu_adapter.state_exporter import PlaywrightStateExporter, StateExportConfig, build_snapshot
+                        exporter = PlaywrightStateExporter(
+                            config=StateExportConfig(
+                                output_file=state_file,
+                                browser_channel="chrome",
+                                headless=False,
+                            )
+                        )
+                        page_data = await exporter._capture_page_data(page)
+                        headers = await exporter._capture_headers(page)
+                        final_cookies = await context.cookies("https://www.goofish.com/")
+                        
+                        snapshot = build_snapshot(page.url, page_data, headers, final_cookies)
+                        
+                        # 自动保存到本地文件
+                        import json
+                        with open(state_file, "w", encoding="utf-8") as f:
+                            json.dump(snapshot, f, ensure_ascii=False, indent=2)
+                        
+                        logger.info("[Xianyu Login] State file successfully captured and saved.")
+                        is_logging_in = False
+                        logged_in = True
+                        break
+                
+                if not logged_in and not page.is_closed():
+                    logger.warning("[Xianyu Login] Session ended or timed out without login success.")
+            except Exception as inner_e:
+                logger.error(f"[Xianyu Login] Error in login runner: {inner_e}")
+                login_err_msg = str(inner_e)
+            finally:
+                try:
+                    if not page.is_closed():
+                        await page.close()
+                except Exception:
+                    pass
+                await browser.close()
+    except Exception as e:
+        logger.error(f"[Xianyu Login] Failed to launch playwright browser: {e}")
+        login_err_msg = str(e)
+    finally:
+        is_logging_in = False
+        logging_in_account_id = ""
+
+@app.get("/api/system/xianyu_login_status")
+def get_xianyu_login_status(account_id: str = None):
+    try:
+        from xianyu_tools.config import settings
+        from xianyu_tools.xianyu_adapter.state_inspector import inspect_state_file
+        account_cfg = get_openapi_account(settings.get_openapi_raw_config(), account_id)
+        state_file = account_cfg.get("state_file") or "xianyu_state.json"
+        report = inspect_state_file(state_file)
+        return {
+            "status": "success",
+            "data": {
+                "report": report,
+                "is_logging_in": is_logging_in and logging_in_account_id == (account_cfg.get("id") or ""),
+                "err_msg": login_err_msg
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to check xianyu login status: {e}")
+        return {"status": "failed", "msg": str(e)}
+
+@app.post("/api/system/xianyu_login_trigger")
+async def trigger_xianyu_login(payload: dict = None):
+    global is_logging_in
+    if is_logging_in:
+        return {"status": "failed", "msg": "当前正在执行登录，请勿重复操作"}
+
+    try:
+        from xianyu_tools.config import settings
+        raw_cfg = settings.get_openapi_raw_config()
+        requested_account_id = (payload or {}).get("account_id")
+        account_cfg = get_openapi_account(raw_cfg, requested_account_id or (raw_cfg or {}).get("active_account_id"))
+        account_id = account_cfg.get("id")
+    except Exception:
+        account_id = None
+
+    asyncio.create_task(run_xianyu_login_capture(account_id))
+    return {"status": "success", "msg": "已启动闲鱼登录浏览器，请使用手机扫码完成安全登录"}
 
 app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")

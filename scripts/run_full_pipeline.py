@@ -210,8 +210,15 @@ async def main():
         
         item_dir = root_dir / f"Rank_{i}_{sanitize_dir_name(item.get('title', 'item'))}"
         item_dir.mkdir(parents=True, exist_ok=True)
-        
-        cmd_1688 = f"export PYTHONPATH=$PYTHONPATH:{BASE_DIR}/src && {python_path} scripts/run_ali1688_slow_flow.py --image-url '{item.get('image_url')}' --output-dir '{item_dir}' --detail-top-n 10 --target-keyword '{keyword}' --log-file '{log_file_path}'"
+        # 动态获取系统配置中的商品爬取数配置限制
+        try:
+            from xianyu_tools.config import settings
+            crawl_cfg = settings.get_crawl_config()
+            source_limit = crawl_cfg.get("source_limit_1688", 10)
+        except Exception:
+            source_limit = 10
+
+        cmd_1688 = f"export PYTHONPATH=$PYTHONPATH:{BASE_DIR}/src && {python_path} scripts/run_ali1688_slow_flow.py --image-url '{item.get('image_url')}' --output-dir '{item_dir}' --detail-top-n {source_limit} --target-keyword '{keyword}' --log-file '{log_file_path}'"
         await run_command(cmd_1688, logger)
         
         # --- 资产入库 (全方位日志埋点版) ---

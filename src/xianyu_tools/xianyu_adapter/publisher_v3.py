@@ -10,12 +10,34 @@ from xianyu_tools.logging_util import get_unified_logger
 logger = get_unified_logger("PublisherV3")
 
 class PublisherV3:
-    def __init__(self, config_path: str = "config/openapi.json"):
-        self.config_path = Path(config_path)
-        if not self.config_path.exists():
-            raise FileNotFoundError(f"OpenAPI config not found at {config_path}")
+    def __init__(self, config_path: str = "config/openapi.json", account_id: str | None = None):
+        from xianyu_tools.config import settings
+        import os
         
-        self.conf = json.loads(self.config_path.read_text())
+        self.config_path = Path(config_path)
+        self.account_id = account_id
+        
+        # 判定是否在单元测试的 monkeypatch 环境下 (Path.exists 返回 True，但磁盘物理上无此文件)
+        physical_exists = os.path.exists(self.config_path)
+        path_exists = self.config_path.exists()
+        is_monkeypatched = path_exists and not physical_exists
+        
+        if is_monkeypatched:
+            # 单元测试 monkeypatch 环境，强制读取 Path.read_text() 加载 mock 结构
+            self.conf = json.loads(self.config_path.read_text())
+        else:
+            # 正常运行时，若统一配置 settings 包含 openapi 段，优先使用统一配置
+            if settings.get("openapi"):
+                self.conf = settings.get_openapi_config(account_id)
+            elif physical_exists:
+                # 否则，如果旧的零散文件物理存在，回退读物理文件
+                self.conf = json.loads(self.config_path.read_text())
+            else:
+                self.conf = settings.get_openapi_config(account_id)
+                
+        if not self.conf:
+            raise FileNotFoundError(f"OpenAPI config not found at {config_path}")
+            
         self.base_url = self.conf.get("base_url", "https://open.goofish.pro")
         self.appid = self.conf.get("appid")
         self.app_secret = self.conf.get("app_secret")

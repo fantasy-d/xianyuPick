@@ -1,0 +1,44 @@
+{
+    "database": {
+        "host": "localhost",
+        "user": "your_mysql_username",
+        "password": "your_mysql_password",
+        "database": "xianyu_tools",
+        "port": 3306,
+        "charset": "utf8mb4"
+    },
+    "llm": [
+        {
+            "api_key": "YOUR_DEEPSEEK_KEY",
+            "base_url": "https://api.deepseek.com/v1",
+            "models": [
+                "deepseek-chat",
+                "deepseek-reasoner"
+            ]
+        },
+        {
+            "api_key": "YOUR_QWEN_KEY",
+            "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "models": [
+                "qwen-plus",
+                "qwen-turbo"
+            ]
+        }
+    ],
+    "openapi": {
+        "base_url": "https://open.goofish.pro",
+        "appid": "您的APP_KEY",
+        "app_secret": "您的APP_SECRET",
+        "default_config": {
+            "user_name": "您的闲鱼会员名",
+            "province": 110000,
+            "city": 110100,
+            "district": 110101,
+            "item_biz_type": 2,
+            "sp_biz_type": 2,
+            "channel_cat_id": "e11455b218c06e7ae10cfa39bf43dc0f",
+            "stuff_status": 100,
+            "express_fee": 0
+        }
+    }
+}
