@@ -2,10 +2,13 @@ import json, pymysql, os, re, csv
 from pathlib import Path
 from openpyxl import load_workbook
 
+import sys
 # --- 配置加载 ---
 BASE_DIR = Path(__file__).resolve().parents[1]
-CONFIG_PATH = BASE_DIR / "config" / "database.json"
-config = json.load(open(CONFIG_PATH))
+sys.path.insert(0, str(BASE_DIR / "src"))
+from xianyu_tools.config import settings
+
+config = settings.get_database_config()
 config["cursorclass"] = pymysql.cursors.DictCursor
 
 def get_db_conn(): return pymysql.connect(**config)

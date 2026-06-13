@@ -176,5 +176,130 @@ class ConfigManager:
             
         return default_cfg
 
+    def get_source_channels_raw_config(self) -> Dict[str, Any]:
+        """获取货源渠道号池原始配置，优先从数据库获取，否则回退到配置文件"""
+        db_cfg = self._read_config_from_db("source_channels")
+        if db_cfg and isinstance(db_cfg, dict):
+            return db_cfg
+
+        channels_cfg = self.get("source_channels")
+        if channels_cfg and isinstance(channels_cfg, dict):
+            return channels_cfg
+
+        return {}
+
+    def get_source_channels_config(self) -> Dict[str, Any]:
+        """获取货源渠道号池配置，并补齐最小默认结构"""
+        default_cfg = {
+            "active_channel_id": "ali1688",
+            "channels": [
+                {
+                    "channel_id": "ali1688",
+                    "channel_type": "ali1688",
+                    "label": "1688 货源渠道",
+                    "enabled": True,
+                    "active_account_id": "ali1688-account-1",
+                    "accounts": [
+                        {
+                            "account_id": "ali1688-account-1",
+                            "label": "1688 账号 1",
+                            "enabled": True,
+                            "state_file": "state/ali1688/storage_state.json",
+                            "user_data_dir": "profiles/ali1688_chrome_profile",
+                            "cookies_source": "storage_state",
+                            "notes": "",
+                        }
+                    ],
+                }
+            ],
+        }
+
+        raw_cfg = self.get_source_channels_raw_config()
+        if not raw_cfg:
+            return default_cfg
+
+        merged = {**default_cfg, **raw_cfg}
+        channels = raw_cfg.get("channels")
+        if isinstance(channels, list) and channels:
+            merged["channels"] = channels
+        return merged
+
+    def get_source_channel_config(self, channel_id: str | None = None) -> Dict[str, Any]:
+        """获取指定货源渠道配置，默认返回当前激活渠道"""
+        cfg = self.get_source_channels_config()
+        channels = cfg.get("channels") or []
+        if not channels:
+            return {}
+
+        target_id = channel_id or cfg.get("active_channel_id")
+        selected = next((item for item in channels if item.get("channel_id") == target_id), None)
+        return selected or channels[0]
+
+    def get_source_channel_account_config(self, channel_id: str | None = None, account_id: str | None = None) -> Dict[str, Any]:
+        """获取指定渠道账号配置，默认返回当前激活账号"""
+        channel_cfg = self.get_source_channel_config(channel_id)
+        accounts = channel_cfg.get("accounts") or []
+        if not accounts:
+            return {}
+
+        target_id = account_id or channel_cfg.get("active_account_id")
+        selected = next((item for item in accounts if item.get("account_id") == target_id), None)
+        return selected or accounts[0]
+
+    def get_active_source_channel_account(self, channel_type: str | None = None) -> Dict[str, Any]:
+        """获取当前生效的渠道账号；如指定 channel_type，则优先返回该类型的激活账号"""
+        cfg = self.get_source_channels_config()
+        channels = cfg.get("channels") or []
+        if not channels:
+            return {}
+
+        selected_channel = None
+        active_channel_id = cfg.get("active_channel_id")
+        if active_channel_id:
+            selected_channel = next(
+                (
+                    item for item in channels
+                    if item.get("channel_id") == active_channel_id
+                    and (channel_type is None or item.get("channel_type") == channel_type)
+                ),
+                None,
+            )
+        if not selected_channel and channel_type is not None:
+            selected_channel = next((item for item in channels if item.get("channel_type") == channel_type), None)
+        if not selected_channel:
+            selected_channel = channels[0]
+
+        accounts = selected_channel.get("accounts") or []
+        if not accounts:
+            return {}
+
+        active_account_id = selected_channel.get("active_account_id")
+        selected_account = None
+        if active_account_id:
+            selected_account = next((item for item in accounts if item.get("account_id") == active_account_id), None)
+        return selected_account or accounts[0]
+
+    def get_active_ali1688_runtime_config(self) -> Dict[str, Any]:
+        """获取当前生效的 1688 渠道运行时配置"""
+        account = self.get_active_source_channel_account("ali1688")
+        if not account:
+            return {
+                "channel_type": "ali1688",
+                "state_file": "state/ali1688/storage_state.json",
+                "user_data_dir": "profiles/ali1688_chrome_profile",
+                "profile_directory": None,
+            }
+
+        return {
+            "channel_type": "ali1688",
+            "account_id": account.get("account_id"),
+            "label": account.get("label"),
+            "state_file": account.get("state_file") or "state/ali1688/storage_state.json",
+            "user_data_dir": account.get("user_data_dir") or "profiles/ali1688_chrome_profile",
+            "profile_directory": account.get("profile_directory") or None,
+            "cookies_source": account.get("cookies_source") or "storage_state",
+            "enabled": bool(account.get("enabled", True)),
+        }
+
 # 导出全局单例配置实例
 settings = ConfigManager()

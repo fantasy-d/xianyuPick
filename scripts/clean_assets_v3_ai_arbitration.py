@@ -5,9 +5,9 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR / "src"))
 from xianyu_tools.llm_util import ask_llm_relevance
+from xianyu_tools.config import settings
 
-CONFIG_PATH = BASE_DIR / "config" / "database.json"
-db_config = json.load(open(CONFIG_PATH))
+db_config = settings.get_database_config()
 db_config["cursorclass"] = pymysql.cursors.DictCursor
 
 def get_db_conn(): return pymysql.connect(**db_config)

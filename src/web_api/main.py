@@ -1,6 +1,8 @@
 import json, asyncio, os, uuid, pymysql, re, sys, signal, logging
 from datetime import datetime
 from pathlib import Path
+from typing import Dict
+from urllib.parse import unquote
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -11,6 +13,7 @@ from xianyu_tools.logging_util import get_unified_logger
 logger = get_unified_logger("WebAPI")
 
 app = FastAPI(title="Xianyu-1688 Management System")
+SOURCE_SKUS_CACHE: Dict[int, list] = {}
 
 from xianyu_tools.config import settings
 
@@ -110,6 +113,9 @@ def init_db_schema():
                 openapi_data = settings.get("openapi")
                 if openapi_data:
                     cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s)", ("openapi", json.dumps(openapi_data)))
+                source_channels_data = settings.get("source_channels")
+                if source_channels_data:
+                    cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s)", ("source_channels", json.dumps(source_channels_data)))
                 logger.info("[DB] Initial configurations successfully synchronized to system_configs table.")
         except Exception as config_db_err:
             logger.error(f"[DB] Failed to initialize system_configs table or sync initial data: {config_db_err}")
@@ -157,6 +163,25 @@ DEFAULT_OPENAPI_ACCOUNT = {
     },
 }
 
+DEFAULT_SOURCE_CHANNEL_ACCOUNT = {
+    "account_id": "ali1688-account-1",
+    "label": "1688 账号 1",
+    "enabled": True,
+    "state_file": "state/ali1688/storage_state.json",
+    "user_data_dir": "profiles/ali1688_chrome_profile",
+    "cookies_source": "storage_state",
+    "notes": "",
+}
+
+DEFAULT_SOURCE_CHANNEL = {
+    "channel_id": "ali1688",
+    "channel_type": "ali1688",
+    "label": "1688 货源渠道",
+    "enabled": True,
+    "active_account_id": "ali1688-account-1",
+    "accounts": [DEFAULT_SOURCE_CHANNEL_ACCOUNT],
+}
+
 def normalize_openapi_multi_account(raw_cfg: dict | None) -> dict:
     raw_cfg = dict(raw_cfg or {})
     accounts = raw_cfg.get("accounts")
@@ -198,6 +223,180 @@ def get_request_openapi_account_id(payload: dict | None = None) -> str | None:
         return None
     account_id = payload.get("account_id")
     return str(account_id).strip() if account_id else None
+
+
+def normalize_source_channels_config(raw_cfg: dict | None) -> dict:
+    raw_cfg = dict(raw_cfg or {})
+    channels = raw_cfg.get("channels")
+    normalized_channels = []
+
+    if isinstance(channels, list) and channels:
+        for c_index, channel in enumerate(channels, start=1):
+            merged_channel = json.loads(json.dumps(DEFAULT_SOURCE_CHANNEL, ensure_ascii=False))
+            incoming_channel = dict(channel or {})
+            merged_channel.update({k: v for k, v in incoming_channel.items() if k != "accounts"})
+            merged_channel["channel_id"] = merged_channel.get("channel_id") or f"channel-{c_index}"
+            merged_channel["channel_type"] = merged_channel.get("channel_type") or "custom"
+            merged_channel["label"] = merged_channel.get("label") or f"货源渠道 {c_index}"
+
+            incoming_accounts = incoming_channel.get("accounts")
+            normalized_accounts = []
+            if isinstance(incoming_accounts, list) and incoming_accounts:
+                for a_index, account in enumerate(incoming_accounts, start=1):
+                    merged_account = json.loads(json.dumps(DEFAULT_SOURCE_CHANNEL_ACCOUNT, ensure_ascii=False))
+                    incoming_account = dict(account or {})
+                    merged_account.update(incoming_account)
+                    merged_account["account_id"] = merged_account.get("account_id") or f"{merged_channel['channel_id']}-account-{a_index}"
+                    merged_account["label"] = merged_account.get("label") or f"{merged_channel['label']} 账号 {a_index}"
+                    merged_account["state_file"] = merged_account.get("state_file") or "state/ali1688/storage_state.json"
+                    merged_account["user_data_dir"] = merged_account.get("user_data_dir") or "profiles/ali1688_chrome_profile"
+                    merged_account["cookies_source"] = merged_account.get("cookies_source") or "storage_state"
+                    merged_account["notes"] = merged_account.get("notes") or ""
+                    normalized_accounts.append(merged_account)
+            else:
+                fallback_account = json.loads(json.dumps(DEFAULT_SOURCE_CHANNEL_ACCOUNT, ensure_ascii=False))
+                fallback_account["account_id"] = f"{merged_channel['channel_id']}-account-1"
+                fallback_account["label"] = f"{merged_channel['label']} 账号 1"
+                normalized_accounts.append(fallback_account)
+
+            merged_channel["accounts"] = normalized_accounts
+            active_account_id = merged_channel.get("active_account_id") or normalized_accounts[0]["account_id"]
+            if not any(item["account_id"] == active_account_id for item in normalized_accounts):
+                active_account_id = normalized_accounts[0]["account_id"]
+            merged_channel["active_account_id"] = active_account_id
+            normalized_channels.append(merged_channel)
+    else:
+        fallback_channel = json.loads(json.dumps(DEFAULT_SOURCE_CHANNEL, ensure_ascii=False))
+        normalized_channels = [fallback_channel]
+
+    active_channel_id = raw_cfg.get("active_channel_id") or normalized_channels[0]["channel_id"]
+    if not any(item["channel_id"] == active_channel_id for item in normalized_channels):
+        active_channel_id = normalized_channels[0]["channel_id"]
+    return {"active_channel_id": active_channel_id, "channels": normalized_channels}
+
+
+def get_source_channel(raw_cfg: dict | None, channel_id: str | None = None) -> dict:
+    normalized = normalize_source_channels_config(raw_cfg)
+    target_id = channel_id or normalized.get("active_channel_id")
+    selected = next((item for item in normalized["channels"] if item["channel_id"] == target_id), None)
+    return selected or normalized["channels"][0]
+
+
+def get_source_channel_account(raw_cfg: dict | None, channel_id: str | None = None, account_id: str | None = None) -> dict:
+    channel = get_source_channel(raw_cfg, channel_id)
+    accounts = channel.get("accounts") or []
+    target_id = account_id or channel.get("active_account_id")
+    selected = next((item for item in accounts if item["account_id"] == target_id), None)
+    return selected or (accounts[0] if accounts else {})
+
+
+def inspect_ali1688_state_file_quick(state_file: str | None) -> dict:
+    if not state_file:
+        return {
+            "is_usable": False,
+            "account_name": "",
+            "status_text": "未配置状态文件",
+            "last_checked_at": datetime.now().isoformat(),
+            "error_message": "",
+            "meta": {"state_file": ""},
+        }
+
+    state_path = Path(state_file or "").expanduser()
+    if not state_path.is_absolute():
+        state_path = (BASE_DIR / state_path).resolve()
+
+    if not state_path.exists():
+        return {
+            "is_usable": False,
+            "account_name": "",
+            "status_text": "未配置状态文件" if not state_file else "状态文件不存在",
+            "last_checked_at": datetime.now().isoformat(),
+            "error_message": "" if not state_file else f"未找到状态文件：{state_file}",
+            "meta": {"state_file": str(state_path)},
+        }
+
+    try:
+        with open(state_path, "r", encoding="utf-8") as f:
+            state_data = json.load(f)
+        cookies = state_data.get("cookies") or []
+        cookie_names = {str(item.get("name") or "") for item in cookies if isinstance(item, dict)}
+        useful_cookie_names = {"cookie2", "_m_h5_tk", "_m_h5_tk_enc", "ali_apache_id", "cna"}
+        has_useful_cookie = bool(cookie_names.intersection(useful_cookie_names))
+
+        account_name = ""
+        for item in cookies:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "")
+            if name in {"tracknick", "_w_tb_nick", "loginId", "cn"}:
+                raw_value = str(item.get("value") or "").strip()
+                if raw_value:
+                    account_name = unquote(raw_value)
+                    break
+
+        is_usable = bool(cookies) and has_useful_cookie
+        return {
+            "is_usable": is_usable,
+            "account_name": account_name,
+            "status_text": "登录正常" if is_usable else "未检测到有效登录",
+            "last_checked_at": datetime.now().isoformat(),
+            "error_message": "",
+            "meta": {
+                "state_file": str(state_path),
+                "cookie_count": len(cookies),
+            },
+        }
+    except Exception as exc:
+        return {
+            "is_usable": False,
+            "account_name": "",
+            "status_text": "检测失败",
+            "last_checked_at": datetime.now().isoformat(),
+            "error_message": str(exc),
+            "meta": {"state_file": str(state_path)},
+        }
+
+
+async def inspect_source_channel_account(channel_type: str, account_cfg: dict) -> dict:
+    channel_type = str(channel_type or "").strip().lower()
+    if channel_type == "ali1688":
+        user_data_dir = account_cfg.get("user_data_dir") or ""
+        if user_data_dir:
+            try:
+                from xianyu_tools.ali1688_session import Ali1688SessionConfig, inspect_ali1688_session
+
+                session_result = await inspect_ali1688_session(
+                    Ali1688SessionConfig(user_data_dir=user_data_dir)
+                )
+                state = session_result.get("state") or "unknown"
+                is_usable = state == "search"
+                return {
+                    "is_usable": is_usable,
+                    "account_name": account_cfg.get("label") or "",
+                    "status_text": "登录正常" if is_usable else {
+                        "profile_locked": "浏览器配置被占用",
+                        "login": "跳转到了登录页",
+                        "slider": "遇到滑块或风控",
+                        "unknown": "未检测到可用搜索态",
+                    }.get(state, "会话不可用"),
+                    "last_checked_at": datetime.now().isoformat(),
+                    "error_message": session_result.get("error") or "",
+                    "meta": session_result,
+                }
+            except Exception as exc:
+                fallback = inspect_ali1688_state_file_quick(account_cfg.get("state_file"))
+                fallback["error_message"] = fallback.get("error_message") or str(exc)
+                return fallback
+        return inspect_ali1688_state_file_quick(account_cfg.get("state_file"))
+
+    return {
+        "is_usable": False,
+        "account_name": "",
+        "status_text": "暂不支持该渠道检测",
+        "last_checked_at": datetime.now().isoformat(),
+        "error_message": "",
+        "meta": {"channel_type": channel_type},
+    }
 
 # --- 任务模型 ---
 class Task:
@@ -421,12 +620,40 @@ def get_task_details(task_id: str):
             # 2. 根据该主键去 1688 货源表里捞数据
             cursor.execute("SELECT * FROM ali1688_sources WHERE item_id = %s ORDER BY min_price ASC", (item_db_id,))
             sources_rows = cursor.fetchall()
+            source_ids = [s['id'] for s in sources_rows]
+            latest_status_map = {}
+
+            if source_ids:
+                placeholders = ",".join(["%s"] * len(source_ids))
+                cursor.execute(
+                    f"""
+                    SELECT p.source_db_id, p.publish_status, p.published_url
+                    FROM xianyu_published_items p
+                    INNER JOIN (
+                        SELECT source_db_id, MAX(created_at) AS max_time
+                        FROM xianyu_published_items
+                        WHERE source_db_id IN ({placeholders})
+                        GROUP BY source_db_id
+                    ) latest
+                        ON p.source_db_id = latest.source_db_id
+                       AND p.created_at = latest.max_time
+                    """,
+                    tuple(source_ids),
+                )
+                latest_status_map = {
+                    row["source_db_id"]: {
+                        "publish_status": row["publish_status"],
+                        "published_url": row.get("published_url"),
+                    }
+                    for row in cursor.fetchall()
+                }
             
             sources_data = []
             for s in sources_rows:
                 # 安全解析图片 JSON
                 try: imgs = json.loads(s['images']) if s['images'] else []
                 except: imgs = []
+                latest_status = latest_status_map.get(s['id'], {})
                 
                 sources_data.append({
                     "db_id": s['id'],
@@ -435,7 +662,9 @@ def get_task_details(task_id: str):
                     "sku_count": s['sku_count'],
                     "url": s['source_url'],
                     "images": imgs,
-                    "drop_reason": s['drop_reason']
+                    "drop_reason": s['drop_reason'],
+                    "publish_status": latest_status.get("publish_status", "none"),
+                    "published_url": latest_status.get("published_url", "")
                 })
             
             details.append({
@@ -506,20 +735,21 @@ def load_source_skus_from_excel(source_id: int) -> list:
                     from openpyxl import load_workbook
                     wb = load_workbook(filename=xlsx_files[0], read_only=True)
                     ws = wb.active
-                    rows = list(ws.iter_rows(values_only=True))
-                    if len(rows) > 1:
-                        for r in rows[1:]:
-                            if not r or len(r) < 2 or r[0] is None:
-                                continue
-                            img_val = str(r[4]) if len(r) > 4 and r[4] is not None else ""
-                            is_valid_img = img_val.startswith("http") or img_val.startswith("//") or "alicdn.com" in img_val
-                            skus.append({
-                                "sku_text": _clean_html_span(str(r[0])),
-                                "price": float(r[1]) if r[1] is not None else 0.0,
-                                "stock": int(r[2]) if r[2] is not None else 0,
-                                "spec_id": str(r[3]) if len(r) > 3 and r[3] is not None else "",
-                                "image": img_val if is_valid_img else ""
-                            })
+                    for idx, r in enumerate(ws.iter_rows(values_only=True)):
+                        if idx == 0:
+                            continue
+                        if not r or len(r) < 2 or r[0] is None:
+                            continue
+                        img_val = str(r[4]) if len(r) > 4 and r[4] is not None else ""
+                        is_valid_img = img_val.startswith("http") or img_val.startswith("//") or "alicdn.com" in img_val
+                        skus.append({
+                            "sku_text": _clean_html_span(str(r[0])),
+                            "price": float(r[1]) if r[1] is not None else 0.0,
+                            "stock": int(r[2]) if r[2] is not None else 0,
+                            "spec_id": str(r[3]) if len(r) > 3 and r[3] is not None else "",
+                            "image": img_val if is_valid_img else ""
+                        })
+                    wb.close()
         return skus
     except Exception as e:
         logger.error(f"Failed to load skus from excel for source {source_id}: {e}")
@@ -527,6 +757,10 @@ def load_source_skus_from_excel(source_id: int) -> list:
 
 
 def load_source_skus_from_db(source_id: int):
+    cached = SOURCE_SKUS_CACHE.get(source_id)
+    if cached is not None:
+        return cached
+
     try:
         conn = get_db_conn()
         cursor = conn.cursor()
@@ -544,13 +778,16 @@ def load_source_skus_from_db(source_id: int):
                     "spec_id": r["spec_id"],
                     "image": r["image"]
                 })
+            SOURCE_SKUS_CACHE[source_id] = skus
             return skus
     except Exception as e:
         logger.error(f"Failed to load skus from DB for source {source_id}: {e}")
         
     # 兼容回退读取 Excel 物理文件
     logger.warning(f"[Fallback] DB skus empty or failed for source {source_id}. Loading from Excel...")
-    return load_source_skus_from_excel(source_id)
+    skus = load_source_skus_from_excel(source_id)
+    SOURCE_SKUS_CACHE[source_id] = skus
+    return skus
 
 
 @app.get("/api/source_skus/{source_id}")
@@ -862,19 +1099,13 @@ async def batch_delete_from_xianyu(req: dict = {}):
     if not source_ids:
         return {"success": [], "failed": [{"source_id": 0, "msg": "未选中任何商品"}]}
 
-    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
-    try:
-        publisher = PublisherV3(account_id=account_id)
-    except Exception as e:
-        logger.error(f"Failed to initialize PublisherV3 for delete: {e}")
-        return {"success": [], "failed": [{"source_id": sid, "msg": f"初始化发布器失败: {e}"} for sid in source_ids]}
-
     conn = get_db_conn(); cursor = conn.cursor()
     success_list = []
     failed_list = []
+    publisher = None
 
     for sid in source_ids:
-        # 1. 查找此货源最新的一条发布流水记录，校验状态必须为 'depublished'
+        # 1. 查找此货源最新的一条发布流水记录
         cursor.execute("""
             SELECT publish_status, xianyu_item_id, task_id 
             FROM xianyu_published_items 
@@ -891,12 +1122,23 @@ async def batch_delete_from_xianyu(req: dict = {}):
         xianyu_item_id = row['xianyu_item_id']
         task_id = row['task_id']
 
-        if status != 'depublished':
-            failed_list.append({"source_id": sid, "msg": f"商品状态为 {status}，只有已下架商品可以删除"})
+        if status == 'failed':
+            cursor.execute("""
+                INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (task_id, sid, xianyu_item_id, 'deleted', '已清理失败发布记录', None))
+            success_list.append({"source_id": sid, "mode": "local_cleanup"})
             continue
 
-        # 2. 调用 PublisherV3 执行删除
+        if status != 'depublished':
+            failed_list.append({"source_id": sid, "msg": f"商品状态为 {status}，只有已下架或同步失败商品可以删除"})
+            continue
+
+        # 2. 已下架商品调用 PublisherV3 执行云端删除
         try:
+            if publisher is None:
+                from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+                publisher = PublisherV3(account_id=account_id)
             result = publisher.delete_item(xianyu_item_id)
             if result.get("status") == "success":
                 # 3. 记账
@@ -904,7 +1146,7 @@ async def batch_delete_from_xianyu(req: dict = {}):
                     INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """, (task_id, sid, xianyu_item_id, 'deleted', '已删除', None))
-                success_list.append({"source_id": sid})
+                success_list.append({"source_id": sid, "mode": "cloud_delete"})
             else:
                 failed_list.append({"source_id": sid, "msg": result.get("msg", "删除失败")})
         except Exception as e:
@@ -921,7 +1163,7 @@ async def delete_from_xianyu(source_id: int, req: dict = {}):
     account_id = get_request_openapi_account_id(req)
     conn = get_db_conn(); cursor = conn.cursor()
 
-    # 1. 查找此货源最新的一条发布流水记录，校验状态必须为 'depublished'
+    # 1. 查找此货源最新的一条发布流水记录
     cursor.execute("""
         SELECT publish_status, xianyu_item_id, task_id 
         FROM xianyu_published_items 
@@ -938,11 +1180,20 @@ async def delete_from_xianyu(source_id: int, req: dict = {}):
     xianyu_item_id = row['xianyu_item_id']
     task_id = row['task_id']
 
+    if status == 'failed':
+        cursor.execute("""
+            INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (task_id, source_id, xianyu_item_id, 'deleted', '已清理失败发布记录', None))
+        conn.commit()
+        conn.close()
+        return {"status": "success", "msg": "已清理失败发布记录", "mode": "local_cleanup"}
+
     if status != 'depublished':
         conn.close()
-        return {"status": "failed", "msg": f"商品当前状态为 {status}，只有已下架商品可以删除"}
+        return {"status": "failed", "msg": f"商品当前状态为 {status}，只有已下架或同步失败商品可以删除"}
 
-    # 2. 调用 PublisherV3 执行删除
+    # 2. 已下架商品调用 PublisherV3 执行云端删除
     from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
     try:
         publisher = PublisherV3(account_id=account_id)
@@ -956,7 +1207,7 @@ async def delete_from_xianyu(source_id: int, req: dict = {}):
             """, (task_id, source_id, xianyu_item_id, 'deleted', '已删除', None))
             conn.commit()
             conn.close()
-            return {"status": "success", "msg": "删除成功"}
+            return {"status": "success", "msg": "删除成功", "mode": "cloud_delete"}
         else:
             conn.close()
             return {"status": "failed", "msg": result.get("msg", "删除失败")}
@@ -1201,7 +1452,13 @@ def system_status():
         conn = get_db_conn(); cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) as count FROM tasks WHERE status = '执行中' AND is_deleted = 0")
         active_count = cursor.fetchone()['count']; conn.close()
-        return {"1688_login": "有效", "active_workers": active_count, "db_type": "MySQL"}
+        active_account = settings.get_active_source_channel_account("ali1688")
+        if active_account:
+            session_report = inspect_ali1688_state_file_quick(active_account.get("state_file"))
+            login_status = "有效" if session_report.get("is_usable") else "无效"
+        else:
+            login_status = "未配置"
+        return {"1688_login": login_status, "active_workers": active_count, "db_type": "MySQL"}
     except Exception as e:
         logger.error(f"Failed to get system status: {e}")
         return {"error": str(e)}
@@ -1213,6 +1470,7 @@ def get_system_configs():
         from xianyu_tools.xianyu_adapter.state_inspector import inspect_state_file
 
         openapi_cfg = normalize_openapi_multi_account(settings.get_openapi_raw_config())
+        source_channels_cfg = normalize_source_channels_config(settings.get_source_channels_raw_config())
         for account in openapi_cfg["accounts"]:
             try:
                 session_report = inspect_state_file(account.get("state_file") or "xianyu_state.json")
@@ -1227,12 +1485,27 @@ def get_system_configs():
                 "is_usable": is_usable,
             }
 
+        for channel in source_channels_cfg["channels"]:
+            for account in channel.get("accounts", []):
+                if channel.get("channel_type") == "ali1688":
+                    account["session_report"] = inspect_ali1688_state_file_quick(account.get("state_file"))
+                else:
+                    account["session_report"] = {
+                        "is_usable": False,
+                        "account_name": "",
+                        "status_text": "暂不支持该渠道检测",
+                        "last_checked_at": "",
+                        "error_message": "",
+                        "meta": {"channel_type": channel.get("channel_type")},
+                    }
+
         return {
             "status": "success",
             "data": {
                 "llm": settings.get_llm_config(),
                 "openapi": openapi_cfg,
-                "crawl": settings.get_crawl_config()
+                "crawl": settings.get_crawl_config(),
+                "source_channels": source_channels_cfg
             }
         }
     except Exception as e:
@@ -1249,6 +1522,7 @@ async def update_system_configs(payload: dict):
         llm_cfg = payload.get("llm", [])
         openapi_cfg = normalize_openapi_multi_account(payload.get("openapi", {}))
         crawl_cfg = payload.get("crawl", {})
+        source_channels_cfg = normalize_source_channels_config(payload.get("source_channels", {}))
         
         logger.info(
             "[OpenAPI Save] active_account_id=%s accounts=%s",
@@ -1289,6 +1563,10 @@ async def update_system_configs(payload: dict):
                     valid_models.append(m)
         filtered_models = [m for m in models_subset if m in valid_models]
         crawl_cfg["source_filter_models"] = filtered_models
+
+        for channel in source_channels_cfg["channels"]:
+            for account in channel.get("accounts", []):
+                account.pop("session_report", None)
         
         # 1. 动态加载本地已有的 config.json 文件，以完整保留原有 database 配置！
         config_file = settings.config_file
@@ -1309,7 +1587,8 @@ async def update_system_configs(payload: dict):
             "database": db_cfg,
             "llm": llm_cfg,
             "openapi": openapi_cfg,
-            "crawl": crawl_cfg
+            "crawl": crawl_cfg,
+            "source_channels": source_channels_cfg
         }
         
         config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1331,6 +1610,7 @@ async def update_system_configs(payload: dict):
         cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("llm", json.dumps(llm_cfg)))
         cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("openapi", json.dumps(openapi_cfg)))
         cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("crawl", json.dumps(crawl_cfg)))
+        cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("source_channels", json.dumps(source_channels_cfg)))
         conn.commit()
         conn.close()
         
@@ -1342,6 +1622,58 @@ async def update_system_configs(payload: dict):
     except Exception as e:
         logger.error(f"Failed to save system configs API: {e}")
         return {"status": "failed", "msg": f"保存配置发生异常: {str(e)}"}
+
+
+@app.post("/api/system/source_channel_status/check")
+async def check_source_channel_status(payload: dict = None):
+    try:
+        payload = payload or {}
+        incoming_channel = payload.get("channel")
+        incoming_account = payload.get("account")
+
+        if isinstance(incoming_channel, dict) and isinstance(incoming_account, dict):
+            channel = {
+                "channel_id": incoming_channel.get("channel_id") or "ali1688",
+                "channel_type": incoming_channel.get("channel_type") or "ali1688",
+                "label": incoming_channel.get("label") or "货源渠道",
+            }
+            account = dict(incoming_account)
+        else:
+            raw_cfg = settings.get_source_channels_raw_config()
+            normalized = normalize_source_channels_config(raw_cfg)
+            channel_id = payload.get("channel_id")
+            account_id = payload.get("account_id")
+            channel = get_source_channel(normalized, channel_id)
+            account = get_source_channel_account(normalized, channel.get("channel_id"), account_id)
+        report = await inspect_source_channel_account(channel.get("channel_type"), account)
+        return {
+            "status": "success",
+            "data": {
+                "channel_id": channel.get("channel_id"),
+                "account_id": account.get("account_id"),
+                "report": report
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to check source channel status: {e}")
+        return {"status": "failed", "msg": str(e)}
+
+
+@app.get("/api/system/source_channels/active")
+def get_active_source_channel_runtime():
+    try:
+        runtime_cfg = settings.get_active_ali1688_runtime_config()
+        report = inspect_ali1688_state_file_quick(runtime_cfg.get("state_file"))
+        return {
+            "status": "success",
+            "data": {
+                **runtime_cfg,
+                "session_report": report,
+            },
+        }
+    except Exception as e:
+        logger.error(f"Failed to fetch active source channel runtime: {e}")
+        return {"status": "failed", "msg": str(e)}
 
 @app.get("/api/system/regions")
 def get_system_regions():

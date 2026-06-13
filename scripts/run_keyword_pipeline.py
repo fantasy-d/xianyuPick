@@ -8,12 +8,20 @@ import subprocess
 import sys
 from pathlib import Path
 
+from xianyu_tools.config import settings
 from xianyu_tools.pipeline_summary import build_pipeline_summary
 from xianyu_tools.keyword_pipeline import build_keyword_output_dir
 
 
 def _launch_arg_flags(launch_args: list[str]) -> list[str]:
     return [f"--launch-arg={value}" for value in launch_args]
+
+
+def _resolve_active_ali1688_runtime(overrides) -> tuple[str, str | None]:
+    runtime_cfg = settings.get_active_ali1688_runtime_config()
+    user_data_dir = overrides.ali1688_user_data_dir or runtime_cfg.get("user_data_dir") or "./profiles/ali1688_chrome_profile"
+    profile_directory = overrides.ali1688_profile_directory or runtime_cfg.get("profile_directory")
+    return str(user_data_dir), profile_directory
 
 
 def main() -> int:
@@ -27,7 +35,7 @@ def main() -> int:
     parser.add_argument("--output-dir", help="Optional explicit output dir. Defaults to 搜索词_YYYYMMDD under output-root.")
     parser.add_argument("--xianyu-max-pages", type=int, default=2)
     parser.add_argument("--top-n", type=int, default=10)
-    parser.add_argument("--ali1688-user-data-dir", default="./profiles/ali1688_chrome_profile")
+    parser.add_argument("--ali1688-user-data-dir")
     parser.add_argument("--ali1688-profile-directory")
     parser.add_argument("--skip-ali1688-precheck", action="store_true")
     parser.add_argument("--max-subjects", type=int, default=3)
@@ -48,6 +56,7 @@ def main() -> int:
         help="Extra browser launch arg. Repeatable, e.g. --launch-arg=--start-maximized",
     )
     args = parser.parse_args()
+    ali1688_user_data_dir, ali1688_profile_directory = _resolve_active_ali1688_runtime(args)
 
     output_dir = Path(args.output_dir) if args.output_dir else build_keyword_output_dir(args.output_root, args.keyword)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -90,13 +99,13 @@ def main() -> int:
         precheck_cmd = [
             "scripts/inspect_ali1688_session.py",
             "--user-data-dir",
-            args.ali1688_user_data_dir,
+            ali1688_user_data_dir,
             "--browser-channel",
             args.browser_channel,
             *_launch_arg_flags(args.launch_arg),
         ]
-        if args.ali1688_profile_directory:
-            precheck_cmd.extend(["--profile-directory", args.ali1688_profile_directory])
+        if ali1688_profile_directory:
+            precheck_cmd.extend(["--profile-directory", ali1688_profile_directory])
         _run_json_to_file(
             precheck_cmd,
             ali1688_session_file,
@@ -133,7 +142,7 @@ def main() -> int:
         "--browser-channel",
         args.browser_channel,
         "--user-data-dir",
-        args.ali1688_user_data_dir,
+        ali1688_user_data_dir,
         "--max-subjects",
         str(args.max_subjects),
         "--min-wait-seconds",
@@ -142,8 +151,8 @@ def main() -> int:
         str(args.max_wait_seconds),
         *_launch_arg_flags(args.launch_arg),
     ]
-    if args.ali1688_profile_directory:
-        browser_cmd.extend(["--profile-directory", args.ali1688_profile_directory])
+    if ali1688_profile_directory:
+        browser_cmd.extend(["--profile-directory", ali1688_profile_directory])
     _run_stdout(
         browser_cmd,
         logs_dir / "03_ali1688_browser_session.log",
@@ -236,8 +245,8 @@ def main() -> int:
         "browser_channel": args.browser_channel,
         "xianyu_max_pages": args.xianyu_max_pages,
         "top_n": args.top_n,
-        "ali1688_user_data_dir": args.ali1688_user_data_dir,
-        "ali1688_profile_directory": args.ali1688_profile_directory,
+        "ali1688_user_data_dir": ali1688_user_data_dir,
+        "ali1688_profile_directory": ali1688_profile_directory,
         "ali1688_session": ali1688_session_payload,
         "max_subjects": args.max_subjects,
         "min_wait_seconds": args.min_wait_seconds,

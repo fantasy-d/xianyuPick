@@ -166,8 +166,6 @@ html.dark .glass-panel {
   position: fixed;
   inset: 0;
   background: rgba(6, 14, 32, 0.55);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
   z-index: 999;
   display: flex;
   align-items: center;
@@ -189,9 +187,10 @@ html.dark .glass-panel {
   border-radius: 1rem;
   width: 680px;
   max-width: 92vw;
-  box-shadow: 0 25px 50px -12px rgba(6, 14, 32, 0.25);
+  box-shadow: 0 18px 36px -16px rgba(6, 14, 32, 0.2);
   overflow: hidden;
   position: relative;
+  contain: layout paint;
   will-change: transform, opacity;
   transform: scale(0.95) translateZ(0);
   opacity: 0;
@@ -238,4 +237,64 @@ html.dark .glow-bg::after {
 main {
   height: calc(100vh - 64px) !important;
   overflow-y: auto !important;
+}
+
+.sidebar-tooltip {
+  position: absolute;
+  left: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%) translateX(-4px);
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: var(--color-surface-container-lowest);
+  border: 1px solid var(--color-border-hairline);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.12);
+  color: var(--color-on-surface);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  white-space: nowrap;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.16s ease, transform 0.16s ease;
+  z-index: 40;
+}
+
+.group:hover > .sidebar-tooltip {
+  opacity: 1;
+  transform: translateY(-50%) translateX(0);
+}
+
+.sidebar-fade-content {
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 1;
+  max-width: 180px;
+  transform: translateX(0);
+  transition: opacity 0.18s ease, max-width 0.2s ease, transform 0.18s ease, margin 0.18s ease;
+}
+
+.sidebar-fade-content.is-collapsed {
+  opacity: 0;
+  max-width: 0;
+  transform: translateX(-6px);
+  margin: 0 !important;
+}
+
+.topbar-fade-content {
+  display: inline-block;
+  overflow: hidden;
+  white-space: nowrap;
+  opacity: 1;
+  max-width: 720px;
+  transform: translateX(0);
+  transition: opacity 0.2s ease, max-width 0.22s ease, transform 0.2s ease, margin 0.2s ease;
+}
+
+.topbar-fade-content.is-collapsed {
+  opacity: 0;
+  max-width: 0;
+  transform: translateX(-8px);
+  margin: 0 !important;
 }

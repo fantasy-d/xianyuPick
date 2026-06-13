@@ -1,4 +1,5 @@
 const { useState, useEffect, useRef, useMemo } = React;
+const sourceSkuCache = new Map();
 
 // --- 任务类型标签组件 ---
 const renderTaskTypeBadge = (inputType) => {
@@ -29,7 +30,7 @@ const renderTaskTypeBadge = (inputType) => {
 
 
 // --- 日志视图组件 ---
-const LogViewer = ({ tasks }) => {
+const LogViewer = ({ tasks, hideHeader = false }) => {
     const [selectedTaskId, setSelectedTaskId] = useState(null);
     const [logContent, setLogContent] = useState('请选择一个任务来查看日志...');
     const logPollTimer = useRef(null);
@@ -54,10 +55,12 @@ const LogViewer = ({ tasks }) => {
 
     return (
         <div className="view-content">
-            <header className="mb-6">
-                <h1 className="font-sans text-2xl font-bold text-on-surface">任务日志中心</h1>
-                <p className="font-sans text-sm text-secondary mt-1">实时监控扫描Worker的后台标准输出日志。</p>
-            </header>
+            {!hideHeader && (
+                <header className="mb-6">
+                    <h1 className="font-sans text-2xl font-bold text-on-surface">任务日志中心</h1>
+                    <p className="font-sans text-sm text-secondary mt-1">实时监控扫描Worker的后台标准输出日志。</p>
+                </header>
+            )}
             
             <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 mb-6 ambient-shadow flex items-center gap-4">
                 <span className="font-sans text-sm font-semibold text-secondary whitespace-nowrap">选择活跃任务:</span>
@@ -82,7 +85,7 @@ const LogViewer = ({ tasks }) => {
 };
 
 // --- AI Token 计量舱视图组件 ---
-const TokenStatsView = () => {
+const TokenStatsView = ({ hideHeader = false }) => {
     const [stats, setStats] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
@@ -132,11 +135,13 @@ const TokenStatsView = () => {
 
     return (
         <div className="view-content">
-            <header className="mb-6 flex justify-between items-center">
-                <div>
-                    <h1 className="font-sans text-2xl font-bold text-on-surface">AI Token 计量舱</h1>
-                    <p className="font-sans text-sm text-secondary mt-1">系统大模型调用统计、模型消耗占比及审计流水线。</p>
-                </div>
+            <header className={`flex justify-between items-center ${hideHeader ? 'mb-4' : 'mb-6'}`}>
+                {!hideHeader && (
+                    <div>
+                        <h1 className="font-sans text-2xl font-bold text-on-surface">AI Token 计量舱</h1>
+                        <p className="font-sans text-sm text-secondary mt-1">系统大模型调用统计、模型消耗占比及审计流水线。</p>
+                    </div>
+                )}
                 <button 
                     onClick={fetchStats}
                     className="flex items-center gap-1.5 px-4 py-2 bg-surface-container-high border border-border-hairline hover:bg-surface-container-highest text-on-surface hover:text-primary rounded-lg transition-colors font-sans text-xs font-semibold"
@@ -526,22 +531,137 @@ const PublishPreviewModal = ({ src, editTitle, setEditTitle, editPrice, setEditP
     );
 };
 
+const ActionConfirmModal = ({ title, description, confirmLabel, tone = 'warning', onConfirm, onClose }) => {
+    const [active, setActive] = useState(false);
+
+    useEffect(() => {
+        let frameId = requestAnimationFrame(() => {
+            frameId = requestAnimationFrame(() => {
+                setActive(true);
+            });
+        });
+
+        document.body.style.overflow = 'hidden';
+
+        return () => {
+            cancelAnimationFrame(frameId);
+            const hasOtherModal = document.querySelector('.detail-modal-overlay');
+            const hasPreviewModal = document.querySelector('.preview-modal-overlay');
+            if (!hasOtherModal && !hasPreviewModal) {
+                document.body.style.overflow = '';
+            }
+        };
+    }, []);
+
+    const handleClose = () => {
+        setActive(false);
+        setTimeout(() => {
+            onClose();
+        }, 220);
+    };
+
+    const handleConfirm = () => {
+        setActive(false);
+        setTimeout(() => {
+            onConfirm();
+        }, 220);
+    };
+
+    const toneClasses = tone === 'danger'
+        ? 'bg-error hover:bg-error/90 text-white'
+        : 'bg-warning hover:bg-warning/85 text-white';
+
+    const descriptionLines = Array.isArray(description) ? description : [description];
+
+    return ReactDOM.createPortal(
+        <div
+            className={`preview-modal-overlay ${active ? 'active' : ''}`}
+            onClick={handleClose}
+        >
+            <div
+                className={`preview-modal-wrapper ${active ? 'active' : ''}`}
+                style={{ width: '480px' }}
+                onClick={e => e.stopPropagation()}
+            >
+                <div className="px-6 py-4 border-b border-border-hairline flex justify-between items-center bg-surface-container-low">
+                    <h3 className="font-sans text-base font-bold text-on-surface flex items-center gap-2">
+                        <span className={`material-symbols-outlined ${tone === 'danger' ? 'text-error' : 'text-warning'}`}>warning</span>
+                        {title}
+                    </h3>
+                    <button onClick={handleClose} className="w-8 h-8 rounded-full hover:bg-surface-container-high flex items-center justify-center text-secondary hover:text-on-surface transition-all">
+                        <span className="material-symbols-outlined text-[20px]">close</span>
+                    </button>
+                </div>
+
+                <div className="p-6">
+                    <div className="rounded-xl border border-border-hairline bg-surface-container-low px-4 py-4">
+                        <div className="flex items-start gap-3">
+                            <div className={`mt-0.5 w-9 h-9 rounded-full flex items-center justify-center shrink-0 ${tone === 'danger' ? 'bg-error/10 text-error' : 'bg-warning/10 text-warning'}`}>
+                                <span className="material-symbols-outlined text-[20px]">priority_high</span>
+                            </div>
+                            <div className="space-y-2">
+                                {descriptionLines.map((line, idx) => (
+                                    <p key={idx} className="text-sm leading-relaxed text-secondary">
+                                        {line}
+                                    </p>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div className="px-6 py-4 border-t border-border-hairline flex gap-3 justify-end bg-surface-container-low">
+                    <button
+                        onClick={handleClose}
+                        className="px-4 py-2 border border-border-hairline rounded-lg text-secondary font-sans text-xs font-semibold hover:bg-surface-container-high hover:text-on-surface transition-colors"
+                    >
+                        取消
+                    </button>
+                    <button
+                        onClick={handleConfirm}
+                        className={`px-4 py-2 font-sans text-xs font-semibold rounded-lg shadow-sm transition-colors ${toneClasses}`}
+                    >
+                        {confirmLabel}
+                    </button>
+                </div>
+            </div>
+        </div>,
+        document.body
+    );
+};
+
 // --- 商品详情模态弹窗组件（解决闪烁与退场动画） ---
 const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchStatusMap, batchResultMap }) => {
     const [active, setActive] = useState(false);
     const [skus, setSkus] = useState([]);
     const [loadingSkus, setLoadingSkus] = useState(false);
+    const [showSkuSection, setShowSkuSection] = useState(false);
+    const [showReferenceSection, setShowReferenceSection] = useState(false);
+    const [showAiSection, setShowAiSection] = useState(false);
 
     useEffect(() => {
+        if (!showSkuSection) {
+            return;
+        }
+
+        const cachedSkus = sourceSkuCache.get(item.source_db_id);
+        if (cachedSkus) {
+            setSkus(cachedSkus);
+            setLoadingSkus(false);
+            return;
+        }
+
         setLoadingSkus(true);
         fetch(`/api/source_skus/${item.source_db_id}`)
             .then(r => r.json())
             .then(res => {
-                setSkus(res.skus || []);
+                const nextSkus = res.skus || [];
+                sourceSkuCache.set(item.source_db_id, nextSkus);
+                setSkus(nextSkus);
             })
             .catch(err => console.error("加载详情SKU失败:", err))
             .finally(() => setLoadingSkus(false));
-    }, [item.source_db_id]);
+    }, [item.source_db_id, showSkuSection]);
 
     useEffect(() => {
         let frameId = requestAnimationFrame(() => {
@@ -603,7 +723,7 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
         >
             <div 
                 className={`detail-modal-wrapper ${active ? 'active' : ''} max-w-4xl`}
-                style={{ width: '840px' }}
+                style={{ width: '760px' }}
                 onClick={e => e.stopPropagation()}
             >
                 <div className="px-6 py-4 border-b border-border-hairline flex justify-between items-center bg-surface-container-low">
@@ -616,18 +736,20 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
                     </button>
                 </div>
                 
-                <div className="p-6 overflow-y-auto max-h-[72vh] flex gap-6">
+                <div className="p-5 overflow-y-auto max-h-[72vh] flex gap-4">
                     {/* 左侧主要信息: Span 8 布局 */}
-                    <div className="flex-1 flex flex-col gap-5">
-                        <div className="flex gap-4 items-start">
+                    <div className="flex-1 flex flex-col gap-4">
+                        <div className="flex gap-3 items-start">
                             {item.source_image ? (
                                 <img 
                                     src={item.source_image} 
-                                    className="w-36 h-36 rounded-xl object-cover border border-border-hairline ambient-shadow shrink-0" 
-                                    referrerPolicy="no-referrer" 
+                                    className="w-28 h-28 rounded-xl object-cover border border-border-hairline ambient-shadow shrink-0" 
+                                    referrerPolicy="no-referrer"
+                                    loading="eager"
+                                    decoding="async"
                                 />
                             ) : (
-                                <div className="w-36 h-36 rounded-xl bg-surface-container-low border border-border-hairline flex items-center justify-center text-secondary shrink-0 text-xs">
+                                <div className="w-28 h-28 rounded-xl bg-surface-container-low border border-border-hairline flex items-center justify-center text-secondary shrink-0 text-xs">
                                     暂无商品图片
                                 </div>
                             )}
@@ -644,7 +766,7 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
                                     </a>
                                 </h3>
                                 
-                                <div className="grid grid-cols-2 gap-2 mt-4 p-3 bg-surface-container rounded-lg border border-border-hairline">
+                                <div className="grid grid-cols-2 gap-2 mt-3 p-3 bg-surface-container rounded-lg border border-border-hairline">
                                     <div>
                                         <span className="text-[10px] text-secondary block">闲鱼商品 ID</span>
                                         <span className="font-mono text-xs font-bold text-on-surface mt-0.5 block">{item.xianyu_item_id || '暂无云端ID'}</span>
@@ -659,79 +781,108 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
 
                         {/* 爆款参考 */}
                         {item.ref_title && (
-                            <div className="p-3 bg-surface-container-low border border-border-hairline rounded-lg text-xs">
-                                <span className="text-[10px] text-secondary font-semibold block mb-0.5">关联参考爆款标题</span>
-                                <span className="text-on-surface font-medium block truncate" title={item.ref_title}>{item.ref_title}</span>
+                            <div className="border border-border-hairline rounded-lg bg-surface-container-low">
+                                <button
+                                    type="button"
+                                    onClick={() => setShowReferenceSection(prev => !prev)}
+                                    className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-surface-container transition-colors rounded-lg"
+                                >
+                                    <span className="text-xs font-bold text-on-surface">关联参考爆款标题</span>
+                                    <span className="material-symbols-outlined text-secondary text-[18px]" style={{ transform: showReferenceSection ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease' }}>
+                                        expand_more
+                                    </span>
+                                </button>
+                                {showReferenceSection && (
+                                    <div className="px-3 pb-3 text-xs text-on-surface leading-relaxed break-words">
+                                        {item.ref_title}
+                                    </div>
+                                )}
                             </div>
                         )}
 
                         {/* SKU 规格明细板块 */}
                         <div className="border-t border-border-hairline pt-4">
-                            <h4 className="text-xs font-bold text-on-surface flex items-center gap-1.5 mb-3">
-                                <span className="material-symbols-outlined text-primary text-[18px]">format_list_bulleted</span>
-                                商品规格明细 ({skus.length} 个规格)
-                            </h4>
-                            
-                            {loadingSkus ? (
-                                <div className="py-6 text-center text-xs text-secondary flex items-center justify-center gap-2">
-                                    <span className="material-symbols-outlined animate-spin text-primary">sync</span>
-                                    正在同步SKU明细中...
-                                </div>
-                            ) : skus.length > 0 ? (
-                                <div className="max-h-48 overflow-y-auto border border-border-hairline rounded-lg bg-surface-container-low p-1.5">
-                                    <table className="w-full text-left border-collapse text-xs">
-                                        <thead>
-                                            <tr className="border-b border-border-hairline">
-                                                <th className="p-2 font-bold text-secondary w-12 text-center">规格图</th>
-                                                <th className="p-2 font-bold text-secondary">规格描述</th>
-                                                <th className="p-2 font-bold text-secondary w-20">成本进价</th>
-                                                <th className="p-2 font-bold text-secondary w-20">建议闲鱼价</th>
-                                                <th className="p-2 font-bold text-secondary w-16 text-center">云仓库存</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody>
-                                            {skus.map((sku, idx) => (
-                                                <tr key={idx} className="border-b border-border-hairline/40 last:border-0 hover:bg-primary/5 transition-colors">
-                                                    <td className="p-2 text-center">
-                                                        {sku.image ? (
-                                                            <img 
-                                                                src={sku.image} 
-                                                                referrerPolicy="no-referrer" 
-                                                                className="w-8 h-8 rounded object-cover border border-border-hairline mx-auto" 
-                                                            />
-                                                        ) : (
-                                                            <div className="w-8 h-8 rounded bg-surface-container border border-border-hairline flex items-center justify-center text-[9px] text-secondary mx-auto">无图</div>
-                                                        )}
-                                                    </td>
-                                                    <td className="p-2 font-semibold text-on-surface break-words max-w-[150px]">
-                                                        {sku.sku_text}
-                                                    </td>
-                                                    <td className="p-2 font-mono text-secondary">
-                                                        ¥{sku.price}
-                                                    </td>
-                                                    <td className="p-2 font-mono text-primary font-bold">
-                                                        ¥{(parseFloat(sku.price) + 30).toFixed(2)}
-                                                    </td>
-                                                    <td className={`p-2 text-center font-mono font-bold ${sku.stock > 10 ? 'text-success' : 'text-error'}`}>
-                                                        {sku.stock}
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            ) : (
-                                <div className="py-6 text-center text-xs text-secondary bg-surface-container rounded-lg border border-border-hairline border-dashed">
-                                    📦 该商品属于单规格一口价商品（无多规格明细）。
+                            <button
+                                type="button"
+                                onClick={() => setShowSkuSection(prev => !prev)}
+                                className="w-full flex items-center justify-between rounded-lg border border-border-hairline bg-surface-container-low px-3 py-2 text-left hover:bg-surface-container transition-colors"
+                            >
+                                <span className="text-xs font-bold text-on-surface flex items-center gap-1.5">
+                                    <span className="material-symbols-outlined text-primary text-[18px]">format_list_bulleted</span>
+                                    商品规格明细
+                                    {showSkuSection && <span className="text-secondary font-normal">({skus.length} 个规格)</span>}
+                                </span>
+                                <span className="material-symbols-outlined text-secondary text-[18px]" style={{ transform: showSkuSection ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease' }}>
+                                    expand_more
+                                </span>
+                            </button>
+
+                            {showSkuSection && (
+                                <div className="mt-3">
+                                    {loadingSkus ? (
+                                        <div className="py-6 text-center text-xs text-secondary flex items-center justify-center gap-2">
+                                            <span className="material-symbols-outlined animate-spin text-primary">sync</span>
+                                            正在同步SKU明细中...
+                                        </div>
+                                    ) : skus.length > 0 ? (
+                                        <div className="max-h-48 overflow-y-auto border border-border-hairline rounded-lg bg-surface-container-low p-1.5">
+                                            <table className="w-full text-left border-collapse text-xs">
+                                                <thead>
+                                                    <tr className="border-b border-border-hairline">
+                                                        <th className="p-2 font-bold text-secondary w-12 text-center">规格图</th>
+                                                        <th className="p-2 font-bold text-secondary">规格描述</th>
+                                                        <th className="p-2 font-bold text-secondary w-20">成本进价</th>
+                                                        <th className="p-2 font-bold text-secondary w-20">建议闲鱼价</th>
+                                                        <th className="p-2 font-bold text-secondary w-16 text-center">云仓库存</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody>
+                                                    {skus.map((sku, idx) => (
+                                                        <tr key={idx} className="border-b border-border-hairline/40 last:border-0 hover:bg-primary/5 transition-colors">
+                                                            <td className="p-2 text-center">
+                                                                {sku.image ? (
+                                                                    <img 
+                                                                        src={sku.image}
+                                                                        referrerPolicy="no-referrer"
+                                                                        loading="lazy"
+                                                                        decoding="async"
+                                                                        className="w-8 h-8 rounded object-cover border border-border-hairline mx-auto" 
+                                                                    />
+                                                                ) : (
+                                                                    <div className="w-8 h-8 rounded bg-surface-container border border-border-hairline flex items-center justify-center text-[9px] text-secondary mx-auto">无图</div>
+                                                                )}
+                                                            </td>
+                                                            <td className="p-2 font-semibold text-on-surface break-words max-w-[150px]">
+                                                                {sku.sku_text}
+                                                            </td>
+                                                            <td className="p-2 font-mono text-secondary">
+                                                                ¥{sku.price}
+                                                            </td>
+                                                            <td className="p-2 font-mono text-primary font-bold">
+                                                                ¥{(parseFloat(sku.price) + 30).toFixed(2)}
+                                                            </td>
+                                                            <td className={`p-2 text-center font-mono font-bold ${sku.stock > 10 ? 'text-success' : 'text-error'}`}>
+                                                                {sku.stock}
+                                                            </td>
+                                                        </tr>
+                                                    ))}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    ) : (
+                                        <div className="py-6 text-center text-xs text-secondary bg-surface-container rounded-lg border border-border-hairline border-dashed">
+                                            📦 该商品属于单规格一口价商品（无多规格明细）。
+                                        </div>
+                                    )}
                                 </div>
                             )}
                         </div>
                     </div>
 
                     {/* 右侧决策面板: Span 4 布局 (AI ROI 引擎) */}
-                    <div className="w-64 shrink-0 flex flex-col gap-4">
+                    <div className="w-56 shrink-0 flex flex-col gap-3">
                         {/* 基础测算卡片 */}
-                        <div className="bg-surface-container rounded-xl p-4 border border-border-hairline flex flex-col gap-3">
+                        <div className="bg-surface-container rounded-xl p-3 border border-border-hairline flex flex-col gap-2.5">
                             <span className="font-sans text-[10px] font-bold text-secondary tracking-wider uppercase">价格与纯利测算</span>
                             
                             <div className="flex justify-between items-baseline">
@@ -753,33 +904,39 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
                                     </div>
                                 </>
                             )}
+                            <div className="text-[10px] text-secondary pt-1">
+                                ROI {roiPercentage}% · 运费估算已计入
+                            </div>
                         </div>
 
                         {/* AI 决策建议 */}
-                        <div className="bg-surface-container-low border border-border-hairline rounded-xl p-4 flex-1 flex flex-col justify-between">
-                            <div>
-                                <span className="font-sans text-[10px] font-bold text-secondary tracking-wider uppercase block mb-3">AI 推荐诊断</span>
-                                
-                                <div className="flex items-center gap-1.5 mb-2">
-                                    <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border flex items-center gap-1 ${badgeColorClass}`}>
-                                        <span className={`w-1.5 h-1.5 rounded-full ${pulseColorClass} animate-pulse`}></span>
-                                        {recommendationBadge}
-                                    </span>
+                        <div className="bg-surface-container-low border border-border-hairline rounded-xl">
+                            <button
+                                type="button"
+                                onClick={() => setShowAiSection(prev => !prev)}
+                                className="w-full flex items-center justify-between px-3 py-2 text-left hover:bg-surface-container transition-colors rounded-xl"
+                            >
+                                <div>
+                                    <span className="font-sans text-[10px] font-bold text-secondary tracking-wider uppercase block">AI 推荐诊断</span>
+                                    <span className="text-xs text-on-surface font-semibold mt-1 block">{recommendationBadge} · ROI {roiPercentage}%</span>
                                 </div>
-                                
-                                <div className="text-3xl font-sans font-black text-on-surface tracking-tight mt-2 flex items-baseline">
-                                    {roiPercentage}%
-                                    <span className="text-xs text-secondary font-normal ml-1">预期 ROI</span>
+                                <span className="material-symbols-outlined text-secondary text-[18px]" style={{ transform: showAiSection ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s ease' }}>
+                                    expand_more
+                                </span>
+                            </button>
+                            {showAiSection && (
+                                <div className="px-3 pb-3">
+                                    <div className="flex items-center gap-1.5 mb-2">
+                                        <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border flex items-center gap-1 ${badgeColorClass}`}>
+                                            <span className={`w-1.5 h-1.5 rounded-full ${pulseColorClass}`}></span>
+                                            {recommendationBadge}
+                                        </span>
+                                    </div>
+                                    <p className="text-xs leading-relaxed text-secondary bg-surface-container-lowest p-3 rounded-lg border border-border-hairline/50">
+                                        {aiAdvice}
+                                    </p>
                                 </div>
-                                
-                                <p className="text-xs leading-relaxed text-secondary mt-3 bg-surface-container-lowest p-3 rounded-lg border border-border-hairline/50">
-                                    {aiAdvice}
-                                </p>
-                            </div>
-                            
-                            <div className="text-[10px] text-secondary font-mono mt-4 text-center">
-                                * ROI 测算扣除了估计加价运费成本
-                            </div>
+                            )}
                         </div>
                     </div>
                 </div>
@@ -797,11 +954,14 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
                                 if (status === 'idle') {
                                     handleClose();
                                 } else {
-                                    onUpdateItem({ ...item, publish_status: status });
+                                    onUpdateItem({ ...item, publish_status: status, published_url: result?.published_url || item.published_url });
                                 }
                             }}
                             batchStatus={batchStatusMap[item.source_db_id]}
                             batchResult={batchResultMap[item.source_db_id]}
+                            initialStatus={item.publish_status}
+                            initialResult={item.published_url ? { published_url: item.published_url } : null}
+                            skipStatusFetch={true}
                         />
                         <button 
                             className="px-4 py-2 border border-border-hairline rounded-lg text-secondary hover:text-on-surface hover:bg-surface-container-high font-sans text-xs font-semibold transition-all" 
@@ -818,7 +978,7 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
 };
 
 // --- 闲鱼已上架商品管理组件 ---
-const PublishedManager = () => {
+const PublishedManager = ({ hideHeader = false }) => {
     const [items, setItems] = useState([]);
     const [total, setTotal] = useState(0);
     const [page, setPage] = useState(1);
@@ -835,10 +995,37 @@ const PublishedManager = () => {
     const [selectedProduct, setSelectedProduct] = useState(null); // 记录当前查看详情的已发布商品
     const [sortBy, setSortBy] = useState('publish_time');
     const [sortOrder, setSortOrder] = useState('desc');
+    const [selectedIds, setSelectedIds] = useState([]);
+    const [batchPublishing, setBatchPublishing] = useState(false);
+    const [batchDepublishing, setBatchDepublishing] = useState(false);
+    const [batchDeleting, setBatchDeleting] = useState(false);
+    const [confirmDialog, setConfirmDialog] = useState(null);
 
     // 用于收集每个商品的实时状态映射
     const [batchStatusMap, setBatchStatusMap] = useState({});
     const [batchResultMap, setBatchResultMap] = useState({});
+
+    const normalizePublishedStatus = (rawStatus) => {
+        if (rawStatus === 'success' || rawStatus === 'done') return 'done';
+        if (rawStatus === 'depublished') return 'depublished';
+        if (rawStatus === 'failed') return 'failed';
+        if (rawStatus === 'pending' || rawStatus === 'publishing' || rawStatus === 'depublishing') return 'publishing';
+        if (rawStatus === 'deleting') return 'deleting';
+        if (rawStatus === 'deleted' || rawStatus === 'none' || rawStatus === 'idle' || !rawStatus) return 'idle';
+        return 'idle';
+    };
+
+    const getPublishedItemStatus = (item) => normalizePublishedStatus(batchStatusMap[item.source_db_id] || item.publish_status);
+    const selectedItems = items.filter(item => selectedIds.includes(item.source_db_id));
+    const publishableIds = selectedItems
+        .filter(item => ['idle', 'failed', 'depublished'].includes(getPublishedItemStatus(item)))
+        .map(item => item.source_db_id);
+    const depublishableIds = selectedItems
+        .filter(item => getPublishedItemStatus(item) === 'done')
+        .map(item => item.source_db_id);
+    const deletableIds = selectedItems
+        .filter(item => ['depublished', 'failed'].includes(getPublishedItemStatus(item)))
+        .map(item => item.source_db_id);
 
     const fetchPublishedProducts = async () => {
         setLoading(true);
@@ -864,6 +1051,11 @@ const PublishedManager = () => {
         fetchPublishedProducts();
     }, [page, keyword, filterStatus, minSourcePrice, maxSourcePrice, minRefPrice, maxRefPrice, sortBy, sortOrder, refreshTrigger]);
 
+    useEffect(() => {
+        const visibleIds = new Set(items.map(item => item.source_db_id));
+        setSelectedIds(prev => prev.filter(id => visibleIds.has(id)));
+    }, [items]);
+
     const handleStatusLoaded = (dbId, status, result) => {
         setBatchStatusMap(prev => {
             // 如果已被删除，我们需要更新列表
@@ -881,6 +1073,189 @@ const PublishedManager = () => {
                 return { ...prev, [dbId]: result };
             });
         }
+        if (status === 'idle') {
+            setSelectedIds(prev => prev.filter(id => id !== dbId));
+        }
+    };
+
+    const doBatchPublish = async () => {
+        if (selectedIds.length === 0) {
+            alert("请先选择要批量发布的商品");
+            return;
+        }
+        const toPublishIds = [...publishableIds];
+        if (toPublishIds.length === 0) {
+            alert("当前勾选商品里，没有可执行批量发布的商品。");
+            return;
+        }
+
+        setBatchPublishing(true);
+        toPublishIds.forEach(dbId => {
+            setBatchStatusMap(prev => ({ ...prev, [dbId]: 'publishing' }));
+        });
+
+        try {
+            const resBatch = await fetch('/api/publish/batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_ids: toPublishIds })
+            }).then(r => r.json());
+
+            if (resBatch.success) {
+                resBatch.success.forEach(item => {
+                    const dbId = item.source_id;
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'done' }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'success', xianyu_item_id: item.product_id, published_url: item.published_url } }));
+                });
+            }
+            if (resBatch.failed) {
+                resBatch.failed.forEach(item => {
+                    const dbId = item.source_id;
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: item.msg } }));
+                });
+            }
+            if (resBatch.error) {
+                toPublishIds.forEach(dbId => {
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: resBatch.error } }));
+                });
+            }
+        } catch (e) {
+            console.error("批量发布失败:", e);
+            toPublishIds.forEach(dbId => {
+                setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: '网络或连接出错' } }));
+            });
+        } finally {
+            setBatchPublishing(false);
+        }
+    };
+
+    const executeBatchDepublish = async (toDepublishIds) => {
+        setBatchDepublishing(true);
+        toDepublishIds.forEach(dbId => {
+            setBatchStatusMap(prev => ({ ...prev, [dbId]: 'depublishing' }));
+        });
+
+        try {
+            const resBatch = await fetch('/api/depublish/batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_ids: toDepublishIds })
+            }).then(r => r.json());
+
+            if (resBatch.success) {
+                resBatch.success.forEach(item => {
+                    const dbId = item.source_id;
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'depublished' }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'depublished', msg: '已下架' } }));
+                });
+            }
+            if (resBatch.failed) {
+                resBatch.failed.forEach(item => {
+                    const dbId = item.source_id;
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: item.msg } }));
+                });
+            }
+        } catch (e) {
+            console.error("批量下架失败:", e);
+            toDepublishIds.forEach(dbId => {
+                setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: '网络或连接出错' } }));
+            });
+        } finally {
+            setBatchDepublishing(false);
+        }
+    };
+
+    const doBatchDepublish = async () => {
+        if (selectedIds.length === 0) {
+            alert("请先选择要批量下架的商品");
+            return;
+        }
+        const toDepublishIds = [...depublishableIds];
+        if (toDepublishIds.length === 0) {
+            alert("当前勾选商品里，没有处于已上架状态的商品。");
+            return;
+        }
+        setConfirmDialog({
+            title: '确认批量下架',
+            description: [
+                `即将批量下架 ${toDepublishIds.length} 个已上架商品。`,
+                '下架后商品会从闲鱼云端撤下，但本地发布记录会保留，方便后续重新上架。'
+            ],
+            confirmLabel: `确认下架 ${toDepublishIds.length} 项`,
+            tone: 'warning',
+            onConfirm: () => executeBatchDepublish(toDepublishIds)
+        });
+    };
+
+    const executeBatchDelete = async (toDeleteIds) => {
+        setBatchDeleting(true);
+        toDeleteIds.forEach(dbId => {
+            setBatchStatusMap(prev => ({ ...prev, [dbId]: 'deleting' }));
+        });
+
+        try {
+            const resBatch = await fetch('/api/delete/batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_ids: toDeleteIds })
+            }).then(r => r.json());
+
+            if (resBatch.success) {
+                resBatch.success.forEach(item => {
+                    const dbId = item.source_id;
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'idle' }));
+                    setBatchResultMap(prev => {
+                        const copy = { ...prev };
+                        delete copy[dbId];
+                        return copy;
+                    });
+                });
+                setSelectedIds(prev => prev.filter(id => !toDeleteIds.includes(id)));
+                setRefreshTrigger(t => t + 1);
+            }
+            if (resBatch.failed) {
+                resBatch.failed.forEach(item => {
+                    const dbId = item.source_id;
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: item.msg } }));
+                });
+            }
+        } catch (e) {
+            console.error("批量删除失败:", e);
+            toDeleteIds.forEach(dbId => {
+                setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
+                setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: '网络或连接出错' } }));
+            });
+        } finally {
+            setBatchDeleting(false);
+        }
+    };
+
+    const doBatchDelete = async () => {
+        if (selectedIds.length === 0) {
+            alert("请先选择要批量删除的商品");
+            return;
+        }
+        const toDeleteIds = [...deletableIds];
+        if (toDeleteIds.length === 0) {
+            alert("当前勾选商品里，没有可删除的已下架或同步失败商品。");
+            return;
+        }
+        setConfirmDialog({
+            title: '确认批量删除',
+            description: [
+                `即将批量删除 ${toDeleteIds.length} 个商品记录。`,
+                '已下架商品会执行云端删除；同步失败商品只会清理本地记录。此操作不可恢复。'
+            ],
+            confirmLabel: `确认删除 ${toDeleteIds.length} 项`,
+            tone: 'danger',
+            onConfirm: () => executeBatchDelete(toDeleteIds)
+        });
     };
 
     const handleSort = (field) => {
@@ -918,13 +1293,15 @@ const PublishedManager = () => {
 
     return (
         <div className="view-content">
-            <header className="mb-6">
-                <h1 className="font-sans text-2xl font-bold text-on-surface flex items-center gap-2">
-                    <span className="material-symbols-outlined text-primary text-[28px]">shopping_bag</span>
-                    闲鱼上架商品中枢
-                </h1>
-                <p className="font-sans text-sm text-secondary mt-1">管理并监控已经在闲鱼铺货成功的商品，支持与 1688 源头采购价、物流信息实时联动。点击行项目可展开详情数据与下架控制。</p>
-            </header>
+            {!hideHeader && (
+                <header className="mb-6">
+                    <h1 className="font-sans text-2xl font-bold text-on-surface flex items-center gap-2">
+                        <span className="material-symbols-outlined text-primary text-[28px]">shopping_bag</span>
+                        闲鱼上架商品中枢
+                    </h1>
+                    <p className="font-sans text-sm text-secondary mt-1">管理并监控已经在闲鱼铺货成功的商品，支持与 1688 源头采购价、物流信息实时联动。点击行项目可展开详情数据与下架控制。</p>
+                </header>
+            )}
 
             {/* 多维筛选功能区 */}
             <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-4 mb-6 ambient-shadow space-y-4">
@@ -1047,10 +1424,67 @@ const PublishedManager = () => {
                 </div>
             ) : items.length > 0 ? (
                 <div className="bg-surface-container-lowest border border-border-hairline rounded-xl overflow-hidden ambient-shadow">
+                    <div className="px-4 py-3 min-h-[56px] border-b border-border-hairline bg-surface-container-lowest flex items-center justify-between gap-4 flex-wrap">
+                        <div className="flex items-center gap-3 min-h-[32px]">
+                            {selectedIds.length > 0 && (
+                                <span className="text-xs font-semibold text-primary bg-primary/10 border border-primary/20 px-2 py-0.5 rounded-full">
+                                    已选 {selectedIds.length} 项
+                                </span>
+                            )}
+                        </div>
+
+                        {selectedIds.length > 0 && (
+                            <div className="flex items-center gap-2 flex-wrap min-h-[32px]">
+                                {publishableIds.length > 0 && (
+                                    <button
+                                        className="px-3.5 py-1.5 bg-primary hover:bg-primary-container text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40"
+                                        disabled={batchPublishing || batchDepublishing || batchDeleting}
+                                        onClick={doBatchPublish}
+                                    >
+                                        {batchPublishing ? "云同步中..." : `🚀 批量发布 (${publishableIds.length})`}
+                                    </button>
+                                )}
+                                {depublishableIds.length > 0 && (
+                                    <button
+                                        className="px-3.5 py-1.5 bg-warning hover:bg-warning/80 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40"
+                                        disabled={batchPublishing || batchDepublishing || batchDeleting}
+                                        onClick={doBatchDepublish}
+                                    >
+                                        {batchDepublishing ? "云同步中..." : `⚠️ 批量下架 (${depublishableIds.length})`}
+                                    </button>
+                                )}
+                                {deletableIds.length > 0 && (
+                                    <button
+                                        className="px-3.5 py-1.5 bg-error hover:bg-error/85 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40"
+                                        disabled={batchPublishing || batchDepublishing || batchDeleting}
+                                        onClick={doBatchDelete}
+                                    >
+                                        {batchDeleting ? "云注销中..." : `🗑️ 批量删除 (${deletableIds.length})`}
+                                    </button>
+                                )}
+                            </div>
+                        )}
+                    </div>
+
                     <div className="overflow-x-auto w-full">
                         <table className="w-full text-left border-collapse">
                             <thead>
                                 <tr className="bg-table-header-bg border-b border-border-hairline">
+                                    <th className="p-cell-padding font-sans text-xs font-semibold text-secondary uppercase tracking-wider w-14 text-center">
+                                        <input
+                                            type="checkbox"
+                                            className="rounded border-secondary text-primary focus:ring-primary/20 w-4 h-4 cursor-pointer"
+                                            checked={items.length > 0 && items.every(item => selectedIds.includes(item.source_db_id))}
+                                            onChange={(e) => {
+                                                if (e.target.checked) {
+                                                    setSelectedIds(items.map(item => item.source_db_id));
+                                                } else {
+                                                    setSelectedIds([]);
+                                                }
+                                            }}
+                                            title="本页全选"
+                                        />
+                                    </th>
                                     <th className="p-cell-padding font-sans text-xs font-semibold text-secondary uppercase tracking-wider w-20">主图</th>
                                     {renderSortHeader("1688 原始货源信息", "title")}
                                     {renderSortHeader("闲鱼端商品 ID", "xianyu_item_id", "font-mono")}
@@ -1062,13 +1496,14 @@ const PublishedManager = () => {
                             </thead>
                             <tbody className="divide-y divide-border-hairline text-sm">
                                 {items.map((item) => {
-                                    const currentStatus = batchStatusMap[item.source_db_id] || item.publish_status;
+                                    const currentStatus = getPublishedItemStatus(item);
+                                    const isChecked = selectedIds.includes(item.source_db_id);
                                     
                                     let statusText = '未知';
                                     let statusClass = 'bg-secondary/10 text-secondary border-secondary/20';
                                     let pulseColor = 'bg-secondary';
 
-                                    if (currentStatus === 'success' || currentStatus === 'done') {
+                                    if (currentStatus === 'done') {
                                         statusText = '已上架';
                                         statusClass = 'bg-success/10 text-success border-success/20';
                                         pulseColor = 'bg-success';
@@ -1096,12 +1531,29 @@ const PublishedManager = () => {
                                             className="hover:bg-surface-container-low transition-colors cursor-pointer group"
                                             onClick={() => setSelectedProduct(item)}
                                         >
+                                            <td className="p-cell-padding text-center">
+                                                <input
+                                                    type="checkbox"
+                                                    className="rounded border-secondary text-primary focus:ring-primary/20 w-4 h-4 cursor-pointer"
+                                                    checked={isChecked}
+                                                    onClick={e => e.stopPropagation()}
+                                                    onChange={(e) => {
+                                                        if (e.target.checked) {
+                                                            setSelectedIds(prev => [...prev, item.source_db_id]);
+                                                        } else {
+                                                            setSelectedIds(prev => prev.filter(id => id !== item.source_db_id));
+                                                        }
+                                                    }}
+                                                />
+                                            </td>
                                             <td className="p-cell-padding">
                                                 {item.source_image ? (
                                                     <img 
                                                         src={item.source_image} 
                                                         className="w-12 h-12 rounded-lg object-cover border border-border-hairline mx-auto" 
-                                                        referrerPolicy="no-referrer" 
+                                                        referrerPolicy="no-referrer"
+                                                        loading="lazy"
+                                                        decoding="async"
                                                     />
                                                 ) : (
                                                     <div className="w-12 h-12 rounded-lg bg-surface-container border border-border-hairline flex items-center justify-center text-secondary text-[10px] mx-auto">暂无图片</div>
@@ -1187,15 +1639,30 @@ const PublishedManager = () => {
                     batchResultMap={batchResultMap}
                 />
             )}
+            {confirmDialog && (
+                <ActionConfirmModal
+                    title={confirmDialog.title}
+                    description={confirmDialog.description}
+                    confirmLabel={confirmDialog.confirmLabel}
+                    tone={confirmDialog.tone}
+                    onConfirm={() => {
+                        const action = confirmDialog.onConfirm;
+                        setConfirmDialog(null);
+                        action();
+                    }}
+                    onClose={() => setConfirmDialog(null)}
+                />
+            )}
         </div>
     );
 };
 
 // --- 发布至闲鱼按钮组件 ---
-const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoaded }) => {
+const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoaded, initialStatus = null, initialResult = null, skipStatusFetch = false }) => {
     const [status, setStatus] = useState('idle'); // idle | publishing | done | failed | depublished | deleting
     const [pubResult, setPubResult] = useState(null);
     const [showModal, setShowModal] = useState(false);
+    const [confirmDialog, setConfirmDialog] = useState(null);
     const [editTitle, setEditTitle] = useState('');
     const [editPrice, setEditPrice] = useState('');
     const [skus, setSkus] = useState([]);
@@ -1203,6 +1670,27 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
 
     // 挂载时查询历史发布状态
     useEffect(() => {
+        if (skipStatusFetch) {
+            if (initialStatus === 'success' || initialStatus === 'done') {
+                setStatus('done');
+                if (initialResult) setPubResult(initialResult);
+                if (onStatusLoaded) onStatusLoaded(src.db_id, 'done', initialResult);
+            } else if (initialStatus === 'depublished') {
+                setStatus('depublished');
+                if (initialResult) setPubResult(initialResult);
+                if (onStatusLoaded) onStatusLoaded(src.db_id, 'depublished', initialResult);
+            } else if (initialStatus === 'failed') {
+                setStatus('failed');
+                if (initialResult) setPubResult(initialResult);
+                if (onStatusLoaded) onStatusLoaded(src.db_id, 'failed', initialResult);
+            } else {
+                setStatus('idle');
+                if (initialResult) setPubResult(initialResult);
+                if (onStatusLoaded) onStatusLoaded(src.db_id, 'idle', initialResult);
+            }
+            return;
+        }
+
         fetch(`/api/published_status/${src.db_id}`)
             .then(r => r.json())
             .then(res => {
@@ -1223,7 +1711,7 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
                 }
             })
             .catch(() => {});
-    }, [src.db_id]);
+    }, [src.db_id, skipStatusFetch, initialStatus]);
 
     // 联动外部批量发布状态
     useEffect(() => {
@@ -1312,8 +1800,7 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
         }
     };
 
-    const doDepublish = async () => {
-        if (!confirm("确定要下架此商品吗？")) return;
+    const executeDepublish = async () => {
         setStatus('publishing');
         try {
             const res = await fetch(`/api/depublish/${src.db_id}`, {
@@ -1335,8 +1822,20 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
         }
     };
 
-    const doDelete = async () => {
-        if (!confirm("确定要彻底删除该商品的发布记录及闲管家云端商品吗？\n此操作不可逆！")) return;
+    const doDepublish = () => {
+        setConfirmDialog({
+            title: '确认下架商品',
+            description: [
+                '该商品当前已发布到闲鱼云端。',
+                '确认后会立即执行下架，但本地发布记录会保留，方便后续重新上架。'
+            ],
+            confirmLabel: '确认下架',
+            tone: 'warning',
+            onConfirm: () => executeDepublish()
+        });
+    };
+
+    const executeDelete = async () => {
         setStatus('deleting');
         if (onStatusLoaded) onStatusLoaded(src.db_id, 'deleting', null);
         try {
@@ -1358,6 +1857,19 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
             setStatus('depublished');
             if (onStatusLoaded) onStatusLoaded(src.db_id, 'depublished', null);
         }
+    };
+
+    const doDelete = () => {
+        setConfirmDialog({
+            title: '确认删除商品',
+            description: [
+                '这会删除当前商品的发布记录。',
+                '如果商品已下架，会同时执行闲鱼云端删除；如果是同步失败商品，则只清理本地记录。此操作不可恢复。'
+            ],
+            confirmLabel: '确认删除',
+            tone: 'danger',
+            onConfirm: () => executeDelete()
+        });
     };
 
     return (
@@ -1457,12 +1969,26 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
                     onClose={() => setShowModal(false)}
                 />
             )}
+            {confirmDialog && (
+                <ActionConfirmModal
+                    title={confirmDialog.title}
+                    description={confirmDialog.description}
+                    confirmLabel={confirmDialog.confirmLabel}
+                    tone={confirmDialog.tone}
+                    onConfirm={() => {
+                        const action = confirmDialog.onConfirm;
+                        setConfirmDialog(null);
+                        action();
+                    }}
+                    onClose={() => setConfirmDialog(null)}
+                />
+            )}
         </div>
     );
 };
 
 // --- 系统配置管理视图组件 ---
-const SystemSettingsView = () => {
+const SystemSettingsView = ({ hideHeader = false }) => {
     const createOpenapiAccount = (index = 1) => ({
         id: `account-${Date.now()}-${index}`,
         name: `闲鱼账号 ${index}`,
@@ -1484,10 +2010,45 @@ const SystemSettingsView = () => {
         }
     });
 
+    const createSourceChannelAccount = (channelId = 'ali1688', index = 1) => ({
+        account_id: `${channelId}-account-${Date.now()}-${index}`,
+        label: channelId === 'ali1688' ? `1688 账号 ${index}` : `渠道账号 ${index}`,
+        enabled: true,
+        state_file: channelId === 'ali1688' ? 'state/ali1688/storage_state.json' : '',
+        user_data_dir: channelId === 'ali1688' ? 'profiles/ali1688_chrome_profile' : '',
+        cookies_source: 'storage_state',
+        notes: '',
+        session_report: {
+            is_usable: false,
+            account_name: '',
+            status_text: '未检测',
+            last_checked_at: '',
+            error_message: '',
+            meta: {}
+        }
+    });
+
+    const createSourceChannel = (index = 1, channelType = 'ali1688') => {
+        const channelId = channelType === 'ali1688' ? 'ali1688' : `source-channel-${Date.now()}-${index}`;
+        const firstAccount = createSourceChannelAccount(channelId, 1);
+        return {
+            channel_id: channelId,
+            channel_type: channelType,
+            label: channelType === 'ali1688' ? '1688 货源渠道' : `货源渠道 ${index}`,
+            enabled: true,
+            active_account_id: firstAccount.account_id,
+            accounts: [firstAccount]
+        };
+    };
+
     const [configs, setConfigs] = useState({
         openapi: {
             active_account_id: 'account-1',
             accounts: [createOpenapiAccount(1)]
+        },
+        source_channels: {
+            active_channel_id: 'ali1688',
+            channels: [createSourceChannel(1)]
         }
     });
     
@@ -1497,8 +2058,9 @@ const SystemSettingsView = () => {
     // 卡片折叠状态，默认收起
     const [llmCollapsed, setLlmCollapsed] = useState(true);
     const [openapiCollapsed, setOpenapiCollapsed] = useState(true);
-    const [sessionCollapsed, setSessionCollapsed] = useState(false);
-    const [crawlCollapsed, setCrawlCollapsed] = useState(false);
+    const [sessionCollapsed, setSessionCollapsed] = useState(true);
+    const [sourceChannelsCollapsed, setSourceChannelsCollapsed] = useState(true);
+    const [crawlCollapsed, setCrawlCollapsed] = useState(true);
     const [crawlConfig, setCrawlConfig] = useState({
         source_limit_1688: 10,
         source_filter_models: []
@@ -1544,6 +2106,7 @@ const SystemSettingsView = () => {
     const [xianyuLoginStatus, setXianyuLoginStatus] = useState(null);
     const [isXianyuLoggingIn, setIsXianyuLoggingIn] = useState(false);
     const [xianyuLoginSuccessMessage, setXianyuLoginSuccessMessage] = useState(null);
+    const [isCheckingSourceChannelStatus, setIsCheckingSourceChannelStatus] = useState(false);
     const [persistedOpenapiAccountIds, setPersistedOpenapiAccountIds] = useState([]);
     const xianyuLoginFlowRef = useRef(false);
     const prevXianyuLoggingInRef = useRef(false);
@@ -1552,6 +2115,12 @@ const SystemSettingsView = () => {
     const currentOpenapiAccounts = configs.openapi?.accounts || [];
     const activeOpenapiAccountId = configs.openapi?.active_account_id || currentOpenapiAccounts[0]?.id || '';
     const currentOpenapiAccount = currentOpenapiAccounts.find(item => item.id === activeOpenapiAccountId) || currentOpenapiAccounts[0] || createOpenapiAccount(1);
+    const currentSourceChannels = configs.source_channels?.channels || [];
+    const activeSourceChannelId = configs.source_channels?.active_channel_id || currentSourceChannels[0]?.channel_id || 'ali1688';
+    const currentSourceChannel = currentSourceChannels.find(item => item.channel_id === activeSourceChannelId) || currentSourceChannels[0] || createSourceChannel(1);
+    const currentSourceAccounts = currentSourceChannel?.accounts || [];
+    const activeSourceAccountId = currentSourceChannel?.active_account_id || currentSourceAccounts[0]?.account_id || '';
+    const currentSourceAccount = currentSourceAccounts.find(item => item.account_id === activeSourceAccountId) || currentSourceAccounts[0] || createSourceChannelAccount(currentSourceChannel?.channel_id || 'ali1688', 1);
 
     const setCurrentOpenapiAccount = (updater) => {
         setConfigs(prev => {
@@ -1565,6 +2134,48 @@ const SystemSettingsView = () => {
                     accounts: accounts.map(account => {
                         if (account.id !== activeId) return account;
                         return typeof updater === 'function' ? updater(account) : { ...account, ...updater };
+                    })
+                }
+            };
+        });
+    };
+
+    const setCurrentSourceChannel = (updater) => {
+        setConfigs(prev => {
+            const sourceChannels = prev.source_channels || {};
+            const channels = sourceChannels.channels || [];
+            const activeChannelId = sourceChannels.active_channel_id || channels[0]?.channel_id;
+            return {
+                ...prev,
+                source_channels: {
+                    ...sourceChannels,
+                    channels: channels.map(channel => {
+                        if (channel.channel_id !== activeChannelId) return channel;
+                        return typeof updater === 'function' ? updater(channel) : { ...channel, ...updater };
+                    })
+                }
+            };
+        });
+    };
+
+    const setCurrentSourceAccount = (updater) => {
+        setConfigs(prev => {
+            const sourceChannels = prev.source_channels || {};
+            const channels = sourceChannels.channels || [];
+            const activeChannelId = sourceChannels.active_channel_id || channels[0]?.channel_id;
+            return {
+                ...prev,
+                source_channels: {
+                    ...sourceChannels,
+                    channels: channels.map(channel => {
+                        if (channel.channel_id !== activeChannelId) return channel;
+                        return {
+                            ...channel,
+                            accounts: (channel.accounts || []).map(account => {
+                                if (account.account_id !== (channel.active_account_id || channel.accounts?.[0]?.account_id)) return account;
+                                return typeof updater === 'function' ? updater(account) : { ...account, ...updater };
+                            })
+                        };
                     })
                 }
             };
@@ -1630,6 +2241,129 @@ const SystemSettingsView = () => {
         }));
         setMessage(null);
         setError(null);
+    };
+
+    const handleSourceChannelSwitch = (channelId) => {
+        setConfigs(prev => ({
+            ...prev,
+            source_channels: {
+                ...prev.source_channels,
+                active_channel_id: channelId
+            }
+        }));
+        setMessage(null);
+        setError(null);
+    };
+
+    const handleAddSourceChannel = () => {
+        setConfigs(prev => {
+            const channels = prev.source_channels?.channels || [];
+            const nextChannel = createSourceChannel(channels.length + 1, 'custom');
+            return {
+                ...prev,
+                source_channels: {
+                    active_channel_id: nextChannel.channel_id,
+                    channels: [...channels, nextChannel]
+                }
+            };
+        });
+    };
+
+    const handleRemoveSourceChannel = (channelId) => {
+        setConfigs(prev => {
+            const channels = (prev.source_channels?.channels || []).filter(item => item.channel_id !== channelId);
+            const nextChannels = channels.length ? channels : [createSourceChannel(1)];
+            const nextActiveId = nextChannels.some(item => item.channel_id === prev.source_channels?.active_channel_id)
+                ? prev.source_channels.active_channel_id
+                : nextChannels[0].channel_id;
+            return {
+                ...prev,
+                source_channels: {
+                    active_channel_id: nextActiveId,
+                    channels: nextChannels
+                }
+            };
+        });
+    };
+
+    const handleAddSourceAccount = () => {
+        setCurrentSourceChannel(prev => {
+            const accounts = prev.accounts || [];
+            const nextAccount = createSourceChannelAccount(prev.channel_id, accounts.length + 1);
+            return {
+                ...prev,
+                active_account_id: nextAccount.account_id,
+                accounts: [...accounts, nextAccount]
+            };
+        });
+    };
+
+    const handleRemoveSourceAccount = (accountId) => {
+        setCurrentSourceChannel(prev => {
+            const accounts = (prev.accounts || []).filter(item => item.account_id !== accountId);
+            const nextAccounts = accounts.length ? accounts : [createSourceChannelAccount(prev.channel_id, 1)];
+            const nextActiveAccountId = nextAccounts.some(item => item.account_id === prev.active_account_id)
+                ? prev.active_account_id
+                : nextAccounts[0].account_id;
+            return {
+                ...prev,
+                active_account_id: nextActiveAccountId,
+                accounts: nextAccounts
+            };
+        });
+    };
+
+    const handleSourceAccountSwitch = (accountId) => {
+        setCurrentSourceChannel(prev => ({
+            ...prev,
+            active_account_id: accountId
+        }));
+    };
+
+    const handleCheckSourceChannelStatus = async () => {
+        if (!currentSourceChannel?.channel_id || !currentSourceAccount?.account_id) {
+            setError('当前渠道账号配置不完整，无法检测状态');
+            return;
+        }
+        setIsCheckingSourceChannelStatus(true);
+        try {
+            const resp = await fetch('/api/system/source_channel_status/check', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    channel_id: currentSourceChannel.channel_id,
+                    account_id: currentSourceAccount.account_id,
+                    channel: {
+                        channel_id: currentSourceChannel.channel_id,
+                        channel_type: currentSourceChannel.channel_type,
+                        label: currentSourceChannel.label
+                    },
+                    account: {
+                        account_id: currentSourceAccount.account_id,
+                        label: currentSourceAccount.label,
+                        state_file: currentSourceAccount.state_file,
+                        user_data_dir: currentSourceAccount.user_data_dir,
+                        cookies_source: currentSourceAccount.cookies_source,
+                        notes: currentSourceAccount.notes
+                    }
+                })
+            });
+            const res = await resp.json();
+            if (res.status === 'success') {
+                setCurrentSourceAccount(prev => ({
+                    ...prev,
+                    session_report: res.data.report || prev.session_report
+                }));
+                setMessage('货源渠道账号状态检测完成');
+                setError(null);
+            } else {
+                setError(res.msg || '检测渠道账号状态失败');
+            }
+        } catch (err) {
+            setError('网络连接异常，检测状态失败');
+        } finally {
+            setIsCheckingSourceChannelStatus(false);
+        }
     };
 
     const handleAddOpenapiAccount = () => {
@@ -1870,7 +2604,42 @@ const SystemSettingsView = () => {
                     active_account_id: rawOpenapi.active_account_id || accounts[0]?.id || 'account-1',
                     accounts: accounts.length ? accounts : [createOpenapiAccount(1)]
                 };
-                setConfigs({ openapi: openapiData });
+                const rawSourceChannels = data.source_channels || {};
+                const sourceChannels = (rawSourceChannels.channels || []).map((channel, idx) => {
+                    const accounts = (channel.accounts || []).map((account, accountIdx) => ({
+                        account_id: account.account_id || `${channel.channel_id || 'channel'}-account-${accountIdx + 1}`,
+                        label: account.label || `渠道账号 ${accountIdx + 1}`,
+                        enabled: account.enabled !== false,
+                        state_file: account.state_file || '',
+                        user_data_dir: account.user_data_dir || '',
+                        cookies_source: account.cookies_source || 'storage_state',
+                        notes: account.notes || '',
+                        session_report: account.session_report || {
+                            is_usable: false,
+                            account_name: '',
+                            status_text: '未检测',
+                            last_checked_at: '',
+                            error_message: '',
+                            meta: {}
+                        }
+                    }));
+                    return {
+                        channel_id: channel.channel_id || `source-channel-${idx + 1}`,
+                        channel_type: channel.channel_type || 'custom',
+                        label: channel.label || `货源渠道 ${idx + 1}`,
+                        enabled: channel.enabled !== false,
+                        active_account_id: channel.active_account_id || accounts[0]?.account_id || '',
+                        accounts: accounts.length ? accounts : [createSourceChannelAccount(channel.channel_id || `source-channel-${idx + 1}`, 1)]
+                    };
+                });
+                const sourceChannelsData = {
+                    active_channel_id: rawSourceChannels.active_channel_id || sourceChannels[0]?.channel_id || 'ali1688',
+                    channels: sourceChannels.length ? sourceChannels : [createSourceChannel(1)]
+                };
+                setConfigs({
+                    openapi: openapiData,
+                    source_channels: sourceChannelsData
+                });
                 setPersistedOpenapiAccountIds(openapiData.accounts.map(item => item.id));
                 
                 // 初始化加载动态元数据并在完成后回显示发货地址省市区
@@ -2046,7 +2815,8 @@ const SystemSettingsView = () => {
         const payload = {
             llm: updatedLlm,
             openapi: configs.openapi,
-            crawl: crawlConfig
+            crawl: crawlConfig,
+            source_channels: configs.source_channels
         };
 
         try {
@@ -2138,11 +2908,13 @@ const SystemSettingsView = () => {
                 </div>
             )}
 
-            <header className="mb-6 flex flex-col gap-4 md:flex-row md:items-start md:justify-between">
-                <div>
-                    <h1 className="font-sans text-2xl font-bold text-on-surface">系统参数配置</h1>
-                    <p className="font-sans text-sm text-secondary mt-1">全局管理大模型服务密钥及闲鱼 OpenAPI 的各类配置。</p>
-                </div>
+            <header className={`mb-6 flex flex-col gap-4 md:flex-row md:items-start ${hideHeader ? 'md:justify-end' : 'md:justify-between'}`}>
+                {!hideHeader && (
+                    <div>
+                        <h1 className="font-sans text-2xl font-bold text-on-surface">系统参数配置</h1>
+                        <p className="font-sans text-sm text-secondary mt-1">全局管理大模型服务密钥及闲鱼 OpenAPI 的各类配置。</p>
+                    </div>
+                )}
                 <div className="flex justify-end gap-3 md:shrink-0">
                     <button
                         type="button"
@@ -2580,6 +3352,233 @@ const SystemSettingsView = () => {
                     )}
                 </div>
 
+                {/* 4. 货源渠道号池配置 */}
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow space-y-6 mt-6">
+                    <div className="flex justify-between items-center border-b border-border-hairline pb-2.5 mb-4">
+                        <div
+                            className="flex items-center gap-2 cursor-pointer select-none group/title"
+                            onClick={() => setSourceChannelsCollapsed(!sourceChannelsCollapsed)}
+                        >
+                            <span className="material-symbols-outlined text-primary">hub</span>
+                            <span className="font-sans text-sm font-bold text-on-surface group-hover/title:text-primary transition-colors">货源渠道号池</span>
+                            <span className="material-symbols-outlined text-secondary text-[20px] transition-transform duration-200" style={{ transform: sourceChannelsCollapsed ? 'rotate(0deg)' : 'rotate(180deg)' }}>
+                                expand_more
+                            </span>
+                        </div>
+                    </div>
+
+                    {!sourceChannelsCollapsed && (
+                        <div className="space-y-6">
+                            <div className="space-y-3">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    {currentSourceChannels.map((channel, idx) => {
+                                        const isActive = channel.channel_id === activeSourceChannelId;
+                                        return (
+                                            <div
+                                                key={channel.channel_id}
+                                                className={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-[11px] font-sans ${isActive ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border-hairline bg-surface-container-low text-secondary'}`}
+                                            >
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleSourceChannelSwitch(channel.channel_id)}
+                                                    className="font-semibold cursor-pointer"
+                                                >
+                                                    {channel.label || `货源渠道 ${idx + 1}`}
+                                                </button>
+                                                {currentSourceChannels.length > 1 && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleRemoveSourceChannel(channel.channel_id)}
+                                                        className="material-symbols-outlined text-[14px] cursor-pointer opacity-70 hover:opacity-100"
+                                                        title="删除渠道"
+                                                    >
+                                                        close
+                                                    </button>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                    <button
+                                        type="button"
+                                        onClick={handleAddSourceChannel}
+                                        className="px-3 py-1.5 rounded-full border border-dashed border-primary/35 text-primary text-[11px] font-sans font-semibold hover:bg-primary/5 transition-colors"
+                                    >
+                                        + 新增渠道
+                                    </button>
+                                </div>
+                                <h4 className="font-sans text-sm font-bold text-on-surface">渠道基础配置</h4>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                <div className="space-y-1">
+                                    <label className="block font-sans text-xs text-secondary font-semibold">渠道名称</label>
+                                    <input
+                                        type="text"
+                                        value={currentSourceChannel.label || ''}
+                                        onChange={(e) => setCurrentSourceChannel(prev => ({ ...prev, label: e.target.value }))}
+                                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans"
+                                        placeholder="例如：1688 主渠道"
+                                    />
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="block font-sans text-xs text-secondary font-semibold">渠道类型</label>
+                                    <select
+                                        value={currentSourceChannel.channel_type || 'custom'}
+                                        onChange={(e) => setCurrentSourceChannel(prev => ({ ...prev, channel_type: e.target.value }))}
+                                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans cursor-pointer"
+                                    >
+                                        <option value="ali1688">1688</option>
+                                        <option value="taobao">淘宝（预留）</option>
+                                        <option value="pdd">拼多多（预留）</option>
+                                        <option value="custom">自定义渠道</option>
+                                    </select>
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="block font-sans text-xs text-secondary font-semibold">当前激活账号</label>
+                                    <select
+                                        value={activeSourceAccountId}
+                                        onChange={(e) => handleSourceAccountSwitch(e.target.value)}
+                                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans cursor-pointer"
+                                    >
+                                        {currentSourceAccounts.map(account => (
+                                            <option key={account.account_id} value={account.account_id}>{account.label || account.account_id}</option>
+                                        ))}
+                                    </select>
+                                </div>
+                            </div>
+
+                            <div className="border-t border-border-hairline/80 pt-4 space-y-4">
+                                <div className="flex flex-wrap items-center gap-2">
+                                    {currentSourceAccounts.map((account, idx) => {
+                                        const isActive = account.account_id === activeSourceAccountId;
+                                        return (
+                                            <div
+                                                key={account.account_id}
+                                                className={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-[11px] font-sans ${isActive ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border-hairline bg-surface-container-low text-secondary'}`}
+                                            >
+                                                <button
+                                                    type="button"
+                                                    onClick={() => handleSourceAccountSwitch(account.account_id)}
+                                                    className="font-semibold cursor-pointer"
+                                                >
+                                                    {account.label || `渠道账号 ${idx + 1}`}
+                                                </button>
+                                                {currentSourceAccounts.length > 1 && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleRemoveSourceAccount(account.account_id)}
+                                                        className="material-symbols-outlined text-[14px] cursor-pointer opacity-70 hover:opacity-100"
+                                                        title="删除账号"
+                                                    >
+                                                        close
+                                                    </button>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                    <button
+                                        type="button"
+                                        onClick={handleAddSourceAccount}
+                                        className="px-3 py-1.5 rounded-full border border-dashed border-primary/35 text-primary text-[11px] font-sans font-semibold hover:bg-primary/5 transition-colors"
+                                    >
+                                        + 新增账号
+                                    </button>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                    <div className="space-y-1">
+                                        <label className="block font-sans text-xs text-secondary font-semibold">账号备注</label>
+                                        <input
+                                            type="text"
+                                            value={currentSourceAccount.label || ''}
+                                            onChange={(e) => setCurrentSourceAccount(prev => ({ ...prev, label: e.target.value }))}
+                                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans"
+                                            placeholder="例如：1688 主账号"
+                                        />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="block font-sans text-xs text-secondary font-semibold">Cookie 来源</label>
+                                        <select
+                                            value={currentSourceAccount.cookies_source || 'storage_state'}
+                                            onChange={(e) => setCurrentSourceAccount(prev => ({ ...prev, cookies_source: e.target.value }))}
+                                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans cursor-pointer"
+                                        >
+                                            <option value="storage_state">storage_state</option>
+                                            <option value="user_data_dir">user_data_dir</option>
+                                        </select>
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="block font-sans text-xs text-secondary font-semibold">状态文件路径 (state_file)</label>
+                                        <input
+                                            type="text"
+                                            value={currentSourceAccount.state_file || ''}
+                                            onChange={(e) => setCurrentSourceAccount(prev => ({ ...prev, state_file: e.target.value }))}
+                                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                            placeholder="state/ali1688/storage_state.json"
+                                        />
+                                    </div>
+                                    <div className="space-y-1">
+                                        <label className="block font-sans text-xs text-secondary font-semibold">浏览器用户目录 (user_data_dir)</label>
+                                        <input
+                                            type="text"
+                                            value={currentSourceAccount.user_data_dir || ''}
+                                            onChange={(e) => setCurrentSourceAccount(prev => ({ ...prev, user_data_dir: e.target.value }))}
+                                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
+                                            placeholder="profiles/ali1688_chrome_profile"
+                                        />
+                                    </div>
+                                    <div className="space-y-1 md:col-span-2">
+                                        <label className="block font-sans text-xs text-secondary font-semibold">备注</label>
+                                        <input
+                                            type="text"
+                                            value={currentSourceAccount.notes || ''}
+                                            onChange={(e) => setCurrentSourceAccount(prev => ({ ...prev, notes: e.target.value }))}
+                                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans"
+                                            placeholder="可记录该账号的用途、归属渠道或其他说明"
+                                        />
+                                    </div>
+                                </div>
+
+                                <div className="rounded-xl border border-border-hairline bg-surface-container-low px-4 py-4 flex flex-col gap-4">
+                                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                        <div className="space-y-1">
+                                            <div className="flex items-center gap-2">
+                                                <span className={`inline-block w-2 h-2 rounded-full ${currentSourceAccount.session_report?.is_usable ? 'bg-success' : 'bg-error'}`}></span>
+                                                <span className="font-sans text-sm font-bold text-on-surface">
+                                                    {currentSourceAccount.session_report?.status_text || '未检测'}
+                                                </span>
+                                            </div>
+                                            <div className="font-sans text-xs text-secondary">
+                                                账号名：{currentSourceAccount.session_report?.account_name || '未识别'}
+                                            </div>
+                                            <div className="font-sans text-[11px] text-secondary">
+                                                最近检测：{currentSourceAccount.session_report?.last_checked_at || '暂无'}
+                                            </div>
+                                        </div>
+                                        <button
+                                            type="button"
+                                            onClick={handleCheckSourceChannelStatus}
+                                            disabled={isCheckingSourceChannelStatus}
+                                            className="px-4 py-2 bg-primary hover:bg-primary-hover disabled:bg-primary/50 text-on-primary rounded-lg font-sans text-xs font-bold transition-colors shadow-sm flex items-center gap-1.5 active:scale-95 duration-100"
+                                        >
+                                            <span className={`material-symbols-outlined text-[16px] ${isCheckingSourceChannelStatus ? 'animate-spin' : ''}`}>
+                                                {isCheckingSourceChannelStatus ? 'autorenew' : 'sync'}
+                                            </span>
+                                            <span>{isCheckingSourceChannelStatus ? '正在检测...' : '检测状态'}</span>
+                                        </button>
+                                    </div>
+
+                                    {!!currentSourceAccount.session_report?.error_message && (
+                                        <div className="rounded-lg bg-error/6 border border-error/15 px-3 py-2 text-[11px] text-error leading-relaxed">
+                                            {currentSourceAccount.session_report.error_message}
+                                        </div>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+                    )}
+                </div>
+
                 {/* 4. 商品爬取与筛选配置 Bento 卡片 */}
                 <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow space-y-6 mt-6">
                     <div className="flex justify-between items-center border-b border-border-hairline pb-2.5">
@@ -2691,6 +3690,7 @@ const SystemSettingsView = () => {
 
 const App = () => {
     const [view, setActiveView] = useState("dashboard"); 
+    const [sidebarCollapsed, setSidebarCollapsed] = useState(() => localStorage.getItem("xianyu-sidebar-collapsed") === "true");
     const [tasks, setTasks] = useState([]);
     const [selectedTask, setSelectedTask] = useState(null);
     const [detailedItems, setDetailedItems] = useState([]); 
@@ -2705,6 +3705,7 @@ const App = () => {
     const [batchDeleting, setBatchDeleting] = useState(false);
     const [batchStatusMap, setBatchStatusMap] = useState({});
     const [batchResultMap, setBatchResultMap] = useState({});
+    const [confirmDialog, setConfirmDialog] = useState(null);
 
     // 全局双主题状态机
     const [theme, setTheme] = useState(() => localStorage.getItem("xianyu-theme") || "light");
@@ -2720,13 +3721,14 @@ const App = () => {
         localStorage.setItem("xianyu-theme", theme);
     }, [theme]);
 
-    // 当切换商品详情时，自动重置批量状态，并默认勾选全部未丢弃的货源
+    useEffect(() => {
+        localStorage.setItem("xianyu-sidebar-collapsed", sidebarCollapsed ? "true" : "false");
+    }, [sidebarCollapsed]);
+
+    // 当切换商品详情时，自动重置批量状态，并清空当前勾选
     useEffect(() => {
         if (selectedItem) {
-            const activeIds = (selectedItem.sources || [])
-                .filter(src => !src.drop_reason)
-                .map(src => src.db_id);
-            setSelectedIds(activeIds);
+            setSelectedIds([]);
             setBatchStatusMap({});
             setBatchResultMap({});
         } else {
@@ -2735,6 +3737,27 @@ const App = () => {
             setBatchResultMap({});
         }
     }, [selectedItem]);
+
+    const selectableSources = (selectedItem?.sources || []).filter(src => !src.drop_reason);
+    const selectedSources = selectableSources.filter(src => selectedIds.includes(src.db_id));
+    const normalizeSourceActionStatus = (rawStatus) => {
+        if (rawStatus === 'success' || rawStatus === 'done') return 'done';
+        if (rawStatus === 'depublished') return 'depublished';
+        if (rawStatus === 'publishing' || rawStatus === 'depublishing' || rawStatus === 'deleting' || rawStatus === 'failed') return rawStatus;
+        if (rawStatus === 'deleted' || rawStatus === 'none' || rawStatus === 'idle' || !rawStatus) return 'idle';
+        return 'idle';
+    };
+    const getSourceActionStatus = (src) => normalizeSourceActionStatus(batchStatusMap[src.db_id] || src.publish_status || 'idle');
+    const publishableIds = selectedSources
+        .filter(src => ['idle', 'failed', 'depublished'].includes(getSourceActionStatus(src)))
+        .map(src => src.db_id);
+    const depublishableIds = selectedSources
+        .filter(src => getSourceActionStatus(src) === 'done')
+        .map(src => src.db_id);
+    const deletableIds = selectedSources
+        .filter(src => ['depublished', 'failed'].includes(getSourceActionStatus(src)))
+        .map(src => src.db_id);
+    const hasSelectedBatchActions = selectedSources.length > 0;
 
     const refreshData = () => {
         if (document.hidden) return;
@@ -2767,7 +3790,18 @@ const App = () => {
     };
     const pauseTask = (id) => { fetch(`/api/tasks/${id}/pause`, { method: "POST" }).then(refreshData); };
     const retryTask = (id) => { fetch(`/api/tasks/${id}/retry`, { method: "POST" }).then(refreshData); };
-    const deleteTask = (id) => { if (confirm("确定永久逻辑删除该任务吗?")) fetch(`/api/tasks/${id}`, { method: "DELETE" }).then(refreshData); };
+    const deleteTask = (id) => {
+        setConfirmDialog({
+            title: '确认删除任务',
+            description: [
+                '这会永久逻辑删除当前任务。',
+                '删除后任务不会再出现在任务列表和分析资产视图中，请确认这是你要的操作。'
+            ],
+            confirmLabel: '确认删除任务',
+            tone: 'danger',
+            onConfirm: () => fetch(`/api/tasks/${id}`, { method: "DELETE" }).then(refreshData)
+        });
+    };
     
     const doBatchPublish = async () => {
         if (selectedIds.length === 0) {
@@ -2776,9 +3810,10 @@ const App = () => {
         }
         setBatchPublishing(true);
         
-        const toPublishIds = selectedIds.filter(dbId => batchStatusMap[dbId] !== 'done');
+        const toPublishIds = [...publishableIds];
         if (toPublishIds.length === 0) {
             setBatchPublishing(false);
+            alert("当前勾选商品里，没有可执行批量发布的货源。");
             return;
         }
         
@@ -2824,18 +3859,9 @@ const App = () => {
         setBatchPublishing(false);
     };
 
-    const doBatchDepublish = async () => {
-        if (selectedIds.length === 0) {
-            alert("请先选择要批量下架的货源");
-            return;
-        }
-        if (!confirm(`确定要批量下架所选的 ${selectedIds.length} 个商品吗？`)) {
-            return;
-        }
+    const executeSourceBatchDepublish = async (toDepublishIds) => {
         setBatchDepublishing(true);
-        
-        const toDepublishIds = [...selectedIds];
-        
+
         toDepublishIds.forEach(dbId => {
             setBatchStatusMap(prev => ({ ...prev, [dbId]: 'depublishing' }));
         });
@@ -2872,6 +3898,28 @@ const App = () => {
         setBatchDepublishing(false);
     };
 
+    const doBatchDepublish = async () => {
+        if (selectedIds.length === 0) {
+            alert("请先选择要批量下架的货源");
+            return;
+        }
+        const toDepublishIds = [...depublishableIds];
+        if (toDepublishIds.length === 0) {
+            alert("当前勾选商品里，没有处于已上架状态的货源。");
+            return;
+        }
+        setConfirmDialog({
+            title: '确认批量下架',
+            description: [
+                `即将批量下架 ${toDepublishIds.length} 个已上架货源。`,
+                '下架后商品会从闲鱼云端撤下，但本地发布记录会保留，方便后续继续处理。'
+            ],
+            confirmLabel: `确认下架 ${toDepublishIds.length} 项`,
+            tone: 'warning',
+            onConfirm: () => executeSourceBatchDepublish(toDepublishIds)
+        });
+    };
+
     const handleStatusLoaded = (dbId, status, result) => {
         setBatchStatusMap(prev => {
             if (prev[dbId] === 'publishing' || prev[dbId] === 'depublishing' || prev[dbId] === 'deleting') {
@@ -2890,29 +3938,8 @@ const App = () => {
         }
     };
 
-    const doBatchDelete = async () => {
-        if (selectedIds.length === 0) {
-            alert("请先选择要批量删除的货源");
-            return;
-        }
-
-        const invalidIds = selectedIds.filter(dbId => {
-            const status = batchStatusMap[dbId] || 'idle';
-            return status !== 'depublished';
-        });
-
-        if (invalidIds.length > 0) {
-            alert("只有已下架的商品可以删除。请取消勾选未下架的商品。");
-            return;
-        }
-
-        if (!confirm(`确定要批量删除所选的 ${selectedIds.length} 个商品吗？\n此操作将彻底删除闲管家中的对应云端商品，且不可恢复！`)) {
-            return;
-        }
-
+    const executeSourceBatchDelete = async (toDeleteIds) => {
         setBatchDeleting(true);
-        const toDeleteIds = [...selectedIds];
-
         toDeleteIds.forEach(dbId => {
             setBatchStatusMap(prev => ({ ...prev, [dbId]: 'deleting' }));
         });
@@ -2953,6 +3980,28 @@ const App = () => {
         setBatchDeleting(false);
     };
 
+    const doBatchDelete = async () => {
+        if (selectedIds.length === 0) {
+            alert("请先选择要批量删除的货源");
+            return;
+        }
+        const toDeleteIds = [...deletableIds];
+        if (toDeleteIds.length === 0) {
+            alert("当前勾选商品里，没有可删除的已下架或同步失败货源。");
+            return;
+        }
+        setConfirmDialog({
+            title: '确认批量删除',
+            description: [
+                `即将批量删除 ${toDeleteIds.length} 个货源记录。`,
+                '已下架商品会执行云端删除；同步失败商品只会清理本地记录。此操作不可恢复。'
+            ],
+            confirmLabel: `确认删除 ${toDeleteIds.length} 项`,
+            tone: 'danger',
+            onConfirm: () => executeSourceBatchDelete(toDeleteIds)
+        });
+    };
+
     const loadTaskResults = async (task) => {
         const resp = await fetch(`/api/task_details/${task.id}`);
         const data = await resp.json();
@@ -2966,9 +4015,56 @@ const App = () => {
     const pageSize = 4;
     const totalPages = selectedItem ? Math.ceil((selectedItem.sources?.length || 0) / pageSize) : 0;
     const paginatedSources = selectedItem ? (selectedItem.sources || []).slice((sourcePage - 1) * pageSize, sourcePage * pageSize) : [];
+    const pageIntro = (() => {
+        if (view === 'item_detail') return null;
+        if (view === 'dashboard') return { icon: 'dashboard', title: '控制台中心', description: '全局扫描 Worker 统计面板及后台状态概览。' };
+        if (view === 'tasks') return { icon: 'list_alt', title: '任务队列中心', description: '查看和管理各个品类的深度爬取状态。左侧显示活跃进行中队列，右侧显示归档历史。' };
+        if (view === 'results' && selectedTask) return { icon: 'query_stats', title: `“${selectedTask.keyword}” 爆款深度对比报告`, description: '每个爆款商品均可以点入查看 1688 货源深度对比表。' };
+        if (view === 'results') return { icon: 'travel_explore', title: '选品决策资产库', description: '系统已完成的爆款数据中心。点击各个品类卡片，可直接穿透查看商品的 1688 源头采购价与深度分析。' };
+        if (view === 'published') return { icon: 'shopping_bag', title: '闲鱼上架商品中枢', description: '管理并监控已经在闲鱼铺货成功的商品，支持与 1688 源头采购价、物流信息实时联动。点击行项目可展开详情数据与下架控制。' };
+        if (view === 'logs') return { icon: 'analytics', title: '任务日志中心', description: '实时监控扫描 Worker 的后台标准输出日志。' };
+        if (view === 'token_stats') return { icon: 'generating_tokens', title: 'AI Token 计量舱', description: '系统大模型调用统计、模型消耗占比及审计流水线。' };
+        if (view === 'settings') return { icon: 'settings', title: '系统参数配置', description: '全局管理大模型服务密钥及闲鱼 OpenAPI 的各类配置。' };
+        return null;
+    })();
+    const topBarMeta = (() => {
+        if (view === 'item_detail') {
+            return {
+                icon: 'inventory_2',
+                title: '决策资产 / 货源明细',
+                description: '查看单个爆款商品对应的 1688 深度货源对比结果。'
+            };
+        }
+        if (view === 'token_stats') {
+            return {
+                icon: 'generating_tokens',
+                title: 'AI Token 计量舱 / 成本审计',
+                description: '查看模型消耗、功能占比和最近调用流水。'
+            };
+        }
+        if (view === 'settings') {
+            return {
+                icon: 'settings',
+                title: '系统参数配置 / 密钥管理',
+                description: '统一管理模型配置、闲鱼 OpenAPI 与系统参数。'
+            };
+        }
+        return pageIntro || {
+            icon: 'explore',
+            title: view,
+            description: '当前功能页面'
+        };
+    })();
 
     const navItemClass = (itemKey) => {
         const isActive = (itemKey === 'results' && ['results', 'item_detail'].includes(view)) || view === itemKey;
+        if (sidebarCollapsed) {
+            return `group relative flex items-center justify-center px-3 py-3 rounded-xl font-sans text-xs transition-all duration-150 scale-100 active:scale-95 cursor-pointer ${
+                isActive
+                ? 'text-primary font-bold bg-primary/10 border border-primary/20 shadow-sm shadow-primary/5'
+                : 'text-secondary hover:bg-surface-container-high transition-colors'
+            }`;
+        }
         return `flex items-center gap-3 px-4 py-3 rounded-xl font-sans text-xs transition-all duration-150 scale-100 active:scale-95 cursor-pointer ${
             isActive 
             ? 'text-primary font-bold bg-surface-container border-r-4 border-primary' 
@@ -2976,115 +4072,165 @@ const App = () => {
         }`;
     };
 
+    const collapsedSidebarIconButtonClass = 'group relative flex items-center justify-center px-3 py-3 rounded-xl font-sans text-xs text-secondary transition-all duration-150 scale-100 active:scale-95 cursor-pointer hover:bg-surface-container-high';
+    const sidebarUtilityWrapperClass = sidebarCollapsed ? 'group relative flex justify-center' : 'group relative';
+    const sidebarUtilityButtonClass = sidebarCollapsed
+        ? 'w-12 h-12 rounded-xl'
+        : 'w-full h-11 rounded-xl px-3';
+    const sidebarUtilitySurfaceClass = sidebarCollapsed
+        ? `${collapsedSidebarIconButtonClass} w-12 h-12 border border-transparent bg-transparent gap-0`
+        : `${sidebarUtilityButtonClass} flex items-center justify-center gap-2 border border-border-hairline bg-surface-container-low hover:bg-surface-container-high text-secondary transition-colors font-sans text-xs scale-100 active:scale-95 duration-100`;
+    const sidebarStatusCardClass = sidebarCollapsed
+        ? 'w-12 h-12 rounded-xl flex items-center justify-center bg-transparent border border-transparent'
+        : 'w-full h-14 rounded-xl px-3 py-2';
+
     return (
         <React.Fragment>
             {/* SideNavBar */}
-            <aside className="w-[260px] h-screen bg-surface-container-lowest border-r border-border-hairline fixed left-0 top-0 flex flex-col py-6 z-20 transition-all duration-200">
-                <div className="px-6 mb-8 flex items-center gap-3">
-                    <div className="w-9 h-9 rounded bg-primary flex items-center justify-center text-on-primary">
-                        <span className="material-symbols-outlined text-[20px]" style={{fontVariationSettings: "'FILL' 1"}}>precision_manufacturing</span>
-                    </div>
-                    <div>
-                        <h1 className="font-sans text-base font-bold text-primary tracking-tight">选品中枢 PRO</h1>
-                        <p className="font-mono text-[9px] text-secondary uppercase tracking-wider">Automated Precision</p>
+            <aside className={`${sidebarCollapsed ? 'w-[88px]' : 'w-[260px]'} h-screen bg-surface-container-lowest border-r border-border-hairline fixed left-0 top-0 flex flex-col py-6 z-20 transition-all duration-200`}>
+                <div className={`${sidebarCollapsed ? 'px-3' : 'px-6'} mb-8 flex items-center ${sidebarCollapsed ? 'justify-center' : 'gap-3'}`}>
+                    <div className={`flex items-center ${sidebarCollapsed ? 'justify-center' : 'gap-3 min-w-0'}`}>
+                        <div className="w-9 h-9 rounded bg-primary flex items-center justify-center text-on-primary shrink-0">
+                            <span className="material-symbols-outlined text-[20px]" style={{fontVariationSettings: "'FILL' 1"}}>precision_manufacturing</span>
+                        </div>
+                        <div className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>
+                            <h1 className="font-sans text-base font-bold text-primary tracking-tight whitespace-nowrap">选品中枢 PRO</h1>
+                            <p className="font-mono text-[9px] text-secondary uppercase tracking-wider whitespace-nowrap">Automated Precision</p>
+                        </div>
                     </div>
                 </div>
 
-                <ul className="flex-1 px-4 space-y-1 w-full">
+                <ul className={`flex-1 ${sidebarCollapsed ? 'px-3' : 'px-4'} space-y-1 w-full`}>
                     <li className={navItemClass("dashboard")} onClick={() => setActiveView("dashboard")}>
                         <span className="material-symbols-outlined text-[18px]">dashboard</span>
-                        <span>控制台中心</span>
+                        <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>控制台中心</span>
+                        {sidebarCollapsed && <span className="sidebar-tooltip">控制台中心</span>}
                     </li>
                     <li className={navItemClass("tasks")} onClick={() => setActiveView("tasks")}>
                         <span className="material-symbols-outlined text-[18px]">list_alt</span>
-                        <span>任务队列</span>
+                        <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>任务队列</span>
+                        {sidebarCollapsed && <span className="sidebar-tooltip">任务队列</span>}
                     </li>
                     <li className={navItemClass("results")} onClick={() => setActiveView("results")}>
                         <span className="material-symbols-outlined text-[18px]">travel_explore</span>
-                        <span>决策资产库</span>
+                        <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>决策资产库</span>
+                        {sidebarCollapsed && <span className="sidebar-tooltip">决策资产库</span>}
                     </li>
                     <li className={navItemClass("published")} onClick={() => setActiveView("published")}>
                         <span className="material-symbols-outlined text-[18px]">shopping_bag</span>
-                        <span>已发布管理</span>
+                        <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>已发布管理</span>
+                        {sidebarCollapsed && <span className="sidebar-tooltip">已发布管理</span>}
                     </li>
                     <li className={navItemClass("logs")} onClick={() => setActiveView("logs")}>
                         <span className="material-symbols-outlined text-[18px]">analytics</span>
-                        <span>日志日志</span>
+                        <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>日志日志</span>
+                        {sidebarCollapsed && <span className="sidebar-tooltip">日志日志</span>}
                     </li>
                     <li className={navItemClass("token_stats")} onClick={() => setActiveView("token_stats")}>
                         <span className="material-symbols-outlined text-[18px]">generating_tokens</span>
-                        <span>AI Token 计量舱</span>
+                        <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>AI Token 计量舱</span>
+                        {sidebarCollapsed && <span className="sidebar-tooltip">AI Token 计量舱</span>}
                     </li>
                     <li className={navItemClass("settings")} onClick={() => setActiveView("settings")}>
                         <span className="material-symbols-outlined text-[18px]">settings</span>
-                        <span>系统设置</span>
+                        <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>系统设置</span>
+                        {sidebarCollapsed && <span className="sidebar-tooltip">系统设置</span>}
                     </li>
                 </ul>
 
                 {/* 侧栏底部状态 */}
-                <div className="px-4 mt-auto space-y-3">
-                    <div className="p-3.5 rounded-xl bg-surface-container-low border border-border-hairline">
-                        <div className="flex items-center gap-2 mb-1.5">
-                            <span className={`material-symbols-outlined text-[16px] ${sysStatus["1688_login"] === '有效' ? 'text-success' : 'text-error'}`} style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
-                            <span className="font-sans text-[11px] text-secondary font-medium">1688 接入状态</span>
+                <div className={`${sidebarCollapsed ? 'px-3' : 'px-4'} mt-auto space-y-3`}>
+                    <div className={sidebarUtilityWrapperClass}>
+                        <div className={`${sidebarStatusCardClass} ${sidebarCollapsed ? '' : 'bg-surface-container-low border border-border-hairline'}`}>
+                            <div className={`flex items-center ${sidebarCollapsed ? 'justify-center' : 'gap-2'}`}>
+                                <span className={`material-symbols-outlined text-[16px] ${sysStatus["1688_login"] === '有效' ? 'text-success' : 'text-error'}`} style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
+                                <span className={`sidebar-fade-content font-sans text-[11px] text-secondary font-medium ${sidebarCollapsed ? 'is-collapsed' : ''}`}>1688 接入状态</span>
+                            </div>
+                            {!sidebarCollapsed && (
+                                <div className="mt-1 pl-6 font-mono text-xs font-bold text-on-surface">
+                                    {sysStatus["1688_login"] || 'OFFLINE'}
+                                </div>
+                            )}
                         </div>
-                        <div className="font-mono text-xs font-bold text-on-surface">
-                            {sysStatus["1688_login"] || 'OFFLINE'}
-                        </div>
+                        {sidebarCollapsed && (
+                            <span className="sidebar-tooltip">1688 接入状态：{sysStatus["1688_login"] || 'OFFLINE'}</span>
+                        )}
                     </div>
 
-                    <button 
-                        onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')}
-                        className="w-full flex items-center justify-center gap-2 py-2 bg-surface-container-high border border-border-hairline text-on-surface hover:text-primary rounded-lg transition-colors font-sans text-xs scale-100 active:scale-95 duration-100"
-                    >
-                        <span className="material-symbols-outlined text-[16px]">{theme === 'light' ? 'dark_mode' : 'light_mode'}</span>
-                        <span>{theme === 'light' ? '深色 midnight' : '浅色 efficient'}</span>
-                    </button>
+                    <div className={sidebarUtilityWrapperClass}>
+                        <button
+                            type="button"
+                            onClick={() => setSidebarCollapsed(prev => !prev)}
+                            className={sidebarUtilitySurfaceClass}
+                        >
+                            <span className="material-symbols-outlined text-[16px]">{sidebarCollapsed ? 'left_panel_open' : 'left_panel_close'}</span>
+                            <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>{sidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}</span>
+                        </button>
+                        {sidebarCollapsed && (
+                            <span className="sidebar-tooltip">展开侧边栏</span>
+                        )}
+                    </div>
+
+                    <div className={sidebarUtilityWrapperClass}>
+                        <button 
+                            onClick={() => setTheme(t => t === 'light' ? 'dark' : 'light')}
+                            className={sidebarUtilitySurfaceClass}
+                        >
+                            <span className="material-symbols-outlined text-[16px]">{theme === 'light' ? 'dark_mode' : 'light_mode'}</span>
+                            <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>{theme === 'light' ? '深色 midnight' : '浅色 efficient'}</span>
+                        </button>
+                        {sidebarCollapsed && (
+                            <span className="sidebar-tooltip">{theme === 'light' ? '切换到深色 midnight' : '切换到浅色 efficient'}</span>
+                        )}
+                    </div>
                 </div>
             </aside>
 
             {/* TopNavBar */}
-            <header className="fixed top-0 right-0 left-[260px] h-16 bg-surface-container-lowest/80 backdrop-blur-md border-b border-border-hairline flex items-center justify-between px-6 z-10 w-[calc(100%-260px)] transition-all duration-200">
-                <div className="flex items-center gap-2 text-secondary">
-                    <span className="material-symbols-outlined text-[20px]">explore</span>
-                    <span className="font-sans text-xs font-bold capitalize">
-                        {view === 'item_detail' ? '决策资产 / 货源明细' : 
-                         view === 'token_stats' ? 'AI Token 计量舱 / 成本审计' : 
-                         view === 'settings' ? '系统参数配置 / 密钥管理' : 
-                         view}
-                    </span>
-                </div>
-                <div className="flex items-center gap-4">
-                    <div className="hidden sm:flex items-center px-3 py-1 bg-surface-container-low border border-border-hairline rounded-full">
-                        <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse mr-2"></span>
-                        <span className="font-sans text-[10px] text-secondary">系统健康运行</span>
+            <header className={`fixed top-0 right-0 ${sidebarCollapsed ? 'left-[88px] w-[calc(100%-88px)]' : 'left-[260px] w-[calc(100%-260px)]'} h-[72px] bg-surface-container-lowest/88 backdrop-blur-md border-b border-border-hairline flex items-center justify-between px-6 z-10 transition-all duration-200`}>
+                <div className="flex items-center gap-3 min-w-0 flex-1">
+                    <div className="w-10 h-10 rounded-xl bg-primary/10 border border-primary/15 flex items-center justify-center text-primary shrink-0">
+                        <span className="material-symbols-outlined text-[20px]">{topBarMeta.icon}</span>
                     </div>
-                    <div className="w-px h-6 bg-border-hairline"></div>
+                    <div className="min-w-0 flex-1">
+                        <div className="font-sans text-sm font-bold text-on-surface truncate">
+                            {topBarMeta.title}
+                        </div>
+                        <div className={`hidden lg:block font-sans text-[11px] text-secondary truncate transition-all duration-200 ${sidebarCollapsed ? 'max-w-[420px]' : 'max-w-[680px]'}`}>
+                            {topBarMeta.description}
+                        </div>
+                    </div>
+                </div>
+                <div className="flex items-center gap-4 shrink-0">
+                    <div className={`hidden sm:flex items-center px-3 py-1 bg-surface-container-low border border-border-hairline rounded-full overflow-hidden transition-all duration-200 ${sidebarCollapsed ? 'max-w-0 opacity-0 px-0 py-1 border-transparent' : 'max-w-[180px] opacity-100'}`}>
+                        <span className="w-1.5 h-1.5 rounded-full bg-success animate-pulse mr-2"></span>
+                        <span className={`topbar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>
+                            <span className="font-sans text-[10px] text-secondary">系统健康运行</span>
+                        </span>
+                    </div>
+                    <div className={`w-px h-6 bg-border-hairline transition-opacity duration-200 ${sidebarCollapsed ? 'opacity-0' : 'opacity-100'}`}></div>
                     <div className="flex items-center gap-2">
                         <div className="w-7 h-7 rounded-full bg-primary/10 border border-primary/20 flex items-center justify-center text-primary font-mono text-[10px] font-bold">
                             M
                         </div>
-                        <span className="font-sans text-xs text-secondary font-medium">管理员用户</span>
+                        <span className={`topbar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>
+                            <span className="font-sans text-xs text-secondary font-medium">管理员用户</span>
+                        </span>
                     </div>
                 </div>
             </header>
 
             {/* Main Container */}
-            <main className="ml-[260px] mt-16 p-6 overflow-y-auto flex-1 h-[calc(100vh-64px)] transition-all duration-200">
-                {view === 'logs' ? <LogViewer tasks={tasks} /> : 
-                 view === 'token_stats' ? <TokenStatsView /> :
-                 view === 'settings' ? <SystemSettingsView /> :
+            <main className={`${sidebarCollapsed ? 'ml-[88px]' : 'ml-[260px]'} mt-[72px] p-6 overflow-y-auto flex-1 h-[calc(100vh-72px)] transition-all duration-200`}>
+                {view === 'logs' ? <LogViewer tasks={tasks} hideHeader={true} /> : 
+                 view === 'token_stats' ? <TokenStatsView hideHeader={true} /> :
+                 view === 'settings' ? <SystemSettingsView hideHeader={true} /> :
                  view === "dashboard" ? (() => {
                     const activeTasks = tasks.filter(t => t.status !== '已完成');
                     const runningCount = tasks.filter(t => ['执行中', '正在暂停'].includes(t.status)).length;
                     const pendingCount = tasks.filter(t => t.status === '排队中').length;
                     return (
                         <div className="view-content">
-                            <header className="mb-6">
-                                <h1 className="font-sans text-2xl font-bold text-on-surface">控制台中心</h1>
-                                <p className="font-sans text-sm text-secondary mt-1">全局扫描 Worker 统计面板及后台状态概览。</p>
-                            </header>
-
                             {/* Bento Grid */}
                             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                                 <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 ambient-shadow glow-bg hover:border-primary transition-all duration-150 group relative overflow-hidden">
@@ -3185,11 +4331,6 @@ const App = () => {
                     const completedTasks = tasks.filter(t => t.status === '已完成');
                     return (
                         <div className="view-content">
-                            <header className="mb-6">
-                                <h1 className="font-sans text-2xl font-bold text-on-surface">任务队列中心</h1>
-                                <p className="font-sans text-sm text-secondary mt-1">查看和管理各个品类的深度爬取状态。左侧显示活跃进行中队列，右侧显示归档历史。</p>
-                            </header>
-
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
                                 {/* 左栏：执行队列 */}
                                 <div>
@@ -3336,13 +4477,10 @@ const App = () => {
                      selectedTask ? ( 
                          <div> 
                              <header className="mb-6 flex justify-between items-end">
-                                 <div>
-                                     <button onClick={() => setSelectedTask(null)} className="text-secondary hover:text-primary text-xs font-bold flex items-center gap-1 mb-2">
-                                         <span className="material-symbols-outlined text-[16px]">arrow_back</span>
-                                         返回决策资产列表
-                                     </button>
-                                     <h1 className="font-sans text-2xl font-bold text-on-surface">“{selectedTask.keyword}” 爆款深度对比报告</h1>
-                                 </div>
+                                 <button onClick={() => setSelectedTask(null)} className="text-secondary hover:text-primary text-xs font-bold flex items-center gap-1">
+                                     <span className="material-symbols-outlined text-[16px]">arrow_back</span>
+                                     返回决策资产列表
+                                 </button>
                                  <button 
                                      className="px-4 py-2 bg-primary hover:bg-primary-container text-white font-sans text-xs font-semibold rounded-lg shadow-sm transition-colors flex items-center gap-1"
                                      onClick={() => window.open(`/api/download/${selectedTask.id}`)}
@@ -3396,11 +4534,6 @@ const App = () => {
                          </div> 
                      ) : (
                          <div>
-                             <header className="mb-6">
-                                 <h1 className="font-sans text-2xl font-bold text-on-surface">选品决策资产库</h1>
-                                 <p className="font-sans text-sm text-secondary mt-1">系统已完成的爆款数据中心。点击各个品类卡片，可直接穿透查看商品的 1688 源头采购价与深度分析。</p>
-                             </header>
-                             
                              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
                                  {completedTasks.map(t => (
                                      <div 
@@ -3475,16 +4608,16 @@ const App = () => {
                                  <h3 className="font-sans text-sm font-bold text-on-surface">1688 货源深度对比表 ({selectedItem.sources?.length || 0} 条匹配)</h3>
                                  
                                  {/* 批量处理 */}
-                                 {selectedItem.sources?.filter(s => !s.drop_reason).length > 0 && (
+                                 {selectableSources.length > 0 && (
                                      <div className="flex items-center gap-4 bg-surface-container border border-border-hairline px-4 py-2 rounded-xl ambient-shadow">
                                          <label className="text-xs text-secondary font-semibold cursor-pointer flex items-center gap-1">
                                              <input 
                                                  type="checkbox" 
                                                  className="rounded border-secondary text-primary focus:ring-primary/20 w-4 h-4 cursor-pointer"
-                                                 checked={selectedItem.sources.filter(s => !s.drop_reason).length > 0 && selectedItem.sources.filter(s => !s.drop_reason).every(s => selectedIds.includes(s.db_id))}
+                                                 checked={selectableSources.length > 0 && selectableSources.every(s => selectedIds.includes(s.db_id))}
                                                  onChange={(e) => {
                                                      if (e.target.checked) {
-                                                         setSelectedIds(selectedItem.sources.filter(s => !s.drop_reason).map(s => s.db_id));
+                                                         setSelectedIds(selectableSources.map(s => s.db_id));
                                                      } else {
                                                          setSelectedIds([]);
                                                      }
@@ -3492,31 +4625,41 @@ const App = () => {
                                              />
                                              全选未丢弃
                                          </label>
-                                         <div className="w-px h-5 bg-border-hairline/60"></div>
-                                         
-                                         <div className="flex gap-2">
-                                             <button 
-                                                 className="px-3.5 py-1.5 bg-primary hover:bg-primary-container text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
-                                                 disabled={batchPublishing || batchDepublishing || batchDeleting || selectedIds.length === 0} 
-                                                 onClick={doBatchPublish}
-                                             >
-                                                 {batchPublishing ? "云同步中..." : `🚀 批量发布 (${selectedIds.length})`}
-                                             </button>
-                                             <button 
-                                                 className="px-3.5 py-1.5 bg-warning hover:bg-warning/80 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
-                                                 disabled={batchPublishing || batchDepublishing || batchDeleting || selectedIds.length === 0} 
-                                                 onClick={doBatchDepublish}
-                                             >
-                                                 {batchDepublishing ? "云同步中..." : `⚠️ 批量下架 (${selectedIds.length})`}
-                                             </button>
-                                             <button 
-                                                 className="px-3.5 py-1.5 bg-error hover:bg-error/85 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
-                                                 disabled={batchPublishing || batchDepublishing || batchDeleting || selectedIds.length === 0} 
-                                                 onClick={doBatchDelete}
-                                             >
-                                                 {batchDeleting ? "云注销中..." : `🗑️ 批量删除 (${selectedIds.length})`}
-                                             </button>
-                                         </div>
+                                         {hasSelectedBatchActions && (
+                                             <>
+                                                 <div className="w-px h-5 bg-border-hairline/60"></div>
+                                                 
+                                                 <div className="flex gap-2">
+                                                     {publishableIds.length > 0 && (
+                                                         <button 
+                                                             className="px-3.5 py-1.5 bg-primary hover:bg-primary-container text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
+                                                             disabled={batchPublishing || batchDepublishing || batchDeleting} 
+                                                             onClick={doBatchPublish}
+                                                         >
+                                                             {batchPublishing ? "云同步中..." : `🚀 批量发布 (${publishableIds.length})`}
+                                                         </button>
+                                                     )}
+                                                     {depublishableIds.length > 0 && (
+                                                         <button 
+                                                             className="px-3.5 py-1.5 bg-warning hover:bg-warning/80 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
+                                                             disabled={batchPublishing || batchDepublishing || batchDeleting} 
+                                                             onClick={doBatchDepublish}
+                                                         >
+                                                             {batchDepublishing ? "云同步中..." : `⚠️ 批量下架 (${depublishableIds.length})`}
+                                                         </button>
+                                                     )}
+                                                     {deletableIds.length > 0 && (
+                                                         <button 
+                                                             className="px-3.5 py-1.5 bg-error hover:bg-error/85 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
+                                                             disabled={batchPublishing || batchDepublishing || batchDeleting} 
+                                                             onClick={doBatchDelete}
+                                                         >
+                                                             {batchDeleting ? "云注销中..." : `🗑️ 批量删除 (${deletableIds.length})`}
+                                                         </button>
+                                                     )}
+                                                 </div>
+                                             </>
+                                         )}
                                      </div>
                                  )}
                              </header>
@@ -3636,9 +4779,23 @@ const App = () => {
                              </div>
                          </div>
                      </div> 
-                 ) : view === "published" ? <PublishedManager /> : null
+                ) : view === "published" ? <PublishedManager hideHeader={true} /> : null
                 }
             </main>
+            {confirmDialog && (
+                <ActionConfirmModal
+                    title={confirmDialog.title}
+                    description={confirmDialog.description}
+                    confirmLabel={confirmDialog.confirmLabel}
+                    tone={confirmDialog.tone}
+                    onConfirm={() => {
+                        const action = confirmDialog.onConfirm;
+                        setConfirmDialog(null);
+                        action();
+                    }}
+                    onClose={() => setConfirmDialog(null)}
+                />
+            )}
         </React.Fragment>
     );
 };

@@ -7,6 +7,8 @@ from pathlib import Path
 from datetime import datetime
 import subprocess
 
+from scripts.run_full_pipeline import get_active_ali1688_state_file, sanitize_dir_name
+
 st.set_page_config(page_title="闲鱼-1688 选品决策系统", layout="wide")
 
 st.title("🚀 闲鱼-1688 选品决策系统")
@@ -67,15 +69,15 @@ if run_button:
             st.write(f"正在处理 Rank {i}: {item.get('title')[:30]}...")
             
             # 使用之前的全自动脚本逻辑
-            from scripts.run_full_pipeline import sanitize_dir_name
             safe_title = sanitize_dir_name(item.get("title", "item"))
             item_dir = root_dir / f"Rank_{i}_{safe_title}"
             item_dir.mkdir(parents=True, exist_ok=True)
+            ali1688_state_file = get_active_ali1688_state_file()
             
             cmd_1688 = (
                 f"export PYTHONPATH=$PYTHONPATH:$(pwd)/src && /opt/anaconda3/envs/mytools/bin/python scripts/run_ali1688_slow_flow.py "
                 f"--image-url '{item.get('image_url')}' "
-                f"--state-file state/ali1688/storage_state.json "
+                f"--state-file '{ali1688_state_file}' "
                 f"--output-dir '{item_dir}' "
                 f"--detail-top-n {scan_depth}"
             )

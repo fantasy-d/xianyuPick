@@ -1,15 +1,20 @@
 import json
+import sys
 import asyncio
 import pymysql
 from pathlib import Path
 from playwright.async_api import async_playwright
+
+BASE_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BASE_DIR / "src"))
 from xianyu_tools.source_adapter.ali1688 import Ali1688SourceAdapter
+from xianyu_tools.config import settings
 
 async def fix_missing_images():
     print("=== 正在执行全量货源图片补抓任务 ===")
     
     # 1. 链接数据库
-    config = json.load(open("config/database.json"))
+    config = settings.get_database_config()
     conn = pymysql.connect(**config)
     cursor = conn.cursor(pymysql.cursors.DictCursor)
     

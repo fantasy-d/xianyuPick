@@ -18,9 +18,45 @@ def sanitize_dir_name(name: str) -> str:
     clean = re.sub(r'\s+', '', str(name))
     return re.sub(r'[\\/:*?"<>|]', '_', clean).strip()[:60]
 
+
+def get_active_ali1688_state_file() -> str:
+    try:
+        from xianyu_tools.config import settings
+        selected_account = settings.get_active_source_channel_account("ali1688")
+        if not selected_account:
+            return "state/ali1688/storage_state.json"
+        return selected_account.get("state_file") or "state/ali1688/storage_state.json"
+    except Exception:
+        return "state/ali1688/storage_state.json"
+
+
+def validate_active_ali1688_runtime() -> tuple[bool, str]:
+    try:
+        from xianyu_tools.config import settings
+
+        runtime_cfg = settings.get_active_ali1688_runtime_config()
+        state_file = runtime_cfg.get("state_file") or "state/ali1688/storage_state.json"
+        state_path = Path(state_file)
+        if not state_path.is_absolute():
+            state_path = (BASE_DIR / state_path).resolve()
+
+        if not state_path.exists():
+            return False, f"激活的 1688 账号状态文件不存在：{state_file}"
+
+        with open(state_path, "r", encoding="utf-8") as f:
+            state_data = json.load(f)
+        cookies = state_data.get("cookies") or []
+        cookie_names = {str(item.get("name") or "") for item in cookies if isinstance(item, dict)}
+        required = {"cookie2", "_m_h5_tk", "_m_h5_tk_enc", "ali_apache_id", "cna"}
+        if not cookies or not cookie_names.intersection(required):
+            return False, f"激活的 1688 账号状态文件无有效登录 Cookie：{state_file}"
+        return True, ""
+    except Exception as exc:
+        return False, f"校验激活 1688 账号失败：{exc}"
+
 def get_db_conn():
-    config_path = BASE_DIR / "config" / "database.json"
-    config = json.load(open(config_path))
+    from xianyu_tools.config import settings
+    config = settings.get_database_config()
     config["cursorclass"] = pymysql.cursors.DictCursor
     return pymysql.connect(**config)
 
@@ -190,6 +226,14 @@ async def main():
             db_item_ids = {row['rank_index']: row['id'] for row in db_items}
         conn.close()
 
+    # --- 1688 账号运行前校验 ---
+    ali1688_ok, ali1688_error = validate_active_ali1688_runtime()
+    if not ali1688_ok:
+        logger.error(f"[Phase 2] {ali1688_error}")
+        if Task:
+            Task.update(task_id, status="失败", msg=ali1688_error)
+        return
+
     # --- 2. 1688 深度验证 ---
     processed_rank = checkpoint.get("processed_rank", 0)
     for i, item in enumerate(hot_items, start=1):
@@ -218,7 +262,8 @@ async def main():
         except Exception:
             source_limit = 10
 
-        cmd_1688 = f"export PYTHONPATH=$PYTHONPATH:{BASE_DIR}/src && {python_path} scripts/run_ali1688_slow_flow.py --image-url '{item.get('image_url')}' --output-dir '{item_dir}' --detail-top-n {source_limit} --target-keyword '{keyword}' --log-file '{log_file_path}'"
+        ali1688_state_file = get_active_ali1688_state_file()
+        cmd_1688 = f"export PYTHONPATH=$PYTHONPATH:{BASE_DIR}/src && {python_path} scripts/run_ali1688_slow_flow.py --image-url '{item.get('image_url')}' --output-dir '{item_dir}' --state-file '{ali1688_state_file}' --detail-top-n {source_limit} --target-keyword '{keyword}' --log-file '{log_file_path}'"
         await run_command(cmd_1688, logger)
         
         # --- 资产入库 (全方位日志埋点版) ---
