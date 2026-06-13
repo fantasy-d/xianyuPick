@@ -10,6 +10,11 @@ class APISigner:
 
     @staticmethod
     def sign_v3_protocol(body_dict: Dict[str, Any], app_key: str, app_secret: str, timestamp: Union[int, str] = None) -> Dict[str, str]:
+        if app_key:
+            app_key = str(app_key).strip()
+        if app_secret:
+            app_secret = str(app_secret).strip()
+            
         if timestamp is None:
             timestamp = int(time.time())
         

@@ -40,7 +40,11 @@ class PublisherV3:
             
         self.base_url = self.conf.get("base_url", "https://open.goofish.pro")
         self.appid = self.conf.get("appid")
+        if self.appid:
+            self.appid = str(self.appid).strip()
         self.app_secret = self.conf.get("app_secret")
+        if self.app_secret:
+            self.app_secret = str(self.app_secret).strip()
         self.defaults = self.conf.get("default_config", {})
 
     def _load_categories(self) -> List[Dict[str, Any]]:
