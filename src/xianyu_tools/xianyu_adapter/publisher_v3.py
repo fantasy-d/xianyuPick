@@ -10,7 +10,7 @@ from xianyu_tools.logging_util import get_unified_logger
 logger = get_unified_logger("PublisherV3")
 
 class PublisherV3:
-    def __init__(self, config_path: str = "config/openapi.json", account_id: str | None = None):
+    def __init__(self, config_path: str = "config/unified-config", account_id: str | None = None):
         from xianyu_tools.config import settings
         import os
         
@@ -26,17 +26,10 @@ class PublisherV3:
             # 单元测试 monkeypatch 环境，强制读取 Path.read_text() 加载 mock 结构
             self.conf = json.loads(self.config_path.read_text())
         else:
-            # 正常运行时，若统一配置 settings 包含 openapi 段，优先使用统一配置
-            if settings.get("openapi"):
-                self.conf = settings.get_openapi_config(account_id)
-            elif physical_exists:
-                # 否则，如果旧的零散文件物理存在，回退读物理文件
-                self.conf = json.loads(self.config_path.read_text())
-            else:
-                self.conf = settings.get_openapi_config(account_id)
+            self.conf = settings.get_openapi_config(account_id)
                 
         if not self.conf:
-            raise FileNotFoundError(f"OpenAPI config not found at {config_path}")
+            raise FileNotFoundError("OpenAPI config not found in unified config")
             
         self.base_url = self.conf.get("base_url", "https://open.goofish.pro")
         self.appid = self.conf.get("appid")

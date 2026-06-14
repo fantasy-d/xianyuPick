@@ -3,9 +3,12 @@ import json
 from pathlib import Path
 from playwright.async_api import async_playwright
 
+from xianyu_tools.config import settings
+
 async def debug_download():
     target_url = "https://detail.1688.com/offer/986504328531.html"
-    state_file = "state/ali1688/storage_state.json"
+    runtime_cfg = settings.get_active_ali1688_runtime_config()
+    state_file = runtime_cfg.get("state_file") or "state/source_channels/ali1688/ali1688-account-1/storage_state.json"
     
     print(f"\n[*] 启动调试浏览器，目标页面: {target_url}")
     

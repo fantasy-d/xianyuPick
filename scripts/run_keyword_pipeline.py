@@ -19,7 +19,7 @@ def _launch_arg_flags(launch_args: list[str]) -> list[str]:
 
 def _resolve_active_ali1688_runtime(overrides) -> tuple[str, str | None]:
     runtime_cfg = settings.get_active_ali1688_runtime_config()
-    user_data_dir = overrides.ali1688_user_data_dir or runtime_cfg.get("user_data_dir") or "./profiles/ali1688_chrome_profile"
+    user_data_dir = overrides.ali1688_user_data_dir or runtime_cfg.get("user_data_dir") or "./profiles/source_channels/ali1688/ali1688-account-1/chrome_profile"
     profile_directory = overrides.ali1688_profile_directory or runtime_cfg.get("profile_directory")
     return str(user_data_dir), profile_directory
 

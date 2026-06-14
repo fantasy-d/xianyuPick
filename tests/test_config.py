@@ -18,7 +18,7 @@ def build_manager(tmp_path, payload):
     return manager
 
 
-def test_get_openapi_config_keeps_legacy_single_account_shape(tmp_path):
+def test_get_openapi_config_returns_empty_when_multi_account_config_missing(tmp_path):
     manager = build_manager(
         tmp_path,
         {
@@ -33,9 +33,7 @@ def test_get_openapi_config_keeps_legacy_single_account_shape(tmp_path):
 
     cfg = manager.get_openapi_config()
 
-    assert cfg["appid"] == "legacy-appid"
-    assert cfg["app_secret"] == "legacy-secret"
-    assert cfg["default_config"]["user_name"] == "legacy-user"
+    assert cfg == {}
 
 
 def test_get_openapi_config_uses_active_multi_account(tmp_path):

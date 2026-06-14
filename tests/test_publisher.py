@@ -61,7 +61,7 @@ def test_publisher_v3_format_sku_text_truncates_property_names() -> None:
 
 
 def test_publisher_v3_publish_item_degrades_single_sku(monkeypatch) -> None:
-    # 模拟 openapi.json 的加载
+    # 模拟统一配置读取
     mock_config = {
         "base_url": "https://open.goofish.pro",
         "appid": "mock_appid",
@@ -581,7 +581,7 @@ def test_publisher_v3_escaped_html_and_gt_split(monkeypatch) -> None:
 
 
 def test_publisher_v3_depublish_item_success_and_fail(monkeypatch) -> None:
-    # 模拟 openapi.json 的加载
+    # 模拟统一配置读取
     mock_config = {
         "base_url": "https://open.goofish.pro",
         "appid": "mock_appid",
@@ -634,7 +634,7 @@ def test_publisher_v3_depublish_item_success_and_fail(monkeypatch) -> None:
 
 
 def test_publisher_v3_delete_item_success_and_fail(monkeypatch) -> None:
-    # 模拟 openapi.json 的加载
+    # 模拟统一配置读取
     mock_config = {
         "base_url": "https://open.goofish.pro",
         "appid": "mock_appid",
@@ -683,7 +683,6 @@ def test_publisher_v3_delete_item_success_and_fail(monkeypatch) -> None:
     res_fail = pub.delete_item("99999")
     assert res_fail["status"] == "failed"
     assert "Mock deletion failure" in res_fail["msg"]
-
 
 
 

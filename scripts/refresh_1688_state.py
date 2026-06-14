@@ -1,11 +1,11 @@
+import argparse
 import asyncio
 import json
 import sys
 from pathlib import Path
 from playwright.async_api import async_playwright
 
-async def refresh_state():
-    state_file = "state/ali1688/storage_state.json"
+async def refresh_state(state_file: str, user_data_dir: str | None = None, profile_directory: str | None = None):
     print("\n" + "="*50)
     print("【1688登录态刷新工具】")
     print("1. 脚本将启动一个可见的 Chrome 浏览器。")
@@ -15,17 +15,35 @@ async def refresh_state():
     print("="*50 + "\n")
 
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=False, 
-            args=["--start-maximized"]
-        )
-        
-        context = await browser.new_context(
-            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
-        )
-        await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined })")
-        
-        page = await context.new_page()
+        page = None
+        close_target = None
+        if user_data_dir:
+            launch_args = ["--start-maximized"]
+            if profile_directory:
+                launch_args.append(f"--profile-directory={profile_directory}")
+            context = await p.chromium.launch_persistent_context(
+                user_data_dir,
+                channel="chrome",
+                headless=False,
+                args=launch_args,
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
+            close_target = context
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined })")
+            page = context.pages[0] if context.pages else await context.new_page()
+        else:
+            browser = await p.chromium.launch(
+                channel="chrome",
+                headless=False,
+                args=["--start-maximized"]
+            )
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+            )
+            close_target = browser
+            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', { get: () => undefined })")
+            page = await context.new_page()
+
         await page.goto("https://login.1688.com/member/signin.htm")
 
         print("[*] 正在等待登录成功标志...")
@@ -107,7 +125,12 @@ async def refresh_state():
         except Exception as e:
             print(f"[!] 导出过程中出错: {e}")
         finally:
-            await browser.close()
+            await close_target.close()
 
 if __name__ == "__main__":
-    asyncio.run(refresh_state())
+    parser = argparse.ArgumentParser(description="Refresh ali1688 login state and export storage state JSON.")
+    parser.add_argument("--state-file", default="state/source_channels/ali1688/ali1688-account-1/storage_state.json")
+    parser.add_argument("--user-data-dir")
+    parser.add_argument("--profile-directory")
+    args = parser.parse_args()
+    asyncio.run(refresh_state(args.state_file, args.user_data_dir, args.profile_directory))

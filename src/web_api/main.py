@@ -1,4 +1,6 @@
-import json, asyncio, os, uuid, pymysql, re, sys, signal, logging
+from __future__ import annotations
+
+import json, asyncio, os, uuid, pymysql, re, sys, signal, logging, subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Dict
@@ -14,6 +16,16 @@ logger = get_unified_logger("WebAPI")
 
 app = FastAPI(title="Xianyu-1688 Management System")
 SOURCE_SKUS_CACHE: Dict[int, list] = {}
+
+
+class NoCacheStaticFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if getattr(response, "status_code", 200) < 400:
+            response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+            response.headers["Pragma"] = "no-cache"
+            response.headers["Expires"] = "0"
+        return response
 
 from xianyu_tools.config import settings
 
@@ -167,9 +179,6 @@ DEFAULT_SOURCE_CHANNEL_ACCOUNT = {
     "account_id": "ali1688-account-1",
     "label": "1688 账号 1",
     "enabled": True,
-    "state_file": "state/ali1688/storage_state.json",
-    "user_data_dir": "profiles/ali1688_chrome_profile",
-    "cookies_source": "storage_state",
     "notes": "",
 }
 
@@ -225,6 +234,10 @@ def get_request_openapi_account_id(payload: dict | None = None) -> str | None:
     return str(account_id).strip() if account_id else None
 
 
+def build_source_channel_account_runtime(channel_type: str | None, channel_id: str | None, account_id: str | None) -> dict:
+    return settings.build_source_channel_account_runtime(channel_type, channel_id, account_id)
+
+
 def normalize_source_channels_config(raw_cfg: dict | None) -> dict:
     raw_cfg = dict(raw_cfg or {})
     channels = raw_cfg.get("channels")
@@ -248,15 +261,25 @@ def normalize_source_channels_config(raw_cfg: dict | None) -> dict:
                     merged_account.update(incoming_account)
                     merged_account["account_id"] = merged_account.get("account_id") or f"{merged_channel['channel_id']}-account-{a_index}"
                     merged_account["label"] = merged_account.get("label") or f"{merged_channel['label']} 账号 {a_index}"
-                    merged_account["state_file"] = merged_account.get("state_file") or "state/ali1688/storage_state.json"
-                    merged_account["user_data_dir"] = merged_account.get("user_data_dir") or "profiles/ali1688_chrome_profile"
-                    merged_account["cookies_source"] = merged_account.get("cookies_source") or "storage_state"
                     merged_account["notes"] = merged_account.get("notes") or ""
+                    runtime_cfg = build_source_channel_account_runtime(
+                        merged_channel.get("channel_type"),
+                        merged_channel.get("channel_id"),
+                        merged_account.get("account_id"),
+                    )
+                    merged_account.update(runtime_cfg)
                     normalized_accounts.append(merged_account)
             else:
                 fallback_account = json.loads(json.dumps(DEFAULT_SOURCE_CHANNEL_ACCOUNT, ensure_ascii=False))
                 fallback_account["account_id"] = f"{merged_channel['channel_id']}-account-1"
                 fallback_account["label"] = f"{merged_channel['label']} 账号 1"
+                fallback_account.update(
+                    build_source_channel_account_runtime(
+                        merged_channel.get("channel_type"),
+                        merged_channel.get("channel_id"),
+                        fallback_account.get("account_id"),
+                    )
+                )
                 normalized_accounts.append(fallback_account)
 
             merged_channel["accounts"] = normalized_accounts
@@ -267,12 +290,48 @@ def normalize_source_channels_config(raw_cfg: dict | None) -> dict:
             normalized_channels.append(merged_channel)
     else:
         fallback_channel = json.loads(json.dumps(DEFAULT_SOURCE_CHANNEL, ensure_ascii=False))
+        fallback_account = fallback_channel["accounts"][0]
+        fallback_account.update(
+            build_source_channel_account_runtime(
+                fallback_channel.get("channel_type"),
+                fallback_channel.get("channel_id"),
+                fallback_account.get("account_id"),
+            )
+        )
         normalized_channels = [fallback_channel]
 
     active_channel_id = raw_cfg.get("active_channel_id") or normalized_channels[0]["channel_id"]
     if not any(item["channel_id"] == active_channel_id for item in normalized_channels):
         active_channel_id = normalized_channels[0]["channel_id"]
     return {"active_channel_id": active_channel_id, "channels": normalized_channels}
+
+
+def strip_source_channel_runtime_fields(raw_cfg: dict | None) -> dict:
+    normalized = normalize_source_channels_config(raw_cfg)
+    cleaned_channels = []
+    for channel in normalized.get("channels", []):
+        cleaned_channel = {
+            "channel_id": channel.get("channel_id"),
+            "channel_type": channel.get("channel_type"),
+            "label": channel.get("label"),
+            "enabled": bool(channel.get("enabled", True)),
+            "active_account_id": channel.get("active_account_id"),
+            "accounts": [],
+        }
+        for account in channel.get("accounts", []):
+            cleaned_channel["accounts"].append(
+                {
+                    "account_id": account.get("account_id"),
+                    "label": account.get("label"),
+                    "enabled": bool(account.get("enabled", True)),
+                    "notes": account.get("notes") or "",
+                }
+            )
+        cleaned_channels.append(cleaned_channel)
+    return {
+        "active_channel_id": normalized.get("active_channel_id"),
+        "channels": cleaned_channels,
+    }
 
 
 def get_source_channel(raw_cfg: dict | None, channel_id: str | None = None) -> dict:
@@ -288,6 +347,61 @@ def get_source_channel_account(raw_cfg: dict | None, channel_id: str | None = No
     target_id = account_id or channel.get("active_account_id")
     selected = next((item for item in accounts if item["account_id"] == target_id), None)
     return selected or (accounts[0] if accounts else {})
+
+
+def hydrate_source_channel_account(channel_cfg: dict | None, account_cfg: dict | None) -> tuple[dict, dict]:
+    channel = dict(channel_cfg or {})
+    account = dict(account_cfg or {})
+    runtime_cfg = build_source_channel_account_runtime(
+        channel.get("channel_type"),
+        channel.get("channel_id"),
+        account.get("account_id"),
+    )
+    account.update(runtime_cfg)
+    return channel, account
+
+
+def get_source_channel_account_error(channel_cfg: dict | None, account_cfg: dict | None) -> str | None:
+    channel = dict(channel_cfg or {})
+    account = dict(account_cfg or {})
+    channel_label = channel.get("label") or "当前货源渠道"
+    account_label = account.get("label") or "当前渠道账号"
+
+    if not channel.get("channel_id"):
+        return "未找到货源渠道配置"
+    if channel.get("enabled", True) is False:
+        return f"{channel_label}已停用"
+    if not account.get("account_id"):
+        return f"{channel_label}下未配置可用账号"
+    if account.get("enabled", True) is False:
+        return f"{account_label}已停用"
+    return None
+
+
+def source_channel_supports_session_state(channel_cfg: dict | None) -> bool:
+    channel = dict(channel_cfg or {})
+    return channel.get("channel_type") == "ali1688"
+
+
+def build_source_channel_unavailable_report(
+    channel_cfg: dict | None,
+    account_cfg: dict | None,
+    error_message: str | None = None,
+    status_text: str | None = None,
+) -> dict:
+    error_message = error_message or get_source_channel_account_error(channel_cfg, account_cfg) or "未配置可用账号"
+    status_text = status_text or "未配置可用账号"
+    return {
+        "is_usable": False,
+        "account_name": "",
+        "status_text": status_text,
+        "last_checked_at": datetime.now().isoformat(),
+        "error_message": error_message,
+        "meta": {
+            "channel_id": (channel_cfg or {}).get("channel_id") or "",
+            "account_id": (account_cfg or {}).get("account_id") or "",
+        },
+    }
 
 
 def inspect_ali1688_state_file_quick(state_file: str | None) -> dict:
@@ -1452,9 +1566,9 @@ def system_status():
         conn = get_db_conn(); cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) as count FROM tasks WHERE status = '执行中' AND is_deleted = 0")
         active_count = cursor.fetchone()['count']; conn.close()
-        active_account = settings.get_active_source_channel_account("ali1688")
-        if active_account:
-            session_report = inspect_ali1688_state_file_quick(active_account.get("state_file"))
+        runtime_cfg = settings.get_active_ali1688_runtime_config()
+        if runtime_cfg.get("account_id"):
+            session_report = inspect_ali1688_state_file_quick(runtime_cfg.get("state_file"))
             login_status = "有效" if session_report.get("is_usable") else "无效"
         else:
             login_status = "未配置"
@@ -1523,6 +1637,7 @@ async def update_system_configs(payload: dict):
         openapi_cfg = normalize_openapi_multi_account(payload.get("openapi", {}))
         crawl_cfg = payload.get("crawl", {})
         source_channels_cfg = normalize_source_channels_config(payload.get("source_channels", {}))
+        source_channels_storage_cfg = strip_source_channel_runtime_fields(source_channels_cfg)
         
         logger.info(
             "[OpenAPI Save] active_account_id=%s accounts=%s",
@@ -1564,7 +1679,7 @@ async def update_system_configs(payload: dict):
         filtered_models = [m for m in models_subset if m in valid_models]
         crawl_cfg["source_filter_models"] = filtered_models
 
-        for channel in source_channels_cfg["channels"]:
+        for channel in source_channels_storage_cfg["channels"]:
             for account in channel.get("accounts", []):
                 account.pop("session_report", None)
         
@@ -1588,7 +1703,7 @@ async def update_system_configs(payload: dict):
             "llm": llm_cfg,
             "openapi": openapi_cfg,
             "crawl": crawl_cfg,
-            "source_channels": source_channels_cfg
+            "source_channels": source_channels_storage_cfg
         }
         
         config_file.parent.mkdir(parents=True, exist_ok=True)
@@ -1610,7 +1725,7 @@ async def update_system_configs(payload: dict):
         cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("llm", json.dumps(llm_cfg)))
         cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("openapi", json.dumps(openapi_cfg)))
         cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("crawl", json.dumps(crawl_cfg)))
-        cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("source_channels", json.dumps(source_channels_cfg)))
+        cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s) ON DUPLICATE KEY UPDATE cfg_value = VALUES(cfg_value)", ("source_channels", json.dumps(source_channels_storage_cfg)))
         conn.commit()
         conn.close()
         
@@ -1645,6 +1760,32 @@ async def check_source_channel_status(payload: dict = None):
             account_id = payload.get("account_id")
             channel = get_source_channel(normalized, channel_id)
             account = get_source_channel_account(normalized, channel.get("channel_id"), account_id)
+        account_error = get_source_channel_account_error(channel, account)
+        if account_error:
+            return {
+                "status": "failed",
+                "msg": account_error,
+                "data": {
+                    "channel_id": channel.get("channel_id"),
+                    "account_id": account.get("account_id"),
+                    "report": build_source_channel_unavailable_report(channel, account, account_error),
+                },
+            }
+        if not source_channel_supports_session_state(channel):
+            return {
+                "status": "success",
+                "data": {
+                    "channel_id": channel.get("channel_id"),
+                    "account_id": account.get("account_id"),
+                    "report": build_source_channel_unavailable_report(
+                        channel,
+                        account,
+                        "当前渠道暂未接入会话状态检测",
+                        "待接入",
+                    ),
+                },
+            }
+        channel, account = hydrate_source_channel_account(channel, account)
         report = await inspect_source_channel_account(channel.get("channel_type"), account)
         return {
             "status": "success",
@@ -1663,7 +1804,14 @@ async def check_source_channel_status(payload: dict = None):
 def get_active_source_channel_runtime():
     try:
         runtime_cfg = settings.get_active_ali1688_runtime_config()
-        report = inspect_ali1688_state_file_quick(runtime_cfg.get("state_file"))
+        if runtime_cfg.get("account_id"):
+            report = inspect_ali1688_state_file_quick(runtime_cfg.get("state_file"))
+        else:
+            report = build_source_channel_unavailable_report(
+                {"channel_id": runtime_cfg.get("channel_id"), "label": "1688 货源渠道"},
+                {},
+                runtime_cfg.get("error_message"),
+            )
         return {
             "status": "success",
             "data": {
@@ -1673,6 +1821,148 @@ def get_active_source_channel_runtime():
         }
     except Exception as e:
         logger.error(f"Failed to fetch active source channel runtime: {e}")
+        return {"status": "failed", "msg": str(e)}
+
+
+@app.get("/api/system/source_channel_login_status")
+def get_source_channel_login_status(channel_id: str = None, account_id: str = None):
+    try:
+        sync_source_channel_login_state()
+
+        raw_cfg = settings.get_source_channels_raw_config()
+        normalized = normalize_source_channels_config(raw_cfg)
+        channel = get_source_channel(normalized, channel_id)
+        account = get_source_channel_account(normalized, channel.get("channel_id"), account_id)
+        account_error = get_source_channel_account_error(channel, account)
+        if account_error:
+            return {
+                "status": "success",
+                "data": {
+                    "channel_id": channel.get("channel_id"),
+                    "account_id": account.get("account_id"),
+                    "report": build_source_channel_unavailable_report(channel, account, account_error),
+                    "is_logging_in": False,
+                    "err_msg": "",
+                }
+            }
+        if not source_channel_supports_session_state(channel):
+            return {
+                "status": "success",
+                "data": {
+                    "channel_id": channel.get("channel_id"),
+                    "account_id": account.get("account_id"),
+                    "report": build_source_channel_unavailable_report(
+                        channel,
+                        account,
+                        "当前渠道暂未接入会话状态检测",
+                        "待接入",
+                    ),
+                    "is_logging_in": False,
+                    "err_msg": "",
+                }
+            }
+        channel, account = hydrate_source_channel_account(channel, account)
+        report = inspect_ali1688_state_file_quick(account.get("state_file"))
+
+        is_currently_logging_in = (
+            source_channel_login_process is not None
+            and source_channel_logging_in_channel_id == (channel.get("channel_id") or "")
+            and source_channel_logging_in_account_id == (account.get("account_id") or "")
+        )
+
+        return {
+            "status": "success",
+            "data": {
+                "channel_id": channel.get("channel_id"),
+                "account_id": account.get("account_id"),
+                "report": report,
+                "is_logging_in": is_currently_logging_in,
+                "err_msg": source_channel_login_err_msg,
+            }
+        }
+    except Exception as e:
+        logger.error(f"Failed to check source channel login status: {e}")
+        return {"status": "failed", "msg": str(e)}
+
+
+@app.post("/api/system/source_channel_login_trigger")
+async def trigger_source_channel_login(payload: dict = None):
+    global source_channel_login_process, source_channel_logging_in_channel_id, source_channel_logging_in_account_id
+    global source_channel_login_err_msg, source_channel_login_log_path
+
+    sync_source_channel_login_state()
+    if source_channel_login_process is not None:
+        return {"status": "failed", "msg": "当前已有渠道账号登录任务在执行，请勿重复操作"}
+
+    try:
+        payload = payload or {}
+        incoming_channel = payload.get("channel")
+        incoming_account = payload.get("account")
+
+        if isinstance(incoming_channel, dict) and isinstance(incoming_account, dict):
+            channel = {
+                "channel_id": incoming_channel.get("channel_id") or "ali1688",
+                "channel_type": incoming_channel.get("channel_type") or "ali1688",
+                "label": incoming_channel.get("label") or "货源渠道",
+            }
+            account = dict(incoming_account)
+        else:
+            raw_cfg = settings.get_source_channels_raw_config()
+            normalized = normalize_source_channels_config(raw_cfg)
+            channel = get_source_channel(normalized, payload.get("channel_id"))
+            account = get_source_channel_account(normalized, channel.get("channel_id"), payload.get("account_id"))
+        account_error = get_source_channel_account_error(channel, account)
+        if account_error:
+            return {"status": "failed", "msg": account_error}
+        channel, account = hydrate_source_channel_account(channel, account)
+
+        if channel.get("channel_type") != "ali1688":
+            return {"status": "failed", "msg": "当前仅支持为 1688 渠道触发登录"}
+
+        state_file = account.get("state_file") or "state/source_channels/ali1688/ali1688-account-1/storage_state.json"
+        user_data_dir = account.get("user_data_dir") or ""
+        profile_directory = account.get("profile_directory") or ""
+
+        log_dir = BASE_DIR / "tmp" / "source-channel-login-logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        safe_account_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(account.get("account_id") or "ali1688-account"))
+        source_channel_login_log_path = str((log_dir / f"{safe_account_id}.log").resolve())
+
+        cmd = [
+            sys.executable,
+            str((BASE_DIR / "scripts" / "refresh_1688_state.py").resolve()),
+            "--state-file",
+            state_file,
+        ]
+        if user_data_dir:
+            cmd.extend(["--user-data-dir", user_data_dir])
+        if profile_directory:
+            cmd.extend(["--profile-directory", profile_directory])
+
+        log_fd = os.open(source_channel_login_log_path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o644)
+
+        source_channel_login_process = subprocess.Popen(
+            cmd,
+            cwd=str(BASE_DIR),
+            env={**os.environ, "PYTHONPATH": str(BASE_DIR / "src")},
+            stdout=log_fd,
+            stderr=subprocess.STDOUT,
+        )
+        os.close(log_fd)
+        source_channel_logging_in_channel_id = channel.get("channel_id") or ""
+        source_channel_logging_in_account_id = account.get("account_id") or ""
+        source_channel_login_err_msg = ""
+
+        return {
+            "status": "success",
+            "msg": "已启动 1688 登录浏览器，请在弹出窗口中完成扫码登录",
+        }
+    except Exception as e:
+        logger.error(f"Failed to trigger source channel login: {e}")
+        source_channel_login_process = None
+        source_channel_logging_in_channel_id = ""
+        source_channel_logging_in_account_id = ""
+        source_channel_login_err_msg = str(e)
         return {"status": "failed", "msg": str(e)}
 
 @app.get("/api/system/regions")
@@ -1866,6 +2156,39 @@ def get_openapi_categories(group: str = None, query: str = None, cat_id: str = N
 is_logging_in = False
 logging_in_account_id = ""
 login_err_msg = ""
+source_channel_login_process = None
+source_channel_logging_in_channel_id = ""
+source_channel_logging_in_account_id = ""
+source_channel_login_err_msg = ""
+source_channel_login_log_path = ""
+
+
+def sync_source_channel_login_state():
+    global source_channel_login_process, source_channel_logging_in_channel_id, source_channel_logging_in_account_id
+    global source_channel_login_err_msg, source_channel_login_log_path
+
+    if source_channel_login_process is None:
+        return
+
+    return_code = source_channel_login_process.poll()
+    if return_code is None:
+        return
+
+    if return_code != 0 and source_channel_login_log_path:
+        try:
+            log_text = Path(source_channel_login_log_path).read_text(encoding="utf-8", errors="ignore").strip()
+            if log_text:
+                source_channel_login_err_msg = "\n".join(log_text.splitlines()[-10:])
+            else:
+                source_channel_login_err_msg = f"1688 登录进程异常退出，退出码：{return_code}"
+        except Exception:
+            source_channel_login_err_msg = f"1688 登录进程异常退出，退出码：{return_code}"
+    elif return_code == 0:
+        source_channel_login_err_msg = ""
+
+    source_channel_login_process = None
+    source_channel_logging_in_channel_id = ""
+    source_channel_logging_in_account_id = ""
 
 async def run_xianyu_login_capture(account_id: str | None = None):
     global is_logging_in, logging_in_account_id, login_err_msg
@@ -2029,4 +2352,4 @@ async def trigger_xianyu_login(payload: dict = None):
     asyncio.create_task(run_xianyu_login_capture(account_id))
     return {"status": "success", "msg": "已启动闲鱼登录浏览器，请使用手机扫码完成安全登录"}
 
-app.mount("/", StaticFiles(directory=str(WEB_DIR), html=True), name="web")
+app.mount("/", NoCacheStaticFiles(directory=str(WEB_DIR), html=True), name="web")

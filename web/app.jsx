@@ -1989,6 +1989,35 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
 
 // --- 系统配置管理视图组件 ---
 const SystemSettingsView = ({ hideHeader = false }) => {
+    const SOURCE_CHANNEL_TYPE_META = {
+        ali1688: {
+            label: '1688 货源渠道',
+            supportsSessionState: true,
+            supportsLoginTrigger: true,
+            authTypeLabel: '系统托管 Chrome 会话'
+        },
+        taobao: {
+            label: '淘宝货源渠道',
+            supportsSessionState: false,
+            supportsLoginTrigger: false,
+            authTypeLabel: '待接入'
+        },
+        pdd: {
+            label: '拼多多货源渠道',
+            supportsSessionState: false,
+            supportsLoginTrigger: false,
+            authTypeLabel: '待接入'
+        },
+        custom: {
+            label: '自定义货源渠道',
+            supportsSessionState: false,
+            supportsLoginTrigger: false,
+            authTypeLabel: '自定义适配'
+        }
+    };
+
+    const getSourceChannelCapabilities = (channelType) => SOURCE_CHANNEL_TYPE_META[channelType] || SOURCE_CHANNEL_TYPE_META.custom;
+
     const createOpenapiAccount = (index = 1) => ({
         id: `account-${Date.now()}-${index}`,
         name: `闲鱼账号 ${index}`,
@@ -2014,9 +2043,6 @@ const SystemSettingsView = ({ hideHeader = false }) => {
         account_id: `${channelId}-account-${Date.now()}-${index}`,
         label: channelId === 'ali1688' ? `1688 账号 ${index}` : `渠道账号 ${index}`,
         enabled: true,
-        state_file: channelId === 'ali1688' ? 'state/ali1688/storage_state.json' : '',
-        user_data_dir: channelId === 'ali1688' ? 'profiles/ali1688_chrome_profile' : '',
-        cookies_source: 'storage_state',
         notes: '',
         session_report: {
             is_usable: false,
@@ -2031,10 +2057,11 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     const createSourceChannel = (index = 1, channelType = 'ali1688') => {
         const channelId = channelType === 'ali1688' ? 'ali1688' : `source-channel-${Date.now()}-${index}`;
         const firstAccount = createSourceChannelAccount(channelId, 1);
+        const channelMeta = getSourceChannelCapabilities(channelType);
         return {
             channel_id: channelId,
             channel_type: channelType,
-            label: channelType === 'ali1688' ? '1688 货源渠道' : `货源渠道 ${index}`,
+            label: channelMeta.label || `货源渠道 ${index}`,
             enabled: true,
             active_account_id: firstAccount.account_id,
             accounts: [firstAccount]
@@ -2107,9 +2134,12 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     const [isXianyuLoggingIn, setIsXianyuLoggingIn] = useState(false);
     const [xianyuLoginSuccessMessage, setXianyuLoginSuccessMessage] = useState(null);
     const [isCheckingSourceChannelStatus, setIsCheckingSourceChannelStatus] = useState(false);
+    const [isSourceChannelLoggingIn, setIsSourceChannelLoggingIn] = useState(false);
     const [persistedOpenapiAccountIds, setPersistedOpenapiAccountIds] = useState([]);
     const xianyuLoginFlowRef = useRef(false);
     const prevXianyuLoggingInRef = useRef(false);
+    const sourceChannelLoginFlowRef = useRef(false);
+    const prevSourceChannelLoggingInRef = useRef(false);
     const noticeTimerRef = useRef(null);
     const xianyuLoginSuccessTimerRef = useRef(null);
     const currentOpenapiAccounts = configs.openapi?.accounts || [];
@@ -2118,6 +2148,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     const currentSourceChannels = configs.source_channels?.channels || [];
     const activeSourceChannelId = configs.source_channels?.active_channel_id || currentSourceChannels[0]?.channel_id || 'ali1688';
     const currentSourceChannel = currentSourceChannels.find(item => item.channel_id === activeSourceChannelId) || currentSourceChannels[0] || createSourceChannel(1);
+    const currentSourceChannelCapabilities = getSourceChannelCapabilities(currentSourceChannel?.channel_type);
     const currentSourceAccounts = currentSourceChannel?.accounts || [];
     const activeSourceAccountId = currentSourceChannel?.active_account_id || currentSourceAccounts[0]?.account_id || '';
     const currentSourceAccount = currentSourceAccounts.find(item => item.account_id === activeSourceAccountId) || currentSourceAccounts[0] || createSourceChannelAccount(currentSourceChannel?.channel_id || 'ali1688', 1);
@@ -2173,6 +2204,29 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                             ...channel,
                             accounts: (channel.accounts || []).map(account => {
                                 if (account.account_id !== (channel.active_account_id || channel.accounts?.[0]?.account_id)) return account;
+                                return typeof updater === 'function' ? updater(account) : { ...account, ...updater };
+                            })
+                        };
+                    })
+                }
+            };
+        });
+    };
+
+    const updateSourceAccountByIds = (channelId, accountId, updater) => {
+        setConfigs(prev => {
+            const sourceChannels = prev.source_channels || {};
+            const channels = sourceChannels.channels || [];
+            return {
+                ...prev,
+                source_channels: {
+                    ...sourceChannels,
+                    channels: channels.map(channel => {
+                        if (channel.channel_id !== channelId) return channel;
+                        return {
+                            ...channel,
+                            accounts: (channel.accounts || []).map(account => {
+                                if (account.account_id !== accountId) return account;
                                 return typeof updater === 'function' ? updater(account) : { ...account, ...updater };
                             })
                         };
@@ -2341,19 +2395,21 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                     account: {
                         account_id: currentSourceAccount.account_id,
                         label: currentSourceAccount.label,
-                        state_file: currentSourceAccount.state_file,
-                        user_data_dir: currentSourceAccount.user_data_dir,
-                        cookies_source: currentSourceAccount.cookies_source,
+                        enabled: currentSourceAccount.enabled !== false,
                         notes: currentSourceAccount.notes
                     }
                 })
             });
             const res = await resp.json();
             if (res.status === 'success') {
-                setCurrentSourceAccount(prev => ({
-                    ...prev,
-                    session_report: res.data.report || prev.session_report
-                }));
+                updateSourceAccountByIds(
+                    res.data.channel_id || currentSourceChannel.channel_id,
+                    res.data.account_id || currentSourceAccount.account_id,
+                    prev => ({
+                        ...prev,
+                        session_report: res.data.report || prev.session_report
+                    })
+                );
                 setMessage('货源渠道账号状态检测完成');
                 setError(null);
             } else {
@@ -2363,6 +2419,83 @@ const SystemSettingsView = ({ hideHeader = false }) => {
             setError('网络连接异常，检测状态失败');
         } finally {
             setIsCheckingSourceChannelStatus(false);
+        }
+    };
+
+    const fetchSourceChannelLoginStatus = async () => {
+        try {
+            if (!currentSourceChannel?.channel_id || !currentSourceAccount?.account_id) {
+                setIsSourceChannelLoggingIn(false);
+                return;
+            }
+            if (!currentSourceChannelCapabilities.supportsSessionState) {
+                setIsSourceChannelLoggingIn(false);
+                return;
+            }
+            const url = `/api/system/source_channel_login_status?channel_id=${encodeURIComponent(currentSourceChannel.channel_id)}&account_id=${encodeURIComponent(currentSourceAccount.account_id)}`;
+            const resp = await fetch(url);
+            const res = await resp.json();
+            if (res.status === 'success') {
+                updateSourceAccountByIds(
+                    res.data.channel_id || currentSourceChannel.channel_id,
+                    res.data.account_id || currentSourceAccount.account_id,
+                    prev => ({
+                        ...prev,
+                        session_report: res.data.report || prev.session_report
+                    })
+                );
+                setIsSourceChannelLoggingIn(res.data.is_logging_in || false);
+                if (res.data.err_msg) {
+                    setError(res.data.err_msg);
+                }
+            }
+        } catch (err) {
+            console.error("Failed to fetch source channel login status:", err);
+        }
+    };
+
+    const handleSourceChannelLoginTrigger = async () => {
+        try {
+            if (!currentSourceChannel?.channel_id || !currentSourceAccount?.account_id) {
+                setError('当前渠道账号配置不完整，无法执行登录');
+                return;
+            }
+            sourceChannelLoginFlowRef.current = true;
+            setIsSourceChannelLoggingIn(true);
+            const resp = await fetch('/api/system/source_channel_login_trigger', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    channel_id: currentSourceChannel.channel_id,
+                    account_id: currentSourceAccount.account_id,
+                    channel: {
+                        channel_id: currentSourceChannel.channel_id,
+                        channel_type: currentSourceChannel.channel_type,
+                        label: currentSourceChannel.label
+                    },
+                    account: {
+                        account_id: currentSourceAccount.account_id,
+                        label: currentSourceAccount.label,
+                        enabled: currentSourceAccount.enabled !== false,
+                        notes: currentSourceAccount.notes
+                    }
+                })
+            });
+            const res = await resp.json();
+            if (res.status === 'success') {
+                setMessage(res.msg || '已启动渠道账号登录浏览器，请完成扫码登录');
+                setError(null);
+                fetchSourceChannelLoginStatus();
+            } else {
+                setError(res.msg || '启动渠道账号登录失败');
+                sourceChannelLoginFlowRef.current = false;
+                setIsSourceChannelLoggingIn(false);
+            }
+        } catch (err) {
+            console.error("Trigger source channel login failed:", err);
+            setError('网络连接异常，启动渠道账号登录失败');
+            sourceChannelLoginFlowRef.current = false;
+            setIsSourceChannelLoggingIn(false);
         }
     };
 
@@ -2610,9 +2743,6 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                         account_id: account.account_id || `${channel.channel_id || 'channel'}-account-${accountIdx + 1}`,
                         label: account.label || `渠道账号 ${accountIdx + 1}`,
                         enabled: account.enabled !== false,
-                        state_file: account.state_file || '',
-                        user_data_dir: account.user_data_dir || '',
-                        cookies_source: account.cookies_source || 'storage_state',
                         notes: account.notes || '',
                         session_report: account.session_report || {
                             is_usable: false,
@@ -2695,6 +2825,20 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     }, [isXianyuLoggingIn, activeOpenapiAccountId, persistedOpenapiAccountIds.join('|')]);
 
     useEffect(() => {
+        if (!currentSourceChannelCapabilities.supportsSessionState) {
+            setIsSourceChannelLoggingIn(false);
+            return undefined;
+        }
+        fetchSourceChannelLoginStatus();
+        const pollInterval = isSourceChannelLoggingIn ? 1000 : 3000;
+        const timer = setInterval(() => {
+            fetchSourceChannelLoginStatus();
+        }, pollInterval);
+
+        return () => clearInterval(timer);
+    }, [isSourceChannelLoggingIn, activeSourceChannelId, activeSourceAccountId, currentSourceChannelCapabilities.supportsSessionState]);
+
+    useEffect(() => {
         const cfg = currentOpenapiAccount?.default_config;
         if (!cfg) return;
 
@@ -2736,6 +2880,21 @@ const SystemSettingsView = ({ hideHeader = false }) => {
 
         prevXianyuLoggingInRef.current = isXianyuLoggingIn;
     }, [isXianyuLoggingIn, xianyuLoginStatus]);
+
+    useEffect(() => {
+        const wasLoggingIn = prevSourceChannelLoggingInRef.current;
+        const isNowUsable = !!currentSourceAccount?.session_report?.is_usable;
+
+        if (sourceChannelLoginFlowRef.current && wasLoggingIn && !isSourceChannelLoggingIn) {
+            if (isNowUsable) {
+                setMessage(`货源渠道账号登录成功，当前会话已同步${currentSourceAccount?.session_report?.account_name ? `：${currentSourceAccount.session_report.account_name}` : ''}`);
+                setError(null);
+            }
+            sourceChannelLoginFlowRef.current = false;
+        }
+
+        prevSourceChannelLoggingInRef.current = isSourceChannelLoggingIn;
+    }, [isSourceChannelLoggingIn, currentSourceAccount]);
 
     useEffect(() => {
         if (!message && !error) return undefined;
@@ -3447,6 +3606,17 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                 </div>
                             </div>
 
+                            <div className="rounded-xl border border-border-hairline bg-surface-container-low px-4 py-3 flex flex-col gap-1">
+                                <div className="font-sans text-xs font-semibold text-on-surface">
+                                    渠道能力：{currentSourceChannelCapabilities.authTypeLabel}
+                                </div>
+                                <div className="font-sans text-[11px] text-secondary leading-relaxed">
+                                    {currentSourceChannelCapabilities.supportsLoginTrigger
+                                        ? '当前渠道已接入会话检测与登录触发，可直接在本卡片内维护账号登录态。'
+                                        : '当前渠道暂未接入专属登录适配；本期先保留多渠道结构与账号池骨架，后续按渠道能力补适配器。'}
+                                </div>
+                            </div>
+
                             <div className="border-t border-border-hairline/80 pt-4 space-y-4">
                                 <div className="flex flex-wrap items-center gap-2">
                                     {currentSourceAccounts.map((account, idx) => {
@@ -3497,35 +3667,10 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                         />
                                     </div>
                                     <div className="space-y-1">
-                                        <label className="block font-sans text-xs text-secondary font-semibold">Cookie 来源</label>
-                                        <select
-                                            value={currentSourceAccount.cookies_source || 'storage_state'}
-                                            onChange={(e) => setCurrentSourceAccount(prev => ({ ...prev, cookies_source: e.target.value }))}
-                                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans cursor-pointer"
-                                        >
-                                            <option value="storage_state">storage_state</option>
-                                            <option value="user_data_dir">user_data_dir</option>
-                                        </select>
-                                    </div>
-                                    <div className="space-y-1">
-                                        <label className="block font-sans text-xs text-secondary font-semibold">状态文件路径 (state_file)</label>
-                                        <input
-                                            type="text"
-                                            value={currentSourceAccount.state_file || ''}
-                                            onChange={(e) => setCurrentSourceAccount(prev => ({ ...prev, state_file: e.target.value }))}
-                                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
-                                            placeholder="state/ali1688/storage_state.json"
-                                        />
-                                    </div>
-                                    <div className="space-y-1">
-                                        <label className="block font-sans text-xs text-secondary font-semibold">浏览器用户目录 (user_data_dir)</label>
-                                        <input
-                                            type="text"
-                                            value={currentSourceAccount.user_data_dir || ''}
-                                            onChange={(e) => setCurrentSourceAccount(prev => ({ ...prev, user_data_dir: e.target.value }))}
-                                            className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-mono"
-                                            placeholder="profiles/ali1688_chrome_profile"
-                                        />
+                                        <label className="block font-sans text-xs text-secondary font-semibold">账号状态</label>
+                                        <div className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 font-sans">
+                                            {currentSourceAccount.enabled !== false ? '已启用' : '已停用'}
+                                        </div>
                                     </div>
                                     <div className="space-y-1 md:col-span-2">
                                         <label className="block font-sans text-xs text-secondary font-semibold">备注</label>
@@ -3540,37 +3685,84 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                 </div>
 
                                 <div className="rounded-xl border border-border-hairline bg-surface-container-low px-4 py-4 flex flex-col gap-4">
-                                    <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
-                                        <div className="space-y-1">
-                                            <div className="flex items-center gap-2">
-                                                <span className={`inline-block w-2 h-2 rounded-full ${currentSourceAccount.session_report?.is_usable ? 'bg-success' : 'bg-error'}`}></span>
-                                                <span className="font-sans text-sm font-bold text-on-surface">
-                                                    {currentSourceAccount.session_report?.status_text || '未检测'}
-                                                </span>
+                                    {currentSourceChannelCapabilities.supportsSessionState ? (
+                                        <>
+                                            <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                                <div className="space-y-1">
+                                                    <div className="flex items-center gap-2">
+                                                        <span className={`inline-block w-2 h-2 rounded-full ${currentSourceAccount.session_report?.is_usable ? 'bg-success' : 'bg-error'}`}></span>
+                                                        <span className="font-sans text-sm font-bold text-on-surface">
+                                                            {currentSourceAccount.session_report?.status_text || '未检测'}
+                                                        </span>
+                                                    </div>
+                                                    <div className="font-sans text-xs text-secondary">
+                                                        账号名：{currentSourceAccount.session_report?.account_name || '未识别'}
+                                                    </div>
+                                                    <div className="font-sans text-[11px] text-secondary">
+                                                        最近检测：{currentSourceAccount.session_report?.last_checked_at || '暂无'}
+                                                    </div>
+                                                </div>
+                                                <div className="flex flex-wrap items-center gap-2">
+                                                    {currentSourceChannelCapabilities.supportsLoginTrigger && (
+                                                        isSourceChannelLoggingIn ? (
+                                                            <button
+                                                                type="button"
+                                                                disabled
+                                                                className="px-4 py-2 bg-secondary/10 text-secondary rounded-lg font-sans text-xs font-bold transition-colors flex items-center gap-1.5 cursor-not-allowed"
+                                                            >
+                                                                <span className="material-symbols-outlined text-[16px] animate-spin">autorenew</span>
+                                                                <span>等待登录...</span>
+                                                            </button>
+                                                        ) : (
+                                                            <button
+                                                                type="button"
+                                                                onClick={handleSourceChannelLoginTrigger}
+                                                                className="px-4 py-2 bg-primary hover:bg-primary-hover text-on-primary rounded-lg font-sans text-xs font-bold transition-colors shadow-sm flex items-center gap-1.5 active:scale-95 duration-100"
+                                                            >
+                                                                <span className="material-symbols-outlined text-[16px]">open_in_new</span>
+                                                                <span>{currentSourceAccount.session_report?.is_usable ? '重新登录' : '立即登录'}</span>
+                                                            </button>
+                                                        )
+                                                    )}
+                                                    <button
+                                                        type="button"
+                                                        onClick={handleCheckSourceChannelStatus}
+                                                        disabled={isCheckingSourceChannelStatus}
+                                                        className="px-4 py-2 bg-surface-container-high hover:bg-surface-container text-on-surface disabled:opacity-60 rounded-lg font-sans text-xs font-bold transition-colors shadow-sm flex items-center gap-1.5 active:scale-95 duration-100"
+                                                    >
+                                                        <span className={`material-symbols-outlined text-[16px] ${isCheckingSourceChannelStatus ? 'animate-spin' : ''}`}>
+                                                            {isCheckingSourceChannelStatus ? 'autorenew' : 'sync'}
+                                                        </span>
+                                                        <span>{isCheckingSourceChannelStatus ? '正在检测...' : '检测状态'}</span>
+                                                    </button>
+                                                </div>
                                             </div>
-                                            <div className="font-sans text-xs text-secondary">
-                                                账号名：{currentSourceAccount.session_report?.account_name || '未识别'}
-                                            </div>
-                                            <div className="font-sans text-[11px] text-secondary">
-                                                最近检测：{currentSourceAccount.session_report?.last_checked_at || '暂无'}
-                                            </div>
-                                        </div>
-                                        <button
-                                            type="button"
-                                            onClick={handleCheckSourceChannelStatus}
-                                            disabled={isCheckingSourceChannelStatus}
-                                            className="px-4 py-2 bg-primary hover:bg-primary-hover disabled:bg-primary/50 text-on-primary rounded-lg font-sans text-xs font-bold transition-colors shadow-sm flex items-center gap-1.5 active:scale-95 duration-100"
-                                        >
-                                            <span className={`material-symbols-outlined text-[16px] ${isCheckingSourceChannelStatus ? 'animate-spin' : ''}`}>
-                                                {isCheckingSourceChannelStatus ? 'autorenew' : 'sync'}
-                                            </span>
-                                            <span>{isCheckingSourceChannelStatus ? '正在检测...' : '检测状态'}</span>
-                                        </button>
-                                    </div>
 
-                                    {!!currentSourceAccount.session_report?.error_message && (
-                                        <div className="rounded-lg bg-error/6 border border-error/15 px-3 py-2 text-[11px] text-error leading-relaxed">
-                                            {currentSourceAccount.session_report.error_message}
+                                            {!!currentSourceAccount.session_report?.error_message && (
+                                                <div className="rounded-lg bg-error/6 border border-error/15 px-3 py-2 text-[11px] text-error leading-relaxed">
+                                                    {currentSourceAccount.session_report.error_message}
+                                                </div>
+                                            )}
+                                        </>
+                                    ) : (
+                                        <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
+                                            <div className="space-y-1">
+                                                <div className="flex items-center gap-2">
+                                                    <span className="inline-block w-2 h-2 rounded-full bg-secondary/60"></span>
+                                                    <span className="font-sans text-sm font-bold text-on-surface">待接入</span>
+                                                </div>
+                                                <div className="font-sans text-xs text-secondary">
+                                                    当前渠道暂未接入会话状态检测，账号池仅保留结构与备注信息。
+                                                </div>
+                                            </div>
+                                            <button
+                                                type="button"
+                                                disabled
+                                                className="px-4 py-2 bg-surface-container-high text-secondary rounded-lg font-sans text-xs font-bold transition-colors flex items-center gap-1.5 cursor-not-allowed opacity-70"
+                                            >
+                                                <span className="material-symbols-outlined text-[16px]">schedule</span>
+                                                <span>待接入</span>
+                                            </button>
                                         </div>
                                     )}
                                 </div>

@@ -3,9 +3,12 @@ import json
 from pathlib import Path
 from playwright.async_api import async_playwright
 
+from xianyu_tools.config import settings
+
 async def probe_buttons():
     target_url = "https://detail.1688.com/offer/986504328531.html"
-    state_file = "state/ali1688/storage_state.json"
+    runtime_cfg = settings.get_active_ali1688_runtime_config()
+    state_file = runtime_cfg.get("state_file") or "state/source_channels/ali1688/ali1688-account-1/storage_state.json"
     
     async with async_playwright() as p:
         # 以带界面模式启动，方便您观察

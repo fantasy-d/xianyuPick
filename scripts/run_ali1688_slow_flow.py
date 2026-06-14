@@ -6,6 +6,7 @@ from playwright.async_api import async_playwright
 # --- 导入统一日志工具 ---
 BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR / "src"))
+from xianyu_tools.config import settings
 from xianyu_tools.logging_util import get_unified_logger
 from xianyu_tools.source_adapter import Ali1688SourceAdapter
 from xianyu_tools.xianyu_adapter.browser_transport import (
@@ -22,11 +23,23 @@ def _sanitize_filename(name: str) -> str:
     name = html.unescape(name).replace(">", "-").replace("&", "and")
     return re.sub(r'[\\/:*?"<>|]', '_', name).strip()[:60]
 
-DEFAULT_ALI1688_STATE_FILE = "state/ali1688/storage_state.json"
+DEFAULT_ALI1688_STATE_FILE = "state/source_channels/ali1688/ali1688-account-1/storage_state.json"
 DEFAULT_ALI1688_USER_DATA_DIR = str(
-    (Path(__file__).resolve().parents[1] / "profiles" / "ali1688_chrome_profile").resolve()
+    (Path(__file__).resolve().parents[1] / "profiles" / "source_channels" / "ali1688" / "ali1688-account-1" / "chrome_profile").resolve()
 )
 DEFAULT_ALI1688_EXTENSION_DIR = "tmp/1688-extension"
+
+
+def _load_active_ali1688_runtime_defaults() -> tuple[str, str, str | None]:
+    try:
+        runtime_cfg = settings.get_active_ali1688_runtime_config()
+    except Exception:
+        runtime_cfg = {}
+
+    state_file = runtime_cfg.get("state_file") or DEFAULT_ALI1688_STATE_FILE
+    user_data_dir = runtime_cfg.get("user_data_dir") or DEFAULT_ALI1688_USER_DATA_DIR
+    profile_directory = runtime_cfg.get("profile_directory") or None
+    return str(state_file), str(user_data_dir), profile_directory
 
 
 def _append_extension_launch_args(args: list[str], extension_dir: str) -> list[str]:
@@ -1431,10 +1444,11 @@ async def _run(args):
 
 
 def main():
+    default_state_file, _, _ = _load_active_ali1688_runtime_defaults()
     parser = argparse.ArgumentParser()
     parser.add_argument("--image-url", required=True)
     parser.add_argument("--output-dir", required=True)
-    parser.add_argument("--state-file", default="state/ali1688/storage_state.json")
+    parser.add_argument("--state-file", default=default_state_file)
     parser.add_argument("--detail-top-n", type=int, default=10)
     parser.add_argument("--target-keyword", required=False)
     parser.add_argument("--log-file", required=False)

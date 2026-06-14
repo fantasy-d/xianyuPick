@@ -22,12 +22,10 @@ def sanitize_dir_name(name: str) -> str:
 def get_active_ali1688_state_file() -> str:
     try:
         from xianyu_tools.config import settings
-        selected_account = settings.get_active_source_channel_account("ali1688")
-        if not selected_account:
-            return "state/ali1688/storage_state.json"
-        return selected_account.get("state_file") or "state/ali1688/storage_state.json"
+        runtime_cfg = settings.get_active_ali1688_runtime_config()
+        return runtime_cfg.get("state_file") or ""
     except Exception:
-        return "state/ali1688/storage_state.json"
+        return ""
 
 
 def validate_active_ali1688_runtime() -> tuple[bool, str]:
@@ -35,7 +33,12 @@ def validate_active_ali1688_runtime() -> tuple[bool, str]:
         from xianyu_tools.config import settings
 
         runtime_cfg = settings.get_active_ali1688_runtime_config()
-        state_file = runtime_cfg.get("state_file") or "state/ali1688/storage_state.json"
+        if not runtime_cfg.get("account_id"):
+            return False, runtime_cfg.get("error_message") or "未配置可用的 1688 货源渠道账号"
+
+        state_file = runtime_cfg.get("state_file") or ""
+        if not state_file:
+            return False, "当前激活的 1688 货源渠道账号缺少状态文件配置"
         state_path = Path(state_file)
         if not state_path.is_absolute():
             state_path = (BASE_DIR / state_path).resolve()
