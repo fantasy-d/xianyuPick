@@ -167,6 +167,7 @@ class ConfigManager:
                     "channel_type": "ali1688",
                     "label": "1688 货源渠道",
                     "enabled": True,
+                    "active_account_ids": ["ali1688-account-1"],
                     "active_account_id": "ali1688-account-1",
                     "accounts": [
                         {
@@ -190,6 +191,25 @@ class ConfigManager:
             merged["channels"] = channels
         return merged
 
+    @staticmethod
+    def _normalize_active_source_account_ids(
+        accounts: List[Dict[str, Any]],
+        raw_ids: Any,
+        fallback_id: str | None = None,
+    ) -> List[str]:
+        account_ids = [item.get("account_id") for item in accounts if item.get("account_id")]
+        requested_ids = raw_ids if isinstance(raw_ids, list) else [raw_ids] if raw_ids else []
+        normalized_ids: List[str] = []
+        for account_id in requested_ids:
+            if account_id in account_ids and account_id not in normalized_ids:
+                normalized_ids.append(account_id)
+
+        if not normalized_ids and fallback_id in account_ids:
+            normalized_ids.append(fallback_id)
+        if not normalized_ids and account_ids:
+            normalized_ids.append(account_ids[0])
+        return normalized_ids
+
     def get_source_channel_config(self, channel_id: str | None = None) -> Dict[str, Any]:
         """获取指定货源渠道配置，默认返回当前激活渠道"""
         cfg = self.get_source_channels_config()
@@ -208,7 +228,12 @@ class ConfigManager:
         if not accounts:
             return {}
 
-        target_id = account_id or channel_cfg.get("active_account_id")
+        active_account_ids = self._normalize_active_source_account_ids(
+            accounts,
+            channel_cfg.get("active_account_ids"),
+            fallback_id=channel_cfg.get("active_account_id"),
+        )
+        target_id = account_id or (active_account_ids[0] if active_account_ids else None) or channel_cfg.get("active_account_id")
         selected = next((item for item in accounts if item.get("account_id") == target_id), None)
         return selected or accounts[0]
 
@@ -274,10 +299,21 @@ class ConfigManager:
         if not accounts:
             return {}
 
-        selected_account = self._pick_enabled_source_account(
+        active_account_ids = self._normalize_active_source_account_ids(
             accounts,
-            account_id=selected_channel.get("active_account_id"),
+            selected_channel.get("active_account_ids"),
+            fallback_id=selected_channel.get("active_account_id"),
         )
+        selected_account = {}
+        for active_account_id in active_account_ids:
+            selected_account = self._pick_enabled_source_account(accounts, account_id=active_account_id)
+            if selected_account and selected_account.get("enabled", True) is not False:
+                break
+        if not selected_account:
+            selected_account = self._pick_enabled_source_account(
+                accounts,
+                account_id=selected_channel.get("active_account_id"),
+            )
         if not selected_account or selected_account.get("enabled", True) is False:
             return {}
         return selected_account
@@ -329,6 +365,7 @@ class ConfigManager:
                 "channel_type": "ali1688",
                 "channel_id": channel_id,
                 "account_id": "",
+                "active_account_ids": [],
                 "label": "",
                 "state_file": "",
                 "user_data_dir": "",
@@ -345,6 +382,11 @@ class ConfigManager:
             "channel_type": "ali1688",
             "channel_id": channel_id,
             "account_id": account.get("account_id"),
+            "active_account_ids": self._normalize_active_source_account_ids(
+                active_channel.get("accounts") or [],
+                active_channel.get("active_account_ids"),
+                fallback_id=active_channel.get("active_account_id"),
+            ),
             "label": account.get("label"),
             "state_file": runtime.get("state_file"),
             "user_data_dir": runtime.get("user_data_dir"),

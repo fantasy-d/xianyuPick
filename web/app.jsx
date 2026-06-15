@@ -231,7 +231,7 @@ const TokenStatsView = ({ hideHeader = false }) => {
                     {by_model.length === 0 ? (
                         <p className="font-sans text-xs text-secondary py-8 text-center">暂无大模型调用数据</p>
                     ) : (
-                        <div className="space-y-4">
+                        <div className="space-y-2">
                             {by_model.map(m => {
                                 const percentage = summary.total_tokens > 0 ? (m.total_tokens / summary.total_tokens * 100).toFixed(1) : 0;
                                 return (
@@ -262,7 +262,7 @@ const TokenStatsView = ({ hideHeader = false }) => {
                     {by_feature.length === 0 ? (
                         <p className="font-sans text-xs text-secondary py-8 text-center">暂无大模型调用数据</p>
                     ) : (
-                        <div className="space-y-4">
+                        <div className="space-y-2">
                             {by_feature.map(f => {
                                 const percentage = summary.total_tokens > 0 ? (f.total_tokens / summary.total_tokens * 100).toFixed(1) : 0;
                                 return (
@@ -2063,6 +2063,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
             channel_type: channelType,
             label: channelMeta.label || `货源渠道 ${index}`,
             enabled: true,
+            active_account_ids: [firstAccount.account_id],
             active_account_id: firstAccount.account_id,
             accounts: [firstAccount]
         };
@@ -2150,8 +2151,30 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     const currentSourceChannel = currentSourceChannels.find(item => item.channel_id === activeSourceChannelId) || currentSourceChannels[0] || createSourceChannel(1);
     const currentSourceChannelCapabilities = getSourceChannelCapabilities(currentSourceChannel?.channel_type);
     const currentSourceAccounts = currentSourceChannel?.accounts || [];
-    const activeSourceAccountId = currentSourceChannel?.active_account_id || currentSourceAccounts[0]?.account_id || '';
-    const currentSourceAccount = currentSourceAccounts.find(item => item.account_id === activeSourceAccountId) || currentSourceAccounts[0] || createSourceChannelAccount(currentSourceChannel?.channel_id || 'ali1688', 1);
+    const activeSourceAccountIds = (() => {
+        const availableIds = currentSourceAccounts.map(item => item.account_id);
+        const rawIds = Array.isArray(currentSourceChannel?.active_account_ids)
+            ? currentSourceChannel.active_account_ids
+            : (currentSourceChannel?.active_account_id ? [currentSourceChannel.active_account_id] : []);
+        const normalizedIds = rawIds.filter(id => availableIds.includes(id));
+        if (normalizedIds.length > 0) return normalizedIds;
+        return currentSourceAccounts[0]?.account_id ? [currentSourceAccounts[0].account_id] : [];
+    })();
+    const [selectedSourceAccountId, setSelectedSourceAccountId] = useState('');
+    const currentSourceAccountId = selectedSourceAccountId && currentSourceAccounts.some(item => item.account_id === selectedSourceAccountId)
+        ? selectedSourceAccountId
+        : activeSourceAccountIds[0] || currentSourceAccounts[0]?.account_id || '';
+    const currentSourceAccount = currentSourceAccounts.find(item => item.account_id === currentSourceAccountId) || currentSourceAccounts[0] || createSourceChannelAccount(currentSourceChannel?.channel_id || 'ali1688', 1);
+    const selectableChipClass = (isActive) => (
+        `flex items-center gap-1 rounded-full border px-3 py-1.5 text-[11px] font-sans transition-all duration-200 ${
+            isActive
+                ? 'border-primary bg-primary text-on-primary shadow-[0_0_0_1px_rgba(197,86,16,0.32),0_12px_24px_rgba(197,86,16,0.28)]'
+                : 'border-border-hairline bg-surface-container-low text-secondary hover:border-primary/25 hover:bg-primary/[0.05] hover:text-on-surface'
+        }`
+    );
+    const selectableChipActionClass = (isActive) => (
+        `font-semibold cursor-pointer transition-colors ${isActive ? 'text-on-primary' : 'text-secondary hover:text-on-surface'}`
+    );
 
     const setCurrentOpenapiAccount = (updater) => {
         setConfigs(prev => {
@@ -2203,7 +2226,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                         return {
                             ...channel,
                             accounts: (channel.accounts || []).map(account => {
-                                if (account.account_id !== (channel.active_account_id || channel.accounts?.[0]?.account_id)) return account;
+                                if (account.account_id !== currentSourceAccountId) return account;
                                 return typeof updater === 'function' ? updater(account) : { ...account, ...updater };
                             })
                         };
@@ -2341,37 +2364,69 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     };
 
     const handleAddSourceAccount = () => {
+        let nextCreatedAccountId = '';
         setCurrentSourceChannel(prev => {
             const accounts = prev.accounts || [];
             const nextAccount = createSourceChannelAccount(prev.channel_id, accounts.length + 1);
+            nextCreatedAccountId = nextAccount.account_id;
+            const nextActiveAccountIds = Array.isArray(prev.active_account_ids) ? [...prev.active_account_ids] : (prev.active_account_id ? [prev.active_account_id] : []);
+            if (!nextActiveAccountIds.includes(nextAccount.account_id)) {
+                nextActiveAccountIds.push(nextAccount.account_id);
+            }
             return {
                 ...prev,
+                active_account_ids: nextActiveAccountIds,
                 active_account_id: nextAccount.account_id,
                 accounts: [...accounts, nextAccount]
             };
         });
+        setSelectedSourceAccountId(nextCreatedAccountId);
     };
 
     const handleRemoveSourceAccount = (accountId) => {
         setCurrentSourceChannel(prev => {
             const accounts = (prev.accounts || []).filter(item => item.account_id !== accountId);
             const nextAccounts = accounts.length ? accounts : [createSourceChannelAccount(prev.channel_id, 1)];
-            const nextActiveAccountId = nextAccounts.some(item => item.account_id === prev.active_account_id)
-                ? prev.active_account_id
-                : nextAccounts[0].account_id;
+            const nextActiveAccountIds = (Array.isArray(prev.active_account_ids) ? prev.active_account_ids : (prev.active_account_id ? [prev.active_account_id] : []))
+                .filter(id => id !== accountId && nextAccounts.some(item => item.account_id === id));
+            if (nextActiveAccountIds.length === 0 && nextAccounts[0]?.account_id) {
+                nextActiveAccountIds.push(nextAccounts[0].account_id);
+            }
             return {
                 ...prev,
-                active_account_id: nextActiveAccountId,
+                active_account_ids: nextActiveAccountIds,
+                active_account_id: nextActiveAccountIds[0] || '',
                 accounts: nextAccounts
             };
         });
+        setSelectedSourceAccountId(prev => (prev === accountId ? '' : prev));
     };
 
     const handleSourceAccountSwitch = (accountId) => {
-        setCurrentSourceChannel(prev => ({
-            ...prev,
-            active_account_id: accountId
-        }));
+        setSelectedSourceAccountId(accountId);
+    };
+
+    const handleSourceActiveAccountToggle = (accountId, checked) => {
+        setCurrentSourceChannel(prev => {
+            const accounts = prev.accounts || [];
+            let nextActiveAccountIds = Array.isArray(prev.active_account_ids) ? [...prev.active_account_ids] : (prev.active_account_id ? [prev.active_account_id] : []);
+            nextActiveAccountIds = nextActiveAccountIds.filter(id => accounts.some(item => item.account_id === id));
+            if (checked) {
+                if (!nextActiveAccountIds.includes(accountId)) {
+                    nextActiveAccountIds.push(accountId);
+                }
+            } else {
+                nextActiveAccountIds = nextActiveAccountIds.filter(id => id !== accountId);
+            }
+            if (nextActiveAccountIds.length === 0 && accounts[0]?.account_id) {
+                nextActiveAccountIds = [accounts[0].account_id];
+            }
+            return {
+                ...prev,
+                active_account_ids: nextActiveAccountIds,
+                active_account_id: nextActiveAccountIds[0] || ''
+            };
+        });
     };
 
     const handleCheckSourceChannelStatus = async () => {
@@ -2753,12 +2808,22 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                             meta: {}
                         }
                     }));
+                    const normalizedActiveAccountIds = (() => {
+                        const availableIds = accounts.map(item => item.account_id);
+                        const rawIds = Array.isArray(channel.active_account_ids)
+                            ? channel.active_account_ids
+                            : (channel.active_account_id ? [channel.active_account_id] : []);
+                        const validIds = rawIds.filter(id => availableIds.includes(id));
+                        if (validIds.length > 0) return validIds;
+                        return accounts[0]?.account_id ? [accounts[0].account_id] : [];
+                    })();
                     return {
                         channel_id: channel.channel_id || `source-channel-${idx + 1}`,
                         channel_type: channel.channel_type || 'custom',
                         label: channel.label || `货源渠道 ${idx + 1}`,
                         enabled: channel.enabled !== false,
-                        active_account_id: channel.active_account_id || accounts[0]?.account_id || '',
+                        active_account_ids: normalizedActiveAccountIds,
+                        active_account_id: normalizedActiveAccountIds[0] || '',
                         accounts: accounts.length ? accounts : [createSourceChannelAccount(channel.channel_id || `source-channel-${idx + 1}`, 1)]
                     };
                 });
@@ -2784,11 +2849,12 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                     const mapped = data.llm.map(item => ({
                         api_key: item.api_key || '',
                         base_url: item.base_url || '',
-                        models_str: (item.models || []).join(', ')
+                        models_str: (item.models || []).join(', '),
+                        is_collapsed: false
                     }));
                     setLlmList(mapped);
                 } else {
-                    setLlmList([{ api_key: '', base_url: '', models_str: '' }]);
+                    setLlmList([{ api_key: '', base_url: '', models_str: '', is_collapsed: false }]);
                 }
 
                 if (data.crawl) {
@@ -2836,7 +2902,17 @@ const SystemSettingsView = ({ hideHeader = false }) => {
         }, pollInterval);
 
         return () => clearInterval(timer);
-    }, [isSourceChannelLoggingIn, activeSourceChannelId, activeSourceAccountId, currentSourceChannelCapabilities.supportsSessionState]);
+    }, [isSourceChannelLoggingIn, activeSourceChannelId, currentSourceAccountId, currentSourceChannelCapabilities.supportsSessionState]);
+
+    useEffect(() => {
+        if (!currentSourceAccountId) {
+            setSelectedSourceAccountId('');
+            return;
+        }
+        if (!selectedSourceAccountId || !currentSourceAccounts.some(item => item.account_id === selectedSourceAccountId)) {
+            setSelectedSourceAccountId(currentSourceAccountId);
+        }
+    }, [currentSourceAccountId, selectedSourceAccountId, currentSourceAccounts]);
 
     useEffect(() => {
         const cfg = currentOpenapiAccount?.default_config;
@@ -2938,7 +3014,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     }, [xianyuLoginSuccessMessage]);
 
     const handleAddLlm = () => {
-        setLlmList([...llmList, { api_key: '', base_url: '', models_str: '' }]);
+        setLlmList([...llmList, { api_key: '', base_url: '', models_str: '', is_collapsed: false }]);
     };
 
     const handleRemoveLlm = (index) => {
@@ -2950,6 +3026,15 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     const handleLlmChange = (index, field, value) => {
         const copy = [...llmList];
         copy[index][field] = value;
+        setLlmList(copy);
+    };
+
+    const handleToggleLlmCard = (index) => {
+        const copy = [...llmList];
+        copy[index] = {
+            ...copy[index],
+            is_collapsed: !copy[index]?.is_collapsed
+        };
         setLlmList(copy);
     };
 
@@ -2997,6 +3082,36 @@ const SystemSettingsView = ({ hideHeader = false }) => {
             setSaving(false);
         }
     };
+
+    const renderCardActions = () => (
+        <div className="border-t border-border-hairline/80 pt-4 flex justify-end gap-3">
+            <button
+                type="button"
+                onClick={() => fetchConfigs()}
+                className="px-5 py-2.5 bg-surface-container-high border border-border-hairline hover:bg-surface-container-highest text-on-surface rounded-xl font-sans text-xs font-semibold transition-colors active:scale-95 duration-100"
+            >
+                放弃更改
+            </button>
+            <button
+                type="button"
+                onClick={handleSave}
+                disabled={saving}
+                className="px-6 py-2.5 bg-primary hover:bg-primary-hover disabled:bg-primary/50 text-on-primary rounded-xl font-sans text-xs font-bold transition-colors shadow-lg shadow-primary/20 flex items-center gap-1.5 active:scale-95 duration-100"
+            >
+                {saving ? (
+                    <>
+                        <span className="material-symbols-outlined text-[16px] animate-spin">autorenew</span>
+                        <span>正在同步保存...</span>
+                    </>
+                ) : (
+                    <>
+                        <span className="material-symbols-outlined text-[16px]">save</span>
+                        <span>保存并同步配置</span>
+                    </>
+                )}
+            </button>
+        </div>
+    );
 
     if (loading) {
         return (
@@ -3074,33 +3189,6 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                         <p className="font-sans text-sm text-secondary mt-1">全局管理大模型服务密钥及闲鱼 OpenAPI 的各类配置。</p>
                     </div>
                 )}
-                <div className="flex justify-end gap-3 md:shrink-0">
-                    <button
-                        type="button"
-                        onClick={fetchConfigs}
-                        className="px-5 py-2.5 bg-surface-container-high border border-border-hairline hover:bg-surface-container-highest text-on-surface rounded-xl font-sans text-xs font-semibold transition-colors active:scale-95 duration-100"
-                    >
-                        放弃更改
-                    </button>
-                    <button
-                        type="button"
-                        onClick={handleSave}
-                        disabled={saving}
-                        className="px-6 py-2.5 bg-primary hover:bg-primary-hover disabled:bg-primary/50 text-on-primary rounded-xl font-sans text-xs font-bold transition-colors shadow-lg shadow-primary/20 flex items-center gap-1.5 active:scale-95 duration-100"
-                    >
-                        {saving ? (
-                            <>
-                                <span className="material-symbols-outlined text-[16px] animate-spin">autorenew</span>
-                                <span>正在同步保存...</span>
-                            </>
-                        ) : (
-                            <>
-                                <span className="material-symbols-outlined text-[16px]">save</span>
-                                <span>保存并同步配置</span>
-                            </>
-                        )}
-                    </button>
-                </div>
             </header>
 
             <form id="system-settings-form" onSubmit={handleSave} className="space-y-6">
@@ -3118,40 +3206,43 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                             </span>
                         </div>
                         
-                        <div className="flex items-center gap-3">
-                            {!llmCollapsed && (
+                    </div>
+
+                    {!llmCollapsed && (
+                        <div className="space-y-3">
+                            <div className="flex justify-start -mt-1">
                                 <button 
                                     type="button"
                                     onClick={handleAddLlm}
-                                    className="flex items-center gap-1 px-3 py-1.5 bg-primary/10 hover:bg-primary/20 text-primary rounded-lg font-sans text-xs font-semibold active:scale-95 transition-all"
+                                    className="flex items-center gap-1 px-2.5 py-1 bg-primary/10 hover:bg-primary/20 text-primary rounded-lg font-sans text-xs font-semibold active:scale-95 transition-all"
                                 >
                                     <span className="material-symbols-outlined text-[14px]">add</span>
                                     <span>添加模型接口</span>
                                 </button>
-                            )}
-                        </div>
-                    </div>
-
-                    {!llmCollapsed && (
-                        <div className="space-y-6">
+                            </div>
                             {llmList.map((item, idx) => (
                                 <div key={idx} className="p-4 rounded-xl bg-surface-container-low border border-border-hairline relative group ambient-shadow hover:border-primary/40 transition-colors">
-                                    {llmList.length > 1 && (
-                                        <button 
+                                    <div className={`flex items-center justify-between ${item.is_collapsed ? 'mb-0' : 'mb-3'}`}>
+                                        <div className="font-sans text-xs font-bold text-primary flex items-center gap-1.5">
+                                            <span className="w-1.5 h-1.5 rounded-full bg-primary"></span>
+                                            <span>接口 #{idx + 1}</span>
+                                        </div>
+                                        <button
                                             type="button"
-                                            onClick={() => handleRemoveLlm(idx)}
-                                            className="absolute top-3 right-3 text-secondary hover:text-error transition-colors flex items-center justify-center cursor-pointer"
-                                            title="删除此接口"
+                                            onClick={() => handleToggleLlmCard(idx)}
+                                            className="flex items-center gap-1 text-[11px] font-sans font-semibold text-secondary hover:text-primary transition-colors"
                                         >
-                                            <span className="material-symbols-outlined text-[18px]">delete</span>
+                                            <span>{item.is_collapsed ? '展开' : '收起'}</span>
+                                            <span
+                                                className="material-symbols-outlined text-[18px] transition-transform duration-200"
+                                                style={{ transform: item.is_collapsed ? 'rotate(0deg)' : 'rotate(180deg)' }}
+                                            >
+                                                expand_more
+                                            </span>
                                         </button>
-                                    )}
-
-                                    <div className="font-sans text-xs font-bold text-primary mb-3 flex items-center gap-1.5">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-primary"></span>
-                                        <span>接口 #{idx + 1}</span>
                                     </div>
 
+                                    {!item.is_collapsed && (
                                     <div className="space-y-4">
                                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                             <div className="space-y-1">
@@ -3200,9 +3291,23 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                                 required
                                             />
                                         </div>
+                                        {llmList.length > 1 && (
+                                            <div className="flex justify-end pt-1">
+                                                <button 
+                                                    type="button"
+                                                    onClick={() => handleRemoveLlm(idx)}
+                                                    className="inline-flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:text-error hover:bg-error/8 transition-colors cursor-pointer"
+                                                    title="删除此接口"
+                                                >
+                                                    <span className="material-symbols-outlined text-[16px]">delete</span>
+                                                </button>
+                                            </div>
+                                        )}
                                     </div>
+                                    )}
                                 </div>
                             ))}
+                            {renderCardActions()}
                         </div>
                     )}
                 </div>
@@ -3231,12 +3336,12 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                     return (
                                         <div
                                             key={account.id}
-                                            className={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-[11px] font-sans ${isActive ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border-hairline bg-surface-container-low text-secondary'}`}
+                                            className={selectableChipClass(isActive)}
                                         >
                                             <button
                                                 type="button"
                                                 onClick={() => handleOpenapiAccountSwitch(account.id)}
-                                                className="font-semibold cursor-pointer"
+                                                className={selectableChipActionClass(isActive)}
                                             >
                                                 {account.name || `闲鱼账号 ${idx + 1}`}
                                             </button>
@@ -3507,6 +3612,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                 </div>
                             </div>
 
+                            {renderCardActions()}
                         </div>
                     )}
                 </div>
@@ -3535,12 +3641,12 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                         return (
                                             <div
                                                 key={channel.channel_id}
-                                                className={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-[11px] font-sans ${isActive ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border-hairline bg-surface-container-low text-secondary'}`}
+                                                className={selectableChipClass(isActive)}
                                             >
                                                 <button
                                                     type="button"
                                                     onClick={() => handleSourceChannelSwitch(channel.channel_id)}
-                                                    className="font-semibold cursor-pointer"
+                                                    className={selectableChipActionClass(isActive)}
                                                 >
                                                     {channel.label || `货源渠道 ${idx + 1}`}
                                                 </button>
@@ -3594,15 +3700,22 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                 </div>
                                 <div className="space-y-1">
                                     <label className="block font-sans text-xs text-secondary font-semibold">当前激活账号</label>
-                                    <select
-                                        value={activeSourceAccountId}
-                                        onChange={(e) => handleSourceAccountSwitch(e.target.value)}
-                                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans cursor-pointer"
-                                    >
-                                        {currentSourceAccounts.map(account => (
-                                            <option key={account.account_id} value={account.account_id}>{account.label || account.account_id}</option>
-                                        ))}
-                                    </select>
+                                    <div className="w-full min-h-[38px] bg-surface-container-low border border-border-hairline rounded-lg px-3 py-2 flex flex-wrap items-center gap-3">
+                                        {currentSourceAccounts.map(account => {
+                                            const isChecked = activeSourceAccountIds.includes(account.account_id);
+                                            return (
+                                                <label key={account.account_id} className="inline-flex items-center gap-2 text-xs text-on-surface font-sans cursor-pointer">
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={isChecked}
+                                                        onChange={(e) => handleSourceActiveAccountToggle(account.account_id, e.target.checked)}
+                                                        className="rounded border-border-hairline text-primary focus:ring-primary/30"
+                                                    />
+                                                    <span>{account.label || account.account_id}</span>
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
                                 </div>
                             </div>
 
@@ -3620,19 +3733,33 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                             <div className="border-t border-border-hairline/80 pt-4 space-y-4">
                                 <div className="flex flex-wrap items-center gap-2">
                                     {currentSourceAccounts.map((account, idx) => {
-                                        const isActive = account.account_id === activeSourceAccountId;
+                                        const isSelected = account.account_id === currentSourceAccountId;
+                                        const isActive = activeSourceAccountIds.includes(account.account_id);
+                                        const loginStatusDotClass = account.session_report?.is_usable
+                                            ? 'bg-success'
+                                            : account.session_report?.last_checked_at
+                                                ? 'bg-error'
+                                                : 'bg-secondary/60';
+                                        const loginStatusDotTitle = account.session_report?.is_usable
+                                            ? '登录正常'
+                                            : account.session_report?.last_checked_at
+                                                ? (account.session_report?.status_text || '登录异常')
+                                                : '未检测';
                                         return (
                                             <div
                                                 key={account.account_id}
-                                                className={`flex items-center gap-1 rounded-full border px-3 py-1.5 text-[11px] font-sans ${isActive ? 'border-primary/30 bg-primary/10 text-primary' : 'border-border-hairline bg-surface-container-low text-secondary'}`}
+                                                className={selectableChipClass(isSelected)}
                                             >
                                                 <button
                                                     type="button"
                                                     onClick={() => handleSourceAccountSwitch(account.account_id)}
-                                                    className="font-semibold cursor-pointer"
+                                                    className={selectableChipActionClass(isSelected)}
                                                 >
                                                     {account.label || `渠道账号 ${idx + 1}`}
                                                 </button>
+                                                {isActive && (
+                                                    <span className={`inline-block w-1.5 h-1.5 rounded-full ${loginStatusDotClass}`} title={loginStatusDotTitle}></span>
+                                                )}
                                                 {currentSourceAccounts.length > 1 && (
                                                     <button
                                                         type="button"
@@ -3696,7 +3823,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                                         </span>
                                                     </div>
                                                     <div className="font-sans text-xs text-secondary">
-                                                        账号名：{currentSourceAccount.session_report?.account_name || '未识别'}
+                                                        账号名：{currentSourceAccount.session_report?.account_name || currentSourceAccount.label || '未识别'}
                                                     </div>
                                                     <div className="font-sans text-[11px] text-secondary">
                                                         最近检测：{currentSourceAccount.session_report?.last_checked_at || '暂无'}
@@ -3767,6 +3894,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                     )}
                                 </div>
                             </div>
+                            {renderCardActions()}
                         </div>
                     )}
                 </div>
@@ -3872,6 +4000,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                     </div>
                                 )}
                             </div>
+                            {renderCardActions()}
                         </div>
                     )}
                 </div>
@@ -4330,25 +4459,8 @@ const App = () => {
                     </li>
                 </ul>
 
-                {/* 侧栏底部状态 */}
+                {/* 侧栏底部工具 */}
                 <div className={`${sidebarCollapsed ? 'px-3' : 'px-4'} mt-auto space-y-3`}>
-                    <div className={sidebarUtilityWrapperClass}>
-                        <div className={`${sidebarStatusCardClass} ${sidebarCollapsed ? '' : 'bg-surface-container-low border border-border-hairline'}`}>
-                            <div className={`flex items-center ${sidebarCollapsed ? 'justify-center' : 'gap-2'}`}>
-                                <span className={`material-symbols-outlined text-[16px] ${sysStatus["1688_login"] === '有效' ? 'text-success' : 'text-error'}`} style={{fontVariationSettings: "'FILL' 1"}}>check_circle</span>
-                                <span className={`sidebar-fade-content font-sans text-[11px] text-secondary font-medium ${sidebarCollapsed ? 'is-collapsed' : ''}`}>1688 接入状态</span>
-                            </div>
-                            {!sidebarCollapsed && (
-                                <div className="mt-1 pl-6 font-mono text-xs font-bold text-on-surface">
-                                    {sysStatus["1688_login"] || 'OFFLINE'}
-                                </div>
-                            )}
-                        </div>
-                        {sidebarCollapsed && (
-                            <span className="sidebar-tooltip">1688 接入状态：{sysStatus["1688_login"] || 'OFFLINE'}</span>
-                        )}
-                    </div>
-
                     <div className={sidebarUtilityWrapperClass}>
                         <button
                             type="button"

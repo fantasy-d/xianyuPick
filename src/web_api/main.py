@@ -187,6 +187,7 @@ DEFAULT_SOURCE_CHANNEL = {
     "channel_type": "ali1688",
     "label": "1688 货源渠道",
     "enabled": True,
+    "active_account_ids": ["ali1688-account-1"],
     "active_account_id": "ali1688-account-1",
     "accounts": [DEFAULT_SOURCE_CHANNEL_ACCOUNT],
 }
@@ -238,6 +239,21 @@ def build_source_channel_account_runtime(channel_type: str | None, channel_id: s
     return settings.build_source_channel_account_runtime(channel_type, channel_id, account_id)
 
 
+def normalize_active_source_account_ids(accounts: list[dict] | None, raw_ids, fallback_id: str | None = None) -> list[str]:
+    account_ids = [item.get("account_id") for item in (accounts or []) if item.get("account_id")]
+    requested_ids = raw_ids if isinstance(raw_ids, list) else [raw_ids] if raw_ids else []
+    normalized_ids: list[str] = []
+    for account_id in requested_ids:
+        if account_id in account_ids and account_id not in normalized_ids:
+            normalized_ids.append(account_id)
+
+    if not normalized_ids and fallback_id in account_ids:
+        normalized_ids.append(fallback_id)
+    if not normalized_ids and account_ids:
+        normalized_ids.append(account_ids[0])
+    return normalized_ids
+
+
 def normalize_source_channels_config(raw_cfg: dict | None) -> dict:
     raw_cfg = dict(raw_cfg or {})
     channels = raw_cfg.get("channels")
@@ -283,9 +299,13 @@ def normalize_source_channels_config(raw_cfg: dict | None) -> dict:
                 normalized_accounts.append(fallback_account)
 
             merged_channel["accounts"] = normalized_accounts
-            active_account_id = merged_channel.get("active_account_id") or normalized_accounts[0]["account_id"]
-            if not any(item["account_id"] == active_account_id for item in normalized_accounts):
-                active_account_id = normalized_accounts[0]["account_id"]
+            active_account_ids = normalize_active_source_account_ids(
+                normalized_accounts,
+                merged_channel.get("active_account_ids"),
+                fallback_id=merged_channel.get("active_account_id"),
+            )
+            active_account_id = active_account_ids[0] if active_account_ids else normalized_accounts[0]["account_id"]
+            merged_channel["active_account_ids"] = active_account_ids
             merged_channel["active_account_id"] = active_account_id
             normalized_channels.append(merged_channel)
     else:
@@ -310,12 +330,18 @@ def strip_source_channel_runtime_fields(raw_cfg: dict | None) -> dict:
     normalized = normalize_source_channels_config(raw_cfg)
     cleaned_channels = []
     for channel in normalized.get("channels", []):
+        active_account_ids = normalize_active_source_account_ids(
+            channel.get("accounts") or [],
+            channel.get("active_account_ids"),
+            fallback_id=channel.get("active_account_id"),
+        )
         cleaned_channel = {
             "channel_id": channel.get("channel_id"),
             "channel_type": channel.get("channel_type"),
             "label": channel.get("label"),
             "enabled": bool(channel.get("enabled", True)),
-            "active_account_id": channel.get("active_account_id"),
+            "active_account_ids": active_account_ids,
+            "active_account_id": active_account_ids[0] if active_account_ids else "",
             "accounts": [],
         }
         for account in channel.get("accounts", []):
@@ -344,7 +370,12 @@ def get_source_channel(raw_cfg: dict | None, channel_id: str | None = None) -> d
 def get_source_channel_account(raw_cfg: dict | None, channel_id: str | None = None, account_id: str | None = None) -> dict:
     channel = get_source_channel(raw_cfg, channel_id)
     accounts = channel.get("accounts") or []
-    target_id = account_id or channel.get("active_account_id")
+    active_account_ids = normalize_active_source_account_ids(
+        accounts,
+        channel.get("active_account_ids"),
+        fallback_id=channel.get("active_account_id"),
+    )
+    target_id = account_id or (active_account_ids[0] if active_account_ids else None) or channel.get("active_account_id")
     selected = next((item for item in accounts if item["account_id"] == target_id), None)
     return selected or (accounts[0] if accounts else {})
 
@@ -404,11 +435,12 @@ def build_source_channel_unavailable_report(
     }
 
 
-def inspect_ali1688_state_file_quick(state_file: str | None) -> dict:
+def inspect_ali1688_state_file_quick(state_file: str | None, fallback_account_name: str | None = None) -> dict:
+    fallback_account_name = str(fallback_account_name or "").strip()
     if not state_file:
         return {
             "is_usable": False,
-            "account_name": "",
+            "account_name": fallback_account_name,
             "status_text": "未配置状态文件",
             "last_checked_at": datetime.now().isoformat(),
             "error_message": "",
@@ -422,7 +454,7 @@ def inspect_ali1688_state_file_quick(state_file: str | None) -> dict:
     if not state_path.exists():
         return {
             "is_usable": False,
-            "account_name": "",
+            "account_name": fallback_account_name,
             "status_text": "未配置状态文件" if not state_file else "状态文件不存在",
             "last_checked_at": datetime.now().isoformat(),
             "error_message": "" if not state_file else f"未找到状态文件：{state_file}",
@@ -447,6 +479,8 @@ def inspect_ali1688_state_file_quick(state_file: str | None) -> dict:
                 if raw_value:
                     account_name = unquote(raw_value)
                     break
+        if not account_name and fallback_account_name:
+            account_name = fallback_account_name
 
         is_usable = bool(cookies) and has_useful_cookie
         return {
@@ -463,7 +497,7 @@ def inspect_ali1688_state_file_quick(state_file: str | None) -> dict:
     except Exception as exc:
         return {
             "is_usable": False,
-            "account_name": "",
+            "account_name": fallback_account_name,
             "status_text": "检测失败",
             "last_checked_at": datetime.now().isoformat(),
             "error_message": str(exc),
@@ -498,10 +532,16 @@ async def inspect_source_channel_account(channel_type: str, account_cfg: dict) -
                     "meta": session_result,
                 }
             except Exception as exc:
-                fallback = inspect_ali1688_state_file_quick(account_cfg.get("state_file"))
+                fallback = inspect_ali1688_state_file_quick(
+                    account_cfg.get("state_file"),
+                    account_cfg.get("label") or account_cfg.get("account_id") or "",
+                )
                 fallback["error_message"] = fallback.get("error_message") or str(exc)
                 return fallback
-        return inspect_ali1688_state_file_quick(account_cfg.get("state_file"))
+        return inspect_ali1688_state_file_quick(
+            account_cfg.get("state_file"),
+            account_cfg.get("label") or account_cfg.get("account_id") or "",
+        )
 
     return {
         "is_usable": False,
@@ -1568,7 +1608,10 @@ def system_status():
         active_count = cursor.fetchone()['count']; conn.close()
         runtime_cfg = settings.get_active_ali1688_runtime_config()
         if runtime_cfg.get("account_id"):
-            session_report = inspect_ali1688_state_file_quick(runtime_cfg.get("state_file"))
+            session_report = inspect_ali1688_state_file_quick(
+                runtime_cfg.get("state_file"),
+                runtime_cfg.get("label") or runtime_cfg.get("account_id") or "",
+            )
             login_status = "有效" if session_report.get("is_usable") else "无效"
         else:
             login_status = "未配置"
@@ -1602,7 +1645,10 @@ def get_system_configs():
         for channel in source_channels_cfg["channels"]:
             for account in channel.get("accounts", []):
                 if channel.get("channel_type") == "ali1688":
-                    account["session_report"] = inspect_ali1688_state_file_quick(account.get("state_file"))
+                    account["session_report"] = inspect_ali1688_state_file_quick(
+                        account.get("state_file"),
+                        account.get("label") or account.get("account_id") or "",
+                    )
                 else:
                     account["session_report"] = {
                         "is_usable": False,
@@ -1805,7 +1851,10 @@ def get_active_source_channel_runtime():
     try:
         runtime_cfg = settings.get_active_ali1688_runtime_config()
         if runtime_cfg.get("account_id"):
-            report = inspect_ali1688_state_file_quick(runtime_cfg.get("state_file"))
+            report = inspect_ali1688_state_file_quick(
+                runtime_cfg.get("state_file"),
+                runtime_cfg.get("label") or runtime_cfg.get("account_id") or "",
+            )
         else:
             report = build_source_channel_unavailable_report(
                 {"channel_id": runtime_cfg.get("channel_id"), "label": "1688 货源渠道"},
@@ -1862,7 +1911,10 @@ def get_source_channel_login_status(channel_id: str = None, account_id: str = No
                 }
             }
         channel, account = hydrate_source_channel_account(channel, account)
-        report = inspect_ali1688_state_file_quick(account.get("state_file"))
+        report = inspect_ali1688_state_file_quick(
+            account.get("state_file"),
+            account.get("label") or account.get("account_id") or "",
+        )
 
         is_currently_logging_in = (
             source_channel_login_process is not None
