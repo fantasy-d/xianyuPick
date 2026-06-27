@@ -1,4 +1,4 @@
-import os, json, asyncio, re, csv, argparse, sys, pymysql, random, traceback
+import os, json, asyncio, re, csv, argparse, sys, pymysql, random, traceback, shlex
 from datetime import datetime
 from pathlib import Path
 
@@ -19,40 +19,51 @@ def sanitize_dir_name(name: str) -> str:
     return re.sub(r'[\\/:*?"<>|]', '_', clean).strip()[:60]
 
 
-def get_active_ali1688_state_file() -> str:
+def get_effective_ali1688_runtime_context(rotation_index: int = 0) -> dict:
     try:
         from xianyu_tools.config import settings
-        runtime_cfg = settings.get_active_ali1688_runtime_config()
-        return runtime_cfg.get("state_file") or ""
+        runtime_cfg = settings.get_effective_crawl_source_runtime("ali1688", rotation_index=rotation_index)
+        if not runtime_cfg:
+            runtime_cfg = settings.get_active_ali1688_runtime_config()
+        filter_snapshot = settings.get_channel_search_filter_snapshot(
+            channel_id=runtime_cfg.get("channel_id") or "ali1688",
+            channel_type="ali1688",
+        )
+        return {
+            "state_file": runtime_cfg.get("state_file") or "",
+            "source_channel_type": runtime_cfg.get("channel_type") or "ali1688",
+            "source_channel_id": runtime_cfg.get("channel_id") or "ali1688",
+            "source_channel_label": runtime_cfg.get("channel_label") or "1688 货源渠道",
+            "source_account_id": runtime_cfg.get("account_id") or "",
+            "source_account_label": runtime_cfg.get("account_label") or runtime_cfg.get("label") or "",
+            "source_filter_snapshot": filter_snapshot,
+        }
     except Exception:
-        return ""
+        from xianyu_tools.config import settings
+        return {
+            "state_file": "",
+            "source_channel_type": "ali1688",
+            "source_channel_id": "ali1688",
+            "source_channel_label": "1688 货源渠道",
+            "source_account_id": "",
+            "source_account_label": "",
+            "source_filter_snapshot": settings.normalize_channel_search_filter_snapshot({
+                "channel_id": "ali1688",
+                "channel_type": "ali1688",
+                "filters": {},
+                "mapping_stage": "snapshot_only",
+            }),
+        }
 
 
 def validate_active_ali1688_runtime() -> tuple[bool, str]:
     try:
         from xianyu_tools.config import settings
 
-        runtime_cfg = settings.get_active_ali1688_runtime_config()
-        if not runtime_cfg.get("account_id"):
+        runtime_candidates = settings.get_crawl_source_account_runtimes("ali1688", only_usable=True)
+        if not runtime_candidates:
+            runtime_cfg = settings.get_active_ali1688_runtime_config()
             return False, runtime_cfg.get("error_message") or "未配置可用的 1688 货源渠道账号"
-
-        state_file = runtime_cfg.get("state_file") or ""
-        if not state_file:
-            return False, "当前激活的 1688 货源渠道账号缺少状态文件配置"
-        state_path = Path(state_file)
-        if not state_path.is_absolute():
-            state_path = (BASE_DIR / state_path).resolve()
-
-        if not state_path.exists():
-            return False, f"激活的 1688 账号状态文件不存在：{state_file}"
-
-        with open(state_path, "r", encoding="utf-8") as f:
-            state_data = json.load(f)
-        cookies = state_data.get("cookies") or []
-        cookie_names = {str(item.get("name") or "") for item in cookies if isinstance(item, dict)}
-        required = {"cookie2", "_m_h5_tk", "_m_h5_tk_enc", "ali_apache_id", "cna"}
-        if not cookies or not cookie_names.intersection(required):
-            return False, f"激活的 1688 账号状态文件无有效登录 Cookie：{state_file}"
         return True, ""
     except Exception as exc:
         return False, f"校验激活 1688 账号失败：{exc}"
@@ -84,6 +95,46 @@ def init_db_schema():
             cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN html_path VARCHAR(1024) DEFAULT '';")
         except Exception:
             pass
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN source_channel_id VARCHAR(100) DEFAULT 'ali1688';")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN source_channel_type VARCHAR(100) DEFAULT 'ali1688';")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN source_channel_label VARCHAR(255) DEFAULT '1688 货源渠道';")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN source_account_id VARCHAR(100) DEFAULT '';")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN source_account_label VARCHAR(255) DEFAULT '';")
+        except Exception:
+            pass
+        for ddl in (
+            "ALTER TABLE ali1688_sources ADD COLUMN pickup_48h_text VARCHAR(64) DEFAULT '';",
+            "ALTER TABLE ali1688_sources ADD COLUMN pickup_24h_text VARCHAR(64) DEFAULT '';",
+            "ALTER TABLE ali1688_sources ADD COLUMN month_dispatch_text VARCHAR(64) DEFAULT '';",
+            "ALTER TABLE ali1688_sources ADD COLUMN seven_day_dispatch_text VARCHAR(64) DEFAULT '';",
+            "ALTER TABLE ali1688_sources ADD COLUMN listing_count_text VARCHAR(64) DEFAULT '';",
+            "ALTER TABLE ali1688_sources ADD COLUMN distributor_count_text VARCHAR(64) DEFAULT '';",
+            "ALTER TABLE ali1688_sources ADD COLUMN waybill_support_text VARCHAR(64) DEFAULT '';",
+            "ALTER TABLE ali1688_sources ADD COLUMN settled_years_text VARCHAR(64) DEFAULT '';",
+            "ALTER TABLE ali1688_sources ADD COLUMN company_name VARCHAR(255) DEFAULT '';",
+            "ALTER TABLE ali1688_sources ADD COLUMN month_dispatch_count INT DEFAULT 0;",
+            "ALTER TABLE ali1688_sources ADD COLUMN seven_day_dispatch_count INT DEFAULT 0;",
+            "ALTER TABLE ali1688_sources ADD COLUMN listing_count INT DEFAULT 0;",
+            "ALTER TABLE ali1688_sources ADD COLUMN distributor_count INT DEFAULT 0;",
+            "ALTER TABLE ali1688_sources ADD COLUMN source_filter_snapshot_json TEXT DEFAULT NULL;",
+        ):
+            try:
+                cursor.execute(ddl)
+            except Exception:
+                pass
         try:
             cursor.execute("ALTER TABLE tasks ADD COLUMN input_type VARCHAR(20) DEFAULT 'keyword';")
         except Exception:
@@ -236,7 +287,6 @@ async def main():
         if Task:
             Task.update(task_id, status="失败", msg=ali1688_error)
         return
-
     # --- 2. 1688 深度验证 ---
     processed_rank = checkpoint.get("processed_rank", 0)
     for i, item in enumerate(hot_items, start=1):
@@ -265,8 +315,24 @@ async def main():
         except Exception:
             source_limit = 10
 
-        ali1688_state_file = get_active_ali1688_state_file()
-        cmd_1688 = f"export PYTHONPATH=$PYTHONPATH:{BASE_DIR}/src && {python_path} scripts/run_ali1688_slow_flow.py --image-url '{item.get('image_url')}' --output-dir '{item_dir}' --state-file '{ali1688_state_file}' --detail-top-n {source_limit} --target-keyword '{keyword}' --log-file '{log_file_path}'"
+        runtime_context = get_effective_ali1688_runtime_context(rotation_index=i - 1)
+        ali1688_state_file = runtime_context.get("state_file") or ""
+        filter_snapshot_file = item_dir / "_channel_filter_snapshot.json"
+        filter_snapshot_file.write_text(
+            json.dumps(runtime_context.get("source_filter_snapshot") or {}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        cmd_1688 = (
+            f"export PYTHONPATH=$PYTHONPATH:{BASE_DIR}/src && "
+            f"{shlex.quote(python_path)} scripts/run_ali1688_slow_flow.py "
+            f"--image-url {shlex.quote(str(item.get('image_url') or ''))} "
+            f"--output-dir {shlex.quote(str(item_dir))} "
+            f"--state-file {shlex.quote(str(ali1688_state_file))} "
+            f"--channel-filter-snapshot-file {shlex.quote(str(filter_snapshot_file))} "
+            f"--detail-top-n {int(source_limit)} "
+            f"--target-keyword {shlex.quote(str(keyword))} "
+            f"--log-file {shlex.quote(str(log_file_path))}"
+        )
         await run_command(cmd_1688, logger)
         
         # --- 资产入库 (全方位日志埋点版) ---
@@ -333,9 +399,46 @@ async def main():
                         # 执行插入
                         logger.info(f"[Sync-DB] Inserting source: {res['title'][:20]} (Price: {min_price})")
                         _cursor.execute("""
-                            INSERT INTO ali1688_sources (item_id, task_id, title, offer_id, min_price, sku_count, source_url, images, drop_reason, html_path)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                        """, (item_db_id, task_id, res['title'], offer_id, min_price, sku_count, res['item_url'], img_json, final_drop_reason, html_rel_path))
+                            INSERT INTO ali1688_sources (
+                                item_id, task_id, title, offer_id, min_price, sku_count, source_url, images,
+                                drop_reason, html_path, source_channel_id, source_channel_type, source_channel_label, source_account_id, source_account_label,
+                                pickup_48h_text, pickup_24h_text, month_dispatch_text, seven_day_dispatch_text,
+                                listing_count_text, distributor_count_text, waybill_support_text, settled_years_text, company_name,
+                                source_filter_snapshot_json,
+                                month_dispatch_count, seven_day_dispatch_count, listing_count, distributor_count
+                            )
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        """, (
+                            item_db_id,
+                            task_id,
+                            res['title'],
+                            offer_id,
+                            min_price,
+                            sku_count,
+                            res['item_url'],
+                            img_json,
+                            final_drop_reason,
+                            html_rel_path,
+                            runtime_context["source_channel_id"],
+                            runtime_context["source_channel_type"],
+                            runtime_context["source_channel_label"],
+                            runtime_context["source_account_id"],
+                            runtime_context["source_account_label"],
+                            res.get("pickup_48h_text", ""),
+                            res.get("pickup_24h_text", ""),
+                            res.get("month_dispatch_text", ""),
+                            res.get("seven_day_dispatch_text", ""),
+                            res.get("listing_count_text", ""),
+                            res.get("distributor_count_text", ""),
+                            res.get("waybill_support_text", ""),
+                            res.get("settled_years_text", ""),
+                            res.get("company_name", ""),
+                            json.dumps(res.get("source_filter_snapshot") or {}, ensure_ascii=False),
+                            int(res.get("month_dispatch_count") or 0),
+                            int(res.get("seven_day_dispatch_count") or 0),
+                            int(res.get("listing_count") or 0),
+                            int(res.get("distributor_count") or 0),
+                        ))
                         source_id = _cursor.lastrowid
 
                         # 2. 写入 SKU 到数据库 (ali1688_skus 表)

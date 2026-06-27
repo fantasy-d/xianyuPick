@@ -28,6 +28,14 @@ class NoCacheStaticFiles(StaticFiles):
         return response
 
 from xianyu_tools.config import settings
+from xianyu_tools.source_channel_config import (
+    build_source_channel_account_runtime,
+    get_source_channel,
+    get_source_channel_account,
+    normalize_active_source_account_ids,
+    normalize_source_channels_config,
+    strip_source_channel_runtime_fields,
+)
 
 # --- 常量 ---
 BASE_DIR = Path(__file__).resolve().parents[2]
@@ -80,6 +88,47 @@ def init_db_schema():
             cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN html_path VARCHAR(1024) DEFAULT '';")
         except Exception:
             pass  # 如果列已经存在则会报错，直接忽略即可
+        # 3.1 自愈添加货源渠道元数据，便于决策资产库按渠道展示
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN source_channel_id VARCHAR(100) DEFAULT 'ali1688';")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN source_channel_type VARCHAR(100) DEFAULT 'ali1688';")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN source_channel_label VARCHAR(255) DEFAULT '1688 货源渠道';")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN source_account_id VARCHAR(100) DEFAULT '';")
+        except Exception:
+            pass
+        try:
+            cursor.execute("ALTER TABLE ali1688_sources ADD COLUMN source_account_label VARCHAR(255) DEFAULT '';")
+        except Exception:
+            pass
+        for column_name, ddl in (
+            ("pickup_48h_text", "ALTER TABLE ali1688_sources ADD COLUMN pickup_48h_text VARCHAR(64) DEFAULT '';"),
+            ("pickup_24h_text", "ALTER TABLE ali1688_sources ADD COLUMN pickup_24h_text VARCHAR(64) DEFAULT '';"),
+            ("month_dispatch_text", "ALTER TABLE ali1688_sources ADD COLUMN month_dispatch_text VARCHAR(64) DEFAULT '';"),
+            ("seven_day_dispatch_text", "ALTER TABLE ali1688_sources ADD COLUMN seven_day_dispatch_text VARCHAR(64) DEFAULT '';"),
+            ("listing_count_text", "ALTER TABLE ali1688_sources ADD COLUMN listing_count_text VARCHAR(64) DEFAULT '';"),
+            ("distributor_count_text", "ALTER TABLE ali1688_sources ADD COLUMN distributor_count_text VARCHAR(64) DEFAULT '';"),
+            ("waybill_support_text", "ALTER TABLE ali1688_sources ADD COLUMN waybill_support_text VARCHAR(64) DEFAULT '';"),
+            ("settled_years_text", "ALTER TABLE ali1688_sources ADD COLUMN settled_years_text VARCHAR(64) DEFAULT '';"),
+            ("company_name", "ALTER TABLE ali1688_sources ADD COLUMN company_name VARCHAR(255) DEFAULT '';"),
+            ("source_filter_snapshot_json", "ALTER TABLE ali1688_sources ADD COLUMN source_filter_snapshot_json TEXT DEFAULT NULL;"),
+            ("month_dispatch_count", "ALTER TABLE ali1688_sources ADD COLUMN month_dispatch_count INT DEFAULT 0;"),
+            ("seven_day_dispatch_count", "ALTER TABLE ali1688_sources ADD COLUMN seven_day_dispatch_count INT DEFAULT 0;"),
+            ("listing_count", "ALTER TABLE ali1688_sources ADD COLUMN listing_count INT DEFAULT 0;"),
+            ("distributor_count", "ALTER TABLE ali1688_sources ADD COLUMN distributor_count INT DEFAULT 0;"),
+        ):
+            try:
+                cursor.execute(ddl)
+            except Exception:
+                pass
             
         # 4. 自愈修改 publish_status 的 ENUM 增加 'depublished' 和 'deleted' 值以支持下架/删除状态记录
         try:
@@ -125,6 +174,9 @@ def init_db_schema():
                 openapi_data = settings.get("openapi")
                 if openapi_data:
                     cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s)", ("openapi", json.dumps(openapi_data)))
+                crawl_data = settings.get("crawl")
+                if crawl_data:
+                    cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s)", ("crawl", json.dumps(crawl_data)))
                 source_channels_data = settings.get("source_channels")
                 if source_channels_data:
                     cursor.execute("INSERT INTO system_configs (cfg_key, cfg_value) VALUES (%s, %s)", ("source_channels", json.dumps(source_channels_data)))
@@ -175,23 +227,6 @@ DEFAULT_OPENAPI_ACCOUNT = {
     },
 }
 
-DEFAULT_SOURCE_CHANNEL_ACCOUNT = {
-    "account_id": "ali1688-account-1",
-    "label": "1688 账号 1",
-    "enabled": True,
-    "notes": "",
-}
-
-DEFAULT_SOURCE_CHANNEL = {
-    "channel_id": "ali1688",
-    "channel_type": "ali1688",
-    "label": "1688 货源渠道",
-    "enabled": True,
-    "active_account_ids": ["ali1688-account-1"],
-    "active_account_id": "ali1688-account-1",
-    "accounts": [DEFAULT_SOURCE_CHANNEL_ACCOUNT],
-}
-
 def normalize_openapi_multi_account(raw_cfg: dict | None) -> dict:
     raw_cfg = dict(raw_cfg or {})
     accounts = raw_cfg.get("accounts")
@@ -233,151 +268,6 @@ def get_request_openapi_account_id(payload: dict | None = None) -> str | None:
         return None
     account_id = payload.get("account_id")
     return str(account_id).strip() if account_id else None
-
-
-def build_source_channel_account_runtime(channel_type: str | None, channel_id: str | None, account_id: str | None) -> dict:
-    return settings.build_source_channel_account_runtime(channel_type, channel_id, account_id)
-
-
-def normalize_active_source_account_ids(accounts: list[dict] | None, raw_ids, fallback_id: str | None = None) -> list[str]:
-    account_ids = [item.get("account_id") for item in (accounts or []) if item.get("account_id")]
-    requested_ids = raw_ids if isinstance(raw_ids, list) else [raw_ids] if raw_ids else []
-    normalized_ids: list[str] = []
-    for account_id in requested_ids:
-        if account_id in account_ids and account_id not in normalized_ids:
-            normalized_ids.append(account_id)
-
-    if not normalized_ids and fallback_id in account_ids:
-        normalized_ids.append(fallback_id)
-    if not normalized_ids and account_ids:
-        normalized_ids.append(account_ids[0])
-    return normalized_ids
-
-
-def normalize_source_channels_config(raw_cfg: dict | None) -> dict:
-    raw_cfg = dict(raw_cfg or {})
-    channels = raw_cfg.get("channels")
-    normalized_channels = []
-
-    if isinstance(channels, list) and channels:
-        for c_index, channel in enumerate(channels, start=1):
-            merged_channel = json.loads(json.dumps(DEFAULT_SOURCE_CHANNEL, ensure_ascii=False))
-            incoming_channel = dict(channel or {})
-            merged_channel.update({k: v for k, v in incoming_channel.items() if k != "accounts"})
-            merged_channel["channel_id"] = merged_channel.get("channel_id") or f"channel-{c_index}"
-            merged_channel["channel_type"] = merged_channel.get("channel_type") or "custom"
-            merged_channel["label"] = merged_channel.get("label") or f"货源渠道 {c_index}"
-
-            incoming_accounts = incoming_channel.get("accounts")
-            normalized_accounts = []
-            if isinstance(incoming_accounts, list) and incoming_accounts:
-                for a_index, account in enumerate(incoming_accounts, start=1):
-                    merged_account = json.loads(json.dumps(DEFAULT_SOURCE_CHANNEL_ACCOUNT, ensure_ascii=False))
-                    incoming_account = dict(account or {})
-                    merged_account.update(incoming_account)
-                    merged_account["account_id"] = merged_account.get("account_id") or f"{merged_channel['channel_id']}-account-{a_index}"
-                    merged_account["label"] = merged_account.get("label") or f"{merged_channel['label']} 账号 {a_index}"
-                    merged_account["notes"] = merged_account.get("notes") or ""
-                    runtime_cfg = build_source_channel_account_runtime(
-                        merged_channel.get("channel_type"),
-                        merged_channel.get("channel_id"),
-                        merged_account.get("account_id"),
-                    )
-                    merged_account.update(runtime_cfg)
-                    normalized_accounts.append(merged_account)
-            else:
-                fallback_account = json.loads(json.dumps(DEFAULT_SOURCE_CHANNEL_ACCOUNT, ensure_ascii=False))
-                fallback_account["account_id"] = f"{merged_channel['channel_id']}-account-1"
-                fallback_account["label"] = f"{merged_channel['label']} 账号 1"
-                fallback_account.update(
-                    build_source_channel_account_runtime(
-                        merged_channel.get("channel_type"),
-                        merged_channel.get("channel_id"),
-                        fallback_account.get("account_id"),
-                    )
-                )
-                normalized_accounts.append(fallback_account)
-
-            merged_channel["accounts"] = normalized_accounts
-            active_account_ids = normalize_active_source_account_ids(
-                normalized_accounts,
-                merged_channel.get("active_account_ids"),
-                fallback_id=merged_channel.get("active_account_id"),
-            )
-            active_account_id = active_account_ids[0] if active_account_ids else normalized_accounts[0]["account_id"]
-            merged_channel["active_account_ids"] = active_account_ids
-            merged_channel["active_account_id"] = active_account_id
-            normalized_channels.append(merged_channel)
-    else:
-        fallback_channel = json.loads(json.dumps(DEFAULT_SOURCE_CHANNEL, ensure_ascii=False))
-        fallback_account = fallback_channel["accounts"][0]
-        fallback_account.update(
-            build_source_channel_account_runtime(
-                fallback_channel.get("channel_type"),
-                fallback_channel.get("channel_id"),
-                fallback_account.get("account_id"),
-            )
-        )
-        normalized_channels = [fallback_channel]
-
-    active_channel_id = raw_cfg.get("active_channel_id") or normalized_channels[0]["channel_id"]
-    if not any(item["channel_id"] == active_channel_id for item in normalized_channels):
-        active_channel_id = normalized_channels[0]["channel_id"]
-    return {"active_channel_id": active_channel_id, "channels": normalized_channels}
-
-
-def strip_source_channel_runtime_fields(raw_cfg: dict | None) -> dict:
-    normalized = normalize_source_channels_config(raw_cfg)
-    cleaned_channels = []
-    for channel in normalized.get("channels", []):
-        active_account_ids = normalize_active_source_account_ids(
-            channel.get("accounts") or [],
-            channel.get("active_account_ids"),
-            fallback_id=channel.get("active_account_id"),
-        )
-        cleaned_channel = {
-            "channel_id": channel.get("channel_id"),
-            "channel_type": channel.get("channel_type"),
-            "label": channel.get("label"),
-            "enabled": bool(channel.get("enabled", True)),
-            "active_account_ids": active_account_ids,
-            "active_account_id": active_account_ids[0] if active_account_ids else "",
-            "accounts": [],
-        }
-        for account in channel.get("accounts", []):
-            cleaned_channel["accounts"].append(
-                {
-                    "account_id": account.get("account_id"),
-                    "label": account.get("label"),
-                    "enabled": bool(account.get("enabled", True)),
-                    "notes": account.get("notes") or "",
-                }
-            )
-        cleaned_channels.append(cleaned_channel)
-    return {
-        "active_channel_id": normalized.get("active_channel_id"),
-        "channels": cleaned_channels,
-    }
-
-
-def get_source_channel(raw_cfg: dict | None, channel_id: str | None = None) -> dict:
-    normalized = normalize_source_channels_config(raw_cfg)
-    target_id = channel_id or normalized.get("active_channel_id")
-    selected = next((item for item in normalized["channels"] if item["channel_id"] == target_id), None)
-    return selected or normalized["channels"][0]
-
-
-def get_source_channel_account(raw_cfg: dict | None, channel_id: str | None = None, account_id: str | None = None) -> dict:
-    channel = get_source_channel(raw_cfg, channel_id)
-    accounts = channel.get("accounts") or []
-    active_account_ids = normalize_active_source_account_ids(
-        accounts,
-        channel.get("active_account_ids"),
-        fallback_id=channel.get("active_account_id"),
-    )
-    target_id = account_id or (active_account_ids[0] if active_account_ids else None) or channel.get("active_account_id")
-    selected = next((item for item in accounts if item["account_id"] == target_id), None)
-    return selected or (accounts[0] if accounts else {})
 
 
 def hydrate_source_channel_account(channel_cfg: dict | None, account_cfg: dict | None) -> tuple[dict, dict]:
@@ -424,6 +314,8 @@ def build_source_channel_unavailable_report(
     status_text = status_text or "未配置可用账号"
     return {
         "is_usable": False,
+        "is_logged_in": False,
+        "requires_verification": False,
         "account_name": "",
         "status_text": status_text,
         "last_checked_at": datetime.now().isoformat(),
@@ -435,11 +327,81 @@ def build_source_channel_unavailable_report(
     }
 
 
+def resolve_runtime_path(raw_path: str | None) -> Path | None:
+    if not raw_path:
+        return None
+    path = Path(str(raw_path).strip()).expanduser()
+    if not path.is_absolute():
+        path = (BASE_DIR / path).resolve()
+    return path
+
+
+def build_ali1688_session_report_path(state_file: str | None) -> Path | None:
+    state_path = resolve_runtime_path(state_file)
+    if not state_path:
+        return None
+    return state_path.with_name("session_report.json")
+
+
+def load_ali1688_session_report_cache(state_file: str | None) -> dict:
+    report_path = build_ali1688_session_report_path(state_file)
+    if not report_path or not report_path.exists():
+        return {}
+
+    try:
+        from xianyu_tools.ali1688_session import looks_like_real_account_name, normalize_account_name
+
+        payload = json.loads(report_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            return {}
+        cached_name = normalize_account_name(payload.get("account_name"))
+        if cached_name and not looks_like_real_account_name(cached_name):
+            return {}
+        payload["account_name"] = cached_name
+        payload.setdefault("meta", {})
+        payload["meta"]["cache_file"] = str(report_path)
+        return payload
+    except Exception as exc:
+        return {
+            "account_name": "",
+            "error_message": str(exc),
+            "meta": {"cache_file": str(report_path)},
+        }
+
+
+def save_ali1688_session_report_cache(state_file: str | None, report: dict | None) -> None:
+    report_path = build_ali1688_session_report_path(state_file)
+    if not report_path or not isinstance(report, dict):
+        return
+
+    account_name = str(report.get("account_name") or "").strip()
+    if not account_name:
+        return
+
+    payload = {
+        "account_name": account_name,
+        "captured_at": report.get("last_checked_at") or datetime.now().isoformat(),
+        "source": report.get("account_name_source") or report.get("source") or "realtime",
+        "confidence": report.get("account_name_confidence") or report.get("confidence") or 0.0,
+        "status_text": report.get("status_text") or "",
+        "is_usable": bool(report.get("is_usable")),
+        "is_logged_in": bool(report.get("is_logged_in") or report.get("is_usable")),
+        "requires_verification": bool(report.get("requires_verification")),
+        "state_file": str(resolve_runtime_path(state_file) or ""),
+        "url": ((report.get("meta") or {}).get("url") or ""),
+        "title": ((report.get("meta") or {}).get("title") or ""),
+    }
+    report_path.parent.mkdir(parents=True, exist_ok=True)
+    report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
 def inspect_ali1688_state_file_quick(state_file: str | None, fallback_account_name: str | None = None) -> dict:
     fallback_account_name = str(fallback_account_name or "").strip()
     if not state_file:
         return {
             "is_usable": False,
+            "is_logged_in": False,
+            "requires_verification": False,
             "account_name": fallback_account_name,
             "status_text": "未配置状态文件",
             "last_checked_at": datetime.now().isoformat(),
@@ -454,6 +416,8 @@ def inspect_ali1688_state_file_quick(state_file: str | None, fallback_account_na
     if not state_path.exists():
         return {
             "is_usable": False,
+            "is_logged_in": False,
+            "requires_verification": False,
             "account_name": fallback_account_name,
             "status_text": "未配置状态文件" if not state_file else "状态文件不存在",
             "last_checked_at": datetime.now().isoformat(),
@@ -485,6 +449,8 @@ def inspect_ali1688_state_file_quick(state_file: str | None, fallback_account_na
         is_usable = bool(cookies) and has_useful_cookie
         return {
             "is_usable": is_usable,
+            "is_logged_in": is_usable,
+            "requires_verification": False,
             "account_name": account_name,
             "status_text": "登录正常" if is_usable else "未检测到有效登录",
             "last_checked_at": datetime.now().isoformat(),
@@ -497,12 +463,104 @@ def inspect_ali1688_state_file_quick(state_file: str | None, fallback_account_na
     except Exception as exc:
         return {
             "is_usable": False,
+            "is_logged_in": False,
+            "requires_verification": False,
             "account_name": fallback_account_name,
             "status_text": "检测失败",
             "last_checked_at": datetime.now().isoformat(),
             "error_message": str(exc),
             "meta": {"state_file": str(state_path)},
         }
+
+
+def merge_ali1688_session_report(
+    state_file: str | None,
+    fallback_account_name: str | None = None,
+    realtime_report: dict | None = None,
+) -> dict:
+    fallback_account_name = str(fallback_account_name or "").strip()
+    state_report = inspect_ali1688_state_file_quick(state_file, fallback_account_name)
+    cached_report = load_ali1688_session_report_cache(state_file)
+    realtime_report = dict(realtime_report or {})
+
+    merged = dict(realtime_report or state_report)
+    merged.setdefault("is_usable", bool(state_report.get("is_usable")))
+    merged.setdefault("status_text", realtime_report.get("status_text") or state_report.get("status_text") or "未检测")
+    merged.setdefault("last_checked_at", realtime_report.get("last_checked_at") or state_report.get("last_checked_at") or datetime.now().isoformat())
+    merged.setdefault("error_message", realtime_report.get("error_message") or state_report.get("error_message") or "")
+
+    realtime_logged_in = bool(realtime_report.get("is_logged_in")) if "is_logged_in" in realtime_report else None
+    cached_logged_in = bool(cached_report.get("is_logged_in")) if "is_logged_in" in cached_report else None
+    state_logged_in = bool(state_report.get("is_logged_in")) if "is_logged_in" in state_report else None
+
+    if realtime_logged_in is not None:
+        is_logged_in = realtime_logged_in
+    else:
+        is_logged_in = any(
+            value is True for value in (state_logged_in, cached_logged_in, bool(merged.get("is_usable")))
+        )
+
+    realtime_requires_verification = (
+        bool(realtime_report.get("requires_verification"))
+        if "requires_verification" in realtime_report
+        else None
+    )
+    cached_requires_verification = (
+        bool(cached_report.get("requires_verification"))
+        if "requires_verification" in cached_report
+        else None
+    )
+    state_requires_verification = (
+        bool(state_report.get("requires_verification"))
+        if "requires_verification" in state_report
+        else None
+    )
+
+    if realtime_requires_verification is not None:
+        requires_verification = realtime_requires_verification
+    else:
+        requires_verification = any(
+            value is True for value in (state_requires_verification, cached_requires_verification)
+        )
+
+    merged["is_logged_in"] = is_logged_in
+    merged["requires_verification"] = requires_verification
+
+    realtime_name = str(realtime_report.get("account_name") or "").strip()
+    cached_name = str(cached_report.get("account_name") or "").strip()
+    state_name = str(state_report.get("account_name") or "").strip()
+    final_name = realtime_name or cached_name or state_name or fallback_account_name
+
+    if realtime_name:
+        name_source = str(realtime_report.get("account_name_source") or realtime_report.get("source") or "realtime")
+        name_confidence = realtime_report.get("account_name_confidence") or realtime_report.get("confidence") or 0.0
+    elif cached_name:
+        name_source = str(cached_report.get("source") or "cache")
+        name_confidence = cached_report.get("confidence") or 0.75
+    elif state_name and state_name != fallback_account_name:
+        name_source = "state_file_cookie"
+        name_confidence = 0.6
+    elif final_name:
+        name_source = "label_fallback"
+        name_confidence = 0.2
+    else:
+        name_source = ""
+        name_confidence = 0.0
+
+    merged["account_name"] = final_name
+    merged["account_name_source"] = name_source
+    merged["account_name_confidence"] = name_confidence
+    merged["meta"] = {
+        **dict(state_report.get("meta") or {}),
+        **dict(cached_report.get("meta") or {}),
+        **dict(merged.get("meta") or {}),
+        "state_file": str(resolve_runtime_path(state_file) or ""),
+        "cache_file": str(build_ali1688_session_report_path(state_file) or ""),
+    }
+    if cached_report.get("captured_at"):
+        merged["meta"]["cached_account_name_at"] = cached_report.get("captured_at")
+
+    return merged
 
 
 async def inspect_source_channel_account(channel_type: str, account_cfg: dict) -> dict:
@@ -514,37 +572,61 @@ async def inspect_source_channel_account(channel_type: str, account_cfg: dict) -
                 from xianyu_tools.ali1688_session import Ali1688SessionConfig, inspect_ali1688_session
 
                 session_result = await inspect_ali1688_session(
-                    Ali1688SessionConfig(user_data_dir=user_data_dir)
+                    Ali1688SessionConfig(
+                        user_data_dir=user_data_dir,
+                        profile_directory=account_cfg.get("profile_directory") or "Default",
+                        headless=True,
+                    )
                 )
                 state = session_result.get("state") or "unknown"
-                is_usable = state == "search"
+                is_logged_in = state in {"search", "member", "slider"}
+                requires_verification = state == "slider"
+                is_usable = state in {"search", "member"}
                 return {
                     "is_usable": is_usable,
-                    "account_name": account_cfg.get("label") or "",
+                    "is_logged_in": is_logged_in,
+                    "requires_verification": requires_verification,
+                    "account_name": session_result.get("account_name") or "",
+                    "account_name_source": session_result.get("account_name_source") or "",
+                    "account_name_confidence": session_result.get("account_name_confidence") or 0.0,
                     "status_text": "登录正常" if is_usable else {
                         "profile_locked": "浏览器配置被占用",
                         "login": "跳转到了登录页",
-                        "slider": "遇到滑块或风控",
+                        "slider": "已登录，需完成滑块或风控验证",
+                        "timeout": "1688 页面访问超时",
                         "unknown": "未检测到可用搜索态",
                     }.get(state, "会话不可用"),
                     "last_checked_at": datetime.now().isoformat(),
-                    "error_message": session_result.get("error") or "",
+                    "error_message": (
+                        "当前已有 1688 登录浏览器正在使用该账号环境，请关闭现有登录窗口后再重试。"
+                        if state == "profile_locked"
+                        else (
+                            session_result.get("error")
+                            or (
+                                "1688 页面访问超时，系统已尝试自动回退检测，请稍后重试。"
+                                if state == "timeout"
+                                else ""
+                            )
+                        )
+                    ),
                     "meta": session_result,
                 }
             except Exception as exc:
-                fallback = inspect_ali1688_state_file_quick(
+                fallback = merge_ali1688_session_report(
                     account_cfg.get("state_file"),
                     account_cfg.get("label") or account_cfg.get("account_id") or "",
                 )
                 fallback["error_message"] = fallback.get("error_message") or str(exc)
                 return fallback
-        return inspect_ali1688_state_file_quick(
+        return merge_ali1688_session_report(
             account_cfg.get("state_file"),
             account_cfg.get("label") or account_cfg.get("account_id") or "",
         )
 
     return {
         "is_usable": False,
+        "is_logged_in": False,
+        "requires_verification": False,
         "account_name": "",
         "status_text": "暂不支持该渠道检测",
         "last_checked_at": datetime.now().isoformat(),
@@ -641,15 +723,78 @@ running_processes = {}
 async def startup():
     asyncio.create_task(pipeline_worker())
 
+
+def _channel_filter_snapshot_has_signal(snapshot: dict | None) -> bool:
+    if not isinstance(snapshot, dict):
+        return False
+    if snapshot.get("mapping_stage") and snapshot.get("mapping_stage") != "snapshot_only":
+        return True
+    for key in (
+        "configured_filter_keys",
+        "configured_enabled_filter_keys",
+        "enabled_filter_keys",
+        "applied_filter_keys",
+        "query_injected_filter_keys",
+        "unapplied_filter_keys",
+    ):
+        if isinstance(snapshot.get(key), list) and snapshot.get(key):
+            return True
+    filters = snapshot.get("configured_filters")
+    if not isinstance(filters, dict):
+        filters = snapshot.get("filters")
+    if isinstance(filters, dict) and any(bool(value) for value in filters.values()):
+        return True
+    return False
+
 # --- 路由 ---
 @app.get("/api/tasks")
 def list_tasks():
     try:
         conn = get_db_conn(); cursor = conn.cursor()
         cursor.execute("SELECT id, keyword, status, progress, msg, created_at, version, input_type, total_tokens FROM tasks WHERE is_deleted = 0 ORDER BY created_at DESC")
-        rows = cursor.fetchall(); conn.close()
+        rows = cursor.fetchall()
+        task_ids = [row["id"] for row in rows if row.get("id")]
+        task_channel_map = {}
+        if task_ids:
+            placeholders = ",".join(["%s"] * len(task_ids))
+            cursor.execute(
+                f"""
+                SELECT
+                    xi.task_id AS task_id,
+                    COALESCE(NULLIF(src.source_channel_id, ''), 'ali1688') AS channel_id,
+                    COALESCE(NULLIF(src.source_channel_type, ''), 'ali1688') AS channel_type,
+                    COALESCE(NULLIF(src.source_channel_label, ''), '1688 货源渠道') AS channel_label,
+                    COUNT(*) AS source_count
+                FROM ali1688_sources src
+                INNER JOIN xianyu_items xi ON src.item_id = xi.id
+                WHERE xi.task_id IN ({placeholders})
+                GROUP BY
+                    xi.task_id,
+                    COALESCE(NULLIF(src.source_channel_id, ''), 'ali1688'),
+                    COALESCE(NULLIF(src.source_channel_type, ''), 'ali1688'),
+                    COALESCE(NULLIF(src.source_channel_label, ''), '1688 货源渠道')
+                ORDER BY
+                    xi.task_id ASC,
+                    COALESCE(NULLIF(src.source_channel_label, ''), '1688 货源渠道') ASC
+                """,
+                tuple(task_ids),
+            )
+            for channel_row in cursor.fetchall():
+                task_id = channel_row.get("task_id")
+                if task_id not in task_channel_map:
+                    task_channel_map[task_id] = []
+                task_channel_map[task_id].append(
+                    {
+                        "channel_id": channel_row.get("channel_id") or "ali1688",
+                        "channel_type": channel_row.get("channel_type") or "ali1688",
+                        "channel_label": channel_row.get("channel_label") or "1688 货源渠道",
+                        "source_count": int(channel_row.get("source_count") or 0),
+                    }
+                )
+        conn.close()
         for r in rows:
             if isinstance(r['created_at'], datetime): r['created_at'] = r['created_at'].strftime("%Y-%m-%d %H:%M")
+            r["used_channels"] = task_channel_map.get(r["id"], [])
         return rows
     except Exception as e:
         logger.error(f"Failed to list tasks: {e}")
@@ -772,7 +917,13 @@ def get_task_details(task_id: str):
         for item in db_items:
             item_db_id = item['id'] # 闲鱼商品的唯一主键
             # 2. 根据该主键去 1688 货源表里捞数据
-            cursor.execute("SELECT * FROM ali1688_sources WHERE item_id = %s ORDER BY min_price ASC", (item_db_id,))
+            cursor.execute("""
+                SELECT * FROM ali1688_sources
+                WHERE item_id = %s
+                ORDER BY
+                    COALESCE(NULLIF(source_channel_label, ''), '1688 货源渠道') ASC,
+                    min_price ASC
+            """, (item_db_id,))
             sources_rows = cursor.fetchall()
             source_ids = [s['id'] for s in sources_rows]
             latest_status_map = {}
@@ -803,13 +954,36 @@ def get_task_details(task_id: str):
                 }
             
             sources_data = []
+            channel_groups_map = {}
+            used_channels_map = {}
             for s in sources_rows:
                 # 安全解析图片 JSON
                 try: imgs = json.loads(s['images']) if s['images'] else []
                 except: imgs = []
+                try:
+                    filter_snapshot = json.loads(s.get('source_filter_snapshot_json') or "{}")
+                    if not isinstance(filter_snapshot, dict):
+                        filter_snapshot = {}
+                except Exception:
+                    filter_snapshot = {}
+                filter_snapshot = settings.normalize_channel_search_filter_snapshot(
+                    filter_snapshot,
+                    channel_id=s.get('source_channel_id') or 'ali1688',
+                    channel_type='ali1688',
+                )
                 latest_status = latest_status_map.get(s['id'], {})
+                channel_id = s.get('source_channel_id') or 'ali1688'
+                channel_type = s.get('source_channel_type') or 'ali1688'
+                channel_label = s.get('source_channel_label') or '1688 货源渠道'
+                account_id = s.get('source_account_id') or ''
+                account_label = s.get('source_account_label') or ''
+                filter_snapshot = settings.normalize_channel_search_filter_snapshot(
+                    filter_snapshot,
+                    channel_id=channel_id,
+                    channel_type=channel_type,
+                )
                 
-                sources_data.append({
+                source_row = {
                     "db_id": s['id'],
                     "title": s['title'],
                     "min_price": float(s['min_price']) if s['min_price'] else 0,
@@ -817,9 +991,64 @@ def get_task_details(task_id: str):
                     "url": s['source_url'],
                     "images": imgs,
                     "drop_reason": s['drop_reason'],
+                    "source_channel_id": channel_id,
+                    "source_channel_type": channel_type,
+                    "source_channel_label": channel_label,
+                    "source_account_id": account_id,
+                    "source_account_label": account_label,
+                    "pickup_48h_text": s.get('pickup_48h_text') or '',
+                    "pickup_24h_text": s.get('pickup_24h_text') or '',
+                    "month_dispatch_text": s.get('month_dispatch_text') or '',
+                    "seven_day_dispatch_text": s.get('seven_day_dispatch_text') or '',
+                    "listing_count_text": s.get('listing_count_text') or '',
+                    "distributor_count_text": s.get('distributor_count_text') or '',
+                    "waybill_support_text": s.get('waybill_support_text') or '',
+                    "settled_years_text": s.get('settled_years_text') or '',
+                    "company_name": s.get('company_name') or '',
+                    "month_dispatch_count": int(s.get('month_dispatch_count') or 0),
+                    "seven_day_dispatch_count": int(s.get('seven_day_dispatch_count') or 0),
+                    "listing_count": int(s.get('listing_count') or 0),
+                    "distributor_count": int(s.get('distributor_count') or 0),
+                    "source_filter_snapshot": filter_snapshot,
                     "publish_status": latest_status.get("publish_status", "none"),
                     "published_url": latest_status.get("published_url", "")
-                })
+                }
+                sources_data.append(source_row)
+
+                if channel_id not in channel_groups_map:
+                    channel_groups_map[channel_id] = {
+                        "channel_id": channel_id,
+                        "channel_type": channel_type,
+                        "channel_label": channel_label,
+                        "source_count": 0,
+                        "account_ids": [],
+                        "account_labels": [],
+                        "source_filter_snapshot": settings.normalize_channel_search_filter_snapshot(
+                            {},
+                            channel_id=channel_id,
+                            channel_type=channel_type,
+                        ),
+                        "sources": [],
+                    }
+                group = channel_groups_map[channel_id]
+                group["sources"].append(source_row)
+                group["source_count"] += 1
+                if (
+                    _channel_filter_snapshot_has_signal(filter_snapshot)
+                    and not _channel_filter_snapshot_has_signal(group.get("source_filter_snapshot"))
+                ):
+                    group["source_filter_snapshot"] = filter_snapshot
+                if account_id and account_id not in group["account_ids"]:
+                    group["account_ids"].append(account_id)
+                if account_label and account_label not in group["account_labels"]:
+                    group["account_labels"].append(account_label)
+
+                if channel_id not in used_channels_map:
+                    used_channels_map[channel_id] = {
+                        "channel_id": channel_id,
+                        "channel_type": channel_type,
+                        "channel_label": channel_label,
+                    }
             
             details.append({
                 "rank": item['rank_index'],
@@ -831,7 +1060,9 @@ def get_task_details(task_id: str):
                     "want_count": item['want_count'],
                     "item_url": item['item_url']
                 },
-                "sources": sources_data
+                "sources": sources_data,
+                "used_channels": list(used_channels_map.values()),
+                "channel_groups": list(channel_groups_map.values()),
             })
             
         conn.close()
@@ -1645,7 +1876,7 @@ def get_system_configs():
         for channel in source_channels_cfg["channels"]:
             for account in channel.get("accounts", []):
                 if channel.get("channel_type") == "ali1688":
-                    account["session_report"] = inspect_ali1688_state_file_quick(
+                    account["session_report"] = merge_ali1688_session_report(
                         account.get("state_file"),
                         account.get("label") or account.get("account_id") or "",
                     )
@@ -1678,12 +1909,67 @@ async def update_system_configs(payload: dict):
         from xianyu_tools.config import settings
         from xianyu_tools.xianyu_adapter.state_inspector import inspect_state_file
         import json
+
+        def summarize_crawl_selection_adjustments(raw_crawl: dict, normalized_crawl: dict) -> str:
+            raw_mode = raw_crawl.get("source_channel_selection_mode") if isinstance(raw_crawl, dict) else None
+            normalized_mode = normalized_crawl.get("source_channel_selection_mode") if isinstance(normalized_crawl, dict) else None
+            raw_entries = raw_crawl.get("enabled_source_channels") if isinstance(raw_crawl, dict) else []
+            normalized_entries = normalized_crawl.get("enabled_source_channels") if isinstance(normalized_crawl, dict) else []
+            raw_entries = raw_entries if isinstance(raw_entries, list) else []
+            normalized_entries = normalized_entries if isinstance(normalized_entries, list) else []
+
+            raw_map = {}
+            for item in raw_entries:
+                if not isinstance(item, dict):
+                    continue
+                channel_id = (item.get("channel_id") or "").strip()
+                if not channel_id:
+                    continue
+                account_ids = item.get("account_ids") if isinstance(item.get("account_ids"), list) else []
+                raw_map[channel_id] = {
+                    "enabled": item.get("enabled") is not False,
+                    "account_ids": [str(account_id).strip() for account_id in account_ids if str(account_id).strip()],
+                }
+
+            normalized_map = {}
+            for item in normalized_entries:
+                if not isinstance(item, dict):
+                    continue
+                channel_id = (item.get("channel_id") or "").strip()
+                if not channel_id:
+                    continue
+                account_ids = item.get("account_ids") if isinstance(item.get("account_ids"), list) else []
+                normalized_map[channel_id] = {
+                    "enabled": item.get("enabled") is not False,
+                    "account_ids": [str(account_id).strip() for account_id in account_ids if str(account_id).strip()],
+                }
+
+            removed_channels = sorted(channel_id for channel_id in raw_map.keys() if channel_id not in normalized_map)
+            removed_accounts = []
+            for channel_id, raw_item in raw_map.items():
+                raw_accounts = raw_item.get("account_ids") or []
+                normalized_accounts = set((normalized_map.get(channel_id) or {}).get("account_ids") or [])
+                diff_accounts = [account_id for account_id in raw_accounts if account_id not in normalized_accounts]
+                if diff_accounts:
+                    removed_accounts.append(f"{channel_id}: {', '.join(diff_accounts)}")
+
+            if raw_mode == "custom_selected" and normalized_mode == "custom_selected" and (removed_channels or removed_accounts):
+                summary_parts = []
+                if removed_channels:
+                    summary_parts.append(f"无效渠道已自动移除：{'、'.join(removed_channels)}")
+                if removed_accounts:
+                    summary_parts.append(f"不可用账号已自动收敛：{'；'.join(removed_accounts)}")
+                return "；".join(summary_parts)
+
+            return ""
         
         llm_cfg = payload.get("llm", [])
         openapi_cfg = normalize_openapi_multi_account(payload.get("openapi", {}))
-        crawl_cfg = payload.get("crawl", {})
+        raw_crawl_cfg = payload.get("crawl", {}) if isinstance(payload.get("crawl", {}), dict) else {}
+        crawl_cfg = raw_crawl_cfg
         source_channels_cfg = normalize_source_channels_config(payload.get("source_channels", {}))
         source_channels_storage_cfg = strip_source_channel_runtime_fields(source_channels_cfg)
+        crawl_cfg = settings.normalize_crawl_config(crawl_cfg, source_channels_cfg=source_channels_cfg)
         
         logger.info(
             "[OpenAPI Save] active_account_id=%s accounts=%s",
@@ -1724,6 +2010,7 @@ async def update_system_configs(payload: dict):
                     valid_models.append(m)
         filtered_models = [m for m in models_subset if m in valid_models]
         crawl_cfg["source_filter_models"] = filtered_models
+        crawl_cfg = settings.normalize_crawl_config(crawl_cfg, source_channels_cfg=source_channels_cfg)
 
         for channel in source_channels_storage_cfg["channels"]:
             for account in channel.get("accounts", []):
@@ -1778,8 +2065,13 @@ async def update_system_configs(payload: dict):
         # 3. 清理 settings 的数据库缓存，并重新触发 load()
         settings._db_cache.clear()
         settings.load()
-        
-        return {"status": "success", "msg": "配置已保存并同步成功"}
+
+        adjustment_summary = summarize_crawl_selection_adjustments(raw_crawl_cfg, crawl_cfg)
+        success_msg = "配置已保存并同步成功"
+        if adjustment_summary:
+            success_msg = f"{success_msg}。{adjustment_summary}"
+
+        return {"status": "success", "msg": success_msg}
     except Exception as e:
         logger.error(f"Failed to save system configs API: {e}")
         return {"status": "failed", "msg": f"保存配置发生异常: {str(e)}"}
@@ -1788,6 +2080,7 @@ async def update_system_configs(payload: dict):
 @app.post("/api/system/source_channel_status/check")
 async def check_source_channel_status(payload: dict = None):
     try:
+        sync_source_channel_login_state()
         payload = payload or {}
         incoming_channel = payload.get("channel")
         incoming_account = payload.get("account")
@@ -1832,7 +2125,32 @@ async def check_source_channel_status(payload: dict = None):
                 },
             }
         channel, account = hydrate_source_channel_account(channel, account)
-        report = await inspect_source_channel_account(channel.get("channel_type"), account)
+        is_currently_logging_in = (
+            source_channel_login_process is not None
+            and source_channel_logging_in_channel_id == (channel.get("channel_id") or "")
+            and source_channel_logging_in_account_id == (account.get("account_id") or "")
+        )
+        if is_currently_logging_in:
+            return {
+                "status": "failed",
+                "msg": "当前账号正在进行 1688 登录，请先完成或关闭登录窗口后再检测状态",
+                "data": {
+                    "channel_id": channel.get("channel_id"),
+                    "account_id": account.get("account_id"),
+                    "report": merge_ali1688_session_report(
+                        account.get("state_file"),
+                        account.get("label") or account.get("account_id") or "",
+                    ),
+                },
+            }
+        realtime_report = await inspect_source_channel_account(channel.get("channel_type"), account)
+        report = merge_ali1688_session_report(
+            account.get("state_file"),
+            account.get("label") or account.get("account_id") or "",
+            realtime_report=realtime_report,
+        )
+        if (realtime_report.get("meta") or {}).get("state") != "profile_locked":
+            save_ali1688_session_report_cache(account.get("state_file"), report)
         return {
             "status": "success",
             "data": {
@@ -1851,7 +2169,7 @@ def get_active_source_channel_runtime():
     try:
         runtime_cfg = settings.get_active_ali1688_runtime_config()
         if runtime_cfg.get("account_id"):
-            report = inspect_ali1688_state_file_quick(
+            report = merge_ali1688_session_report(
                 runtime_cfg.get("state_file"),
                 runtime_cfg.get("label") or runtime_cfg.get("account_id") or "",
             )
@@ -1911,7 +2229,7 @@ def get_source_channel_login_status(channel_id: str = None, account_id: str = No
                 }
             }
         channel, account = hydrate_source_channel_account(channel, account)
-        report = inspect_ali1688_state_file_quick(
+        report = merge_ali1688_session_report(
             account.get("state_file"),
             account.get("label") or account.get("account_id") or "",
         )
@@ -1921,6 +2239,11 @@ def get_source_channel_login_status(channel_id: str = None, account_id: str = No
             and source_channel_logging_in_channel_id == (channel.get("channel_id") or "")
             and source_channel_logging_in_account_id == (account.get("account_id") or "")
         )
+        if is_currently_logging_in:
+            report = {
+                **report,
+                "error_message": "",
+            }
 
         return {
             "status": "success",
@@ -1929,7 +2252,10 @@ def get_source_channel_login_status(channel_id: str = None, account_id: str = No
                 "account_id": account.get("account_id"),
                 "report": report,
                 "is_logging_in": is_currently_logging_in,
+                "login_started_at": source_channel_login_started_at,
                 "err_msg": source_channel_login_err_msg,
+                "login_result": source_channel_login_result,
+                "login_result_finished_at": source_channel_login_result_finished_at,
             }
         }
     except Exception as e:
@@ -1941,6 +2267,7 @@ def get_source_channel_login_status(channel_id: str = None, account_id: str = No
 async def trigger_source_channel_login(payload: dict = None):
     global source_channel_login_process, source_channel_logging_in_channel_id, source_channel_logging_in_account_id
     global source_channel_login_err_msg, source_channel_login_log_path
+    global source_channel_login_result, source_channel_login_result_finished_at, source_channel_login_started_at
 
     sync_source_channel_login_state()
     if source_channel_login_process is not None:
@@ -1951,18 +2278,35 @@ async def trigger_source_channel_login(payload: dict = None):
         incoming_channel = payload.get("channel")
         incoming_account = payload.get("account")
 
-        if isinstance(incoming_channel, dict) and isinstance(incoming_account, dict):
+        raw_cfg = settings.get_source_channels_raw_config()
+        normalized = normalize_source_channels_config(raw_cfg)
+
+        requested_channel_id = (
+            payload.get("channel_id")
+            or (incoming_channel.get("channel_id") if isinstance(incoming_channel, dict) else None)
+        )
+        requested_account_id = (
+            payload.get("account_id")
+            or (incoming_account.get("account_id") if isinstance(incoming_account, dict) else None)
+        )
+
+        channel = get_source_channel(normalized, requested_channel_id)
+        account = get_source_channel_account(normalized, channel.get("channel_id"), requested_account_id)
+
+        if isinstance(incoming_channel, dict):
             channel = {
-                "channel_id": incoming_channel.get("channel_id") or "ali1688",
-                "channel_type": incoming_channel.get("channel_type") or "ali1688",
-                "label": incoming_channel.get("label") or "货源渠道",
+                **channel,
+                "channel_id": channel.get("channel_id") or incoming_channel.get("channel_id") or "ali1688",
+                "channel_type": channel.get("channel_type") or incoming_channel.get("channel_type") or "ali1688",
+                "label": channel.get("label") or incoming_channel.get("label") or "货源渠道",
             }
-            account = dict(incoming_account)
-        else:
-            raw_cfg = settings.get_source_channels_raw_config()
-            normalized = normalize_source_channels_config(raw_cfg)
-            channel = get_source_channel(normalized, payload.get("channel_id"))
-            account = get_source_channel_account(normalized, channel.get("channel_id"), payload.get("account_id"))
+        if isinstance(incoming_account, dict):
+            account = {
+                **account,
+                "account_id": account.get("account_id") or incoming_account.get("account_id"),
+                "label": account.get("label") or incoming_account.get("label"),
+                "notes": incoming_account.get("notes", account.get("notes") or ""),
+            }
         account_error = get_source_channel_account_error(channel, account)
         if account_error:
             return {"status": "failed", "msg": account_error}
@@ -1974,7 +2318,6 @@ async def trigger_source_channel_login(payload: dict = None):
         state_file = account.get("state_file") or "state/source_channels/ali1688/ali1688-account-1/storage_state.json"
         user_data_dir = account.get("user_data_dir") or ""
         profile_directory = account.get("profile_directory") or ""
-
         log_dir = BASE_DIR / "tmp" / "source-channel-login-logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         safe_account_id = re.sub(r"[^a-zA-Z0-9_-]", "_", str(account.get("account_id") or "ali1688-account"))
@@ -1982,6 +2325,7 @@ async def trigger_source_channel_login(payload: dict = None):
 
         cmd = [
             sys.executable,
+            "-u",
             str((BASE_DIR / "scripts" / "refresh_1688_state.py").resolve()),
             "--state-file",
             state_file,
@@ -1996,7 +2340,7 @@ async def trigger_source_channel_login(payload: dict = None):
         source_channel_login_process = subprocess.Popen(
             cmd,
             cwd=str(BASE_DIR),
-            env={**os.environ, "PYTHONPATH": str(BASE_DIR / "src")},
+            env={**os.environ, "PYTHONPATH": str(BASE_DIR / "src"), "PYTHONUNBUFFERED": "1"},
             stdout=log_fd,
             stderr=subprocess.STDOUT,
         )
@@ -2004,10 +2348,13 @@ async def trigger_source_channel_login(payload: dict = None):
         source_channel_logging_in_channel_id = channel.get("channel_id") or ""
         source_channel_logging_in_account_id = account.get("account_id") or ""
         source_channel_login_err_msg = ""
+        source_channel_login_result = ""
+        source_channel_login_result_finished_at = ""
+        source_channel_login_started_at = datetime.now().isoformat()
 
         return {
             "status": "success",
-            "msg": "已启动 1688 登录浏览器，请在弹出窗口中完成扫码登录",
+            "msg": "已启动 1688 登录页，请在弹出窗口中完成扫码登录。登录成功后系统会自动进行渠道预热并短暂跳转页面，请勿立即关闭浏览器。",
         }
     except Exception as e:
         logger.error(f"Failed to trigger source channel login: {e}")
@@ -2015,6 +2362,9 @@ async def trigger_source_channel_login(payload: dict = None):
         source_channel_logging_in_channel_id = ""
         source_channel_logging_in_account_id = ""
         source_channel_login_err_msg = str(e)
+        source_channel_login_result = "failed"
+        source_channel_login_result_finished_at = datetime.now().isoformat()
+        source_channel_login_started_at = ""
         return {"status": "failed", "msg": str(e)}
 
 @app.get("/api/system/regions")
@@ -2213,11 +2563,15 @@ source_channel_logging_in_channel_id = ""
 source_channel_logging_in_account_id = ""
 source_channel_login_err_msg = ""
 source_channel_login_log_path = ""
+source_channel_login_result = ""
+source_channel_login_result_finished_at = ""
+source_channel_login_started_at = ""
 
 
 def sync_source_channel_login_state():
     global source_channel_login_process, source_channel_logging_in_channel_id, source_channel_logging_in_account_id
     global source_channel_login_err_msg, source_channel_login_log_path
+    global source_channel_login_result, source_channel_login_result_finished_at, source_channel_login_started_at
 
     if source_channel_login_process is None:
         return
@@ -2230,17 +2584,34 @@ def sync_source_channel_login_state():
         try:
             log_text = Path(source_channel_login_log_path).read_text(encoding="utf-8", errors="ignore").strip()
             if log_text:
-                source_channel_login_err_msg = "\n".join(log_text.splitlines()[-10:])
+                if "浏览器已关闭，登录流程已取消" in log_text or "浏览器已关闭，操作取消" in log_text:
+                    source_channel_login_err_msg = "你已关闭 1688 登录浏览器，本次登录已取消。"
+                    source_channel_login_result = "cancelled"
+                elif "ERR_TUNNEL_CONNECTION_FAILED" in log_text:
+                    source_channel_login_err_msg = "1688 登录页打开失败，当前浏览器网络代理环境不可用，请稍后重试。"
+                    source_channel_login_result = "failed"
+                elif "无法打开 1688 登录页" in log_text:
+                    source_channel_login_err_msg = "\n".join(log_text.splitlines()[-3:])
+                    source_channel_login_result = "failed"
+                else:
+                    source_channel_login_err_msg = "\n".join(log_text.splitlines()[-10:])
+                    source_channel_login_result = "failed"
             else:
                 source_channel_login_err_msg = f"1688 登录进程异常退出，退出码：{return_code}"
+                source_channel_login_result = "failed"
         except Exception:
             source_channel_login_err_msg = f"1688 登录进程异常退出，退出码：{return_code}"
+            source_channel_login_result = "failed"
     elif return_code == 0:
         source_channel_login_err_msg = ""
+        source_channel_login_result = "success"
+
+    source_channel_login_result_finished_at = datetime.now().isoformat()
 
     source_channel_login_process = None
     source_channel_logging_in_channel_id = ""
     source_channel_logging_in_account_id = ""
+    source_channel_login_started_at = ""
 
 async def run_xianyu_login_capture(account_id: str | None = None):
     global is_logging_in, logging_in_account_id, login_err_msg

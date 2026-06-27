@@ -2017,6 +2017,22 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     };
 
     const getSourceChannelCapabilities = (channelType) => SOURCE_CHANNEL_TYPE_META[channelType] || SOURCE_CHANNEL_TYPE_META.custom;
+    const CHANNEL_SEARCH_FILTER_META = {
+        ali1688: [
+            { key: 'rapid_invoice', label: '极速开票', group: '服务能力' },
+            { key: 'selected_distributors', label: '分销严选', group: '分销能力' },
+            { key: 'single_piece_drop_shipping', label: '一件代发', group: '分销能力' },
+            { key: 'seven_day_return', label: '7天无理由', group: '售后保障' },
+            { key: 'single_piece_free_shipping', label: '1件代发包邮', group: '分销能力' },
+            { key: 'free_shipping', label: '包邮', group: '服务能力' },
+            { key: 'freight_insurance_return', label: '退货包运费', group: '售后保障' },
+            { key: 'real_factory_verified', label: '真实工厂认证', group: '资质认证' },
+            { key: 'strength_verified', label: '实力认证', group: '资质认证' },
+            { key: 'official_logistics', label: '官方物流', group: '服务能力' },
+            { key: 'encrypted_waybill', label: '密文面单', group: '服务能力' }
+        ]
+    };
+    const getSupportedChannelSearchFilters = (channelType) => CHANNEL_SEARCH_FILTER_META[channelType] || [];
 
     const createOpenapiAccount = (index = 1) => ({
         id: `account-${Date.now()}-${index}`,
@@ -2046,6 +2062,8 @@ const SystemSettingsView = ({ hideHeader = false }) => {
         notes: '',
         session_report: {
             is_usable: false,
+            is_logged_in: false,
+            requires_verification: false,
             account_name: '',
             status_text: '未检测',
             last_checked_at: '',
@@ -2091,8 +2109,13 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     const [crawlCollapsed, setCrawlCollapsed] = useState(true);
     const [crawlConfig, setCrawlConfig] = useState({
         source_limit_1688: 10,
-        source_filter_models: []
+        source_filter_models: [],
+        source_channel_selection_mode: 'active_pool',
+        enabled_source_channels: [],
+        channel_search_filters: []
     });
+    const [selectedCrawlChannelId, setSelectedCrawlChannelId] = useState('');
+    const [crawlSelectionAdjustmentNotice, setCrawlSelectionAdjustmentNotice] = useState('');
 
     // 从 llmList 中聚合出所有保存的模型名称
     const availableModels = useMemo(() => {
@@ -2136,35 +2159,258 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     const [xianyuLoginSuccessMessage, setXianyuLoginSuccessMessage] = useState(null);
     const [isCheckingSourceChannelStatus, setIsCheckingSourceChannelStatus] = useState(false);
     const [isSourceChannelLoggingIn, setIsSourceChannelLoggingIn] = useState(false);
+    const [sourceChannelLoginResult, setSourceChannelLoginResult] = useState('');
+    const [sourceChannelLoginResultFinishedAt, setSourceChannelLoginResultFinishedAt] = useState('');
+    const [sourceChannelLoginErrorMessage, setSourceChannelLoginErrorMessage] = useState('');
     const [persistedOpenapiAccountIds, setPersistedOpenapiAccountIds] = useState([]);
     const xianyuLoginFlowRef = useRef(false);
     const prevXianyuLoggingInRef = useRef(false);
     const sourceChannelLoginFlowRef = useRef(false);
     const prevSourceChannelLoggingInRef = useRef(false);
+    const sourceChannelLoginStartedAtRef = useRef('');
+    const sourceChannelLoginHandledAtRef = useRef('');
     const noticeTimerRef = useRef(null);
     const xianyuLoginSuccessTimerRef = useRef(null);
+    const lastCrawlSelectionAdjustmentRef = useRef('');
     const currentOpenapiAccounts = configs.openapi?.accounts || [];
     const activeOpenapiAccountId = configs.openapi?.active_account_id || currentOpenapiAccounts[0]?.id || '';
     const currentOpenapiAccount = currentOpenapiAccounts.find(item => item.id === activeOpenapiAccountId) || currentOpenapiAccounts[0] || createOpenapiAccount(1);
     const currentSourceChannels = configs.source_channels?.channels || [];
+    const normalizeLocalCrawlConfig = (rawCrawlCfg, channels) => {
+        const safeCfg = rawCrawlCfg && typeof rawCrawlCfg === 'object' ? rawCrawlCfg : {};
+        const safeChannels = Array.isArray(channels) ? channels : [];
+        const selectionMode = safeCfg.source_channel_selection_mode === 'custom_selected' ? 'custom_selected' : 'active_pool';
+        const availableChannelMap = {};
+        const availableChannelTypeMap = {};
+        const orderedChannelIds = [];
+        safeChannels
+            .filter(channel => channel?.enabled !== false && channel?.channel_id)
+            .forEach(channel => {
+                orderedChannelIds.push(channel.channel_id);
+                const rawActiveIds = Array.isArray(channel?.active_account_ids)
+                    ? channel.active_account_ids
+                    : (channel?.active_account_id ? [channel.active_account_id] : []);
+                const usableAccountIds = (channel?.accounts || [])
+                    .filter(account => rawActiveIds.includes(account.account_id) && isSourceAccountLoginReady(account))
+                    .map(account => account.account_id);
+                availableChannelMap[channel.channel_id] = Array.from(new Set(usableAccountIds));
+                availableChannelTypeMap[channel.channel_id] = channel.channel_type || 'custom';
+            });
+
+        const rawEntries = Array.isArray(safeCfg.enabled_source_channels) ? safeCfg.enabled_source_channels : [];
+        const normalizedEntries = [];
+        const removedChannels = [];
+        const removedAccounts = [];
+
+        rawEntries.forEach(item => {
+            if (!item || !item.channel_id) return;
+            const channelId = item.channel_id;
+            const availableAccountIds = availableChannelMap[channelId];
+            if (!availableAccountIds) {
+                removedChannels.push(channelId);
+                return;
+            }
+            const requestedAccountIds = Array.isArray(item.account_ids) ? item.account_ids.filter(Boolean) : [];
+            const nextAccountIds = requestedAccountIds.filter(accountId => availableAccountIds.includes(accountId));
+            const droppedAccountIds = requestedAccountIds.filter(accountId => !nextAccountIds.includes(accountId));
+            if (droppedAccountIds.length > 0) {
+                removedAccounts.push(`${channelId}: ${droppedAccountIds.join(', ')}`);
+            }
+            if (nextAccountIds.length > 0) {
+                normalizedEntries.push({
+                    channel_id: channelId,
+                    enabled: item.enabled !== false,
+                    account_ids: Array.from(new Set(nextAccountIds)),
+                });
+            }
+        });
+
+        const noticeParts = [];
+        if (removedChannels.length > 0) {
+            noticeParts.push(`已自动移除失效渠道：${removedChannels.join('、')}`);
+        }
+        if (removedAccounts.length > 0) {
+            noticeParts.push(`已自动移除不可用账号：${removedAccounts.join('；')}`);
+        }
+
+        const rawFilterEntries = Array.isArray(safeCfg.channel_search_filters) ? safeCfg.channel_search_filters : [];
+        const rawFilterMap = {};
+        rawFilterEntries.forEach(item => {
+            if (!item || !item.channel_id || !availableChannelTypeMap[item.channel_id]) return;
+            rawFilterMap[item.channel_id] = item.filters && typeof item.filters === 'object' ? item.filters : {};
+        });
+        const normalizedFilterEntries = orderedChannelIds.map(channelId => {
+            const supportedFilters = getSupportedChannelSearchFilters(availableChannelTypeMap[channelId]);
+            const rawFilters = rawFilterMap[channelId] || {};
+            return {
+                channel_id: channelId,
+                filters: supportedFilters.reduce((acc, filter) => {
+                    acc[filter.key] = !!rawFilters[filter.key];
+                    return acc;
+                }, {})
+            };
+        });
+
+        return {
+            normalized: {
+                ...safeCfg,
+                source_channel_selection_mode: selectionMode,
+                enabled_source_channels: normalizedEntries,
+                channel_search_filters: normalizedFilterEntries,
+            },
+            adjustmentNotice: noticeParts.join('；'),
+        };
+    };
     const activeSourceChannelId = configs.source_channels?.active_channel_id || currentSourceChannels[0]?.channel_id || 'ali1688';
     const currentSourceChannel = currentSourceChannels.find(item => item.channel_id === activeSourceChannelId) || currentSourceChannels[0] || createSourceChannel(1);
     const currentSourceChannelCapabilities = getSourceChannelCapabilities(currentSourceChannel?.channel_type);
     const currentSourceAccounts = currentSourceChannel?.accounts || [];
+    const isSourceAccountLoginReady = (account) => {
+        const report = account?.session_report || {};
+        if (report?.is_logged_in || report?.is_usable) {
+            return true;
+        }
+        const statusText = report?.status_text || '';
+        const runtimeState = report?.meta?.state || '';
+        const hasKnownIdentity = !!(report?.account_name || report?.last_checked_at || report?.meta?.cached_account_name_at);
+        return hasKnownIdentity && (
+            runtimeState === 'profile_locked'
+            || statusText.includes('浏览器配置被占用')
+        );
+    };
+    const loginReadySourceAccounts = currentSourceAccounts.filter(isSourceAccountLoginReady);
     const activeSourceAccountIds = (() => {
         const availableIds = currentSourceAccounts.map(item => item.account_id);
         const rawIds = Array.isArray(currentSourceChannel?.active_account_ids)
             ? currentSourceChannel.active_account_ids
             : (currentSourceChannel?.active_account_id ? [currentSourceChannel.active_account_id] : []);
-        const normalizedIds = rawIds.filter(id => availableIds.includes(id));
-        if (normalizedIds.length > 0) return normalizedIds;
-        return currentSourceAccounts[0]?.account_id ? [currentSourceAccounts[0].account_id] : [];
+        return rawIds.filter(id => availableIds.includes(id));
     })();
     const [selectedSourceAccountId, setSelectedSourceAccountId] = useState('');
     const currentSourceAccountId = selectedSourceAccountId && currentSourceAccounts.some(item => item.account_id === selectedSourceAccountId)
         ? selectedSourceAccountId
         : activeSourceAccountIds[0] || currentSourceAccounts[0]?.account_id || '';
     const currentSourceAccount = currentSourceAccounts.find(item => item.account_id === currentSourceAccountId) || currentSourceAccounts[0] || createSourceChannelAccount(currentSourceChannel?.channel_id || 'ali1688', 1);
+    const currentSourceRealtimeName = currentSourceAccount?.session_report?.account_name || '';
+    const currentSourceLabel = currentSourceAccount?.label || '';
+    const currentSourceDisplayName = currentSourceRealtimeName || currentSourceLabel || '';
+    const currentSourceNameSource = currentSourceAccount?.session_report?.account_name_source || currentSourceAccount?.session_report?.source || '';
+    const isSourceNameFallback = !currentSourceRealtimeName && !!currentSourceLabel;
+    const visibleActiveSourceAccountIds = activeSourceAccountIds.filter(id => loginReadySourceAccounts.some(account => account.account_id === id));
+    const normalizedCrawlChannelSelections = Array.isArray(crawlConfig.enabled_source_channels)
+        ? crawlConfig.enabled_source_channels.filter(item => item && item.channel_id)
+        : [];
+    const crawlChannelSelectionMap = normalizedCrawlChannelSelections.reduce((acc, item) => {
+        acc[item.channel_id] = {
+            channel_id: item.channel_id,
+            enabled: item.enabled !== false,
+            account_ids: Array.isArray(item.account_ids) ? item.account_ids : [],
+        };
+        return acc;
+    }, {});
+    const crawlAvailableChannels = currentSourceChannels
+        .filter(channel => channel?.enabled !== false)
+        .map(channel => {
+            const rawActiveIds = Array.isArray(channel?.active_account_ids)
+                ? channel.active_account_ids
+                : (channel?.active_account_id ? [channel.active_account_id] : []);
+            const loginReadyActiveAccounts = (channel?.accounts || []).filter(account => (
+                rawActiveIds.includes(account.account_id) && isSourceAccountLoginReady(account)
+            ));
+            return {
+                ...channel,
+                crawl_accounts: loginReadyActiveAccounts,
+            };
+        });
+    const effectiveSelectedCrawlChannelId = (
+        selectedCrawlChannelId && crawlAvailableChannels.some(item => item.channel_id === selectedCrawlChannelId)
+            ? selectedCrawlChannelId
+            : crawlAvailableChannels.some(item => item.channel_id === activeSourceChannelId)
+                ? activeSourceChannelId
+                : normalizedCrawlChannelSelections.find(item => crawlAvailableChannels.some(channel => channel.channel_id === item.channel_id))?.channel_id
+                || crawlAvailableChannels[0]?.channel_id
+                || ''
+    );
+    const currentCrawlChannel = crawlAvailableChannels.find(item => item.channel_id === effectiveSelectedCrawlChannelId) || crawlAvailableChannels[0] || null;
+    const activeSourceChannelInCrawlPool = crawlAvailableChannels.find(item => item.channel_id === activeSourceChannelId) || null;
+    const isCrawlEditorFollowingActiveSourceChannel = !!(
+        currentCrawlChannel
+        && activeSourceChannelInCrawlPool
+        && currentCrawlChannel.channel_id === activeSourceChannelInCrawlPool.channel_id
+    );
+    const currentCrawlSelection = currentCrawlChannel ? (crawlChannelSelectionMap[currentCrawlChannel.channel_id] || null) : null;
+    const currentCrawlSelectedAccountIds = currentCrawlSelection?.enabled
+        ? (currentCrawlSelection.account_ids || [])
+        : [];
+    const crawlChannelSearchFilterMap = Array.isArray(crawlConfig.channel_search_filters)
+        ? crawlConfig.channel_search_filters.reduce((acc, item) => {
+            if (item?.channel_id) {
+                acc[item.channel_id] = item.filters && typeof item.filters === 'object' ? item.filters : {};
+            }
+            return acc;
+        }, {})
+        : {};
+    const currentCrawlFilterMeta = getSupportedChannelSearchFilters(currentCrawlChannel?.channel_type);
+    const currentCrawlFilterGroups = currentCrawlFilterMeta.reduce((acc, item) => {
+        const groupName = item.group || '其他';
+        if (!acc[groupName]) acc[groupName] = [];
+        acc[groupName].push(item);
+        return acc;
+    }, {});
+    const currentCrawlFilterValues = currentCrawlChannel
+        ? (crawlChannelSearchFilterMap[currentCrawlChannel.channel_id] || {})
+        : {};
+    const hasAnyCrawlAccountSelection = normalizedCrawlChannelSelections.some(item => (
+        item?.enabled !== false && Array.isArray(item.account_ids) && item.account_ids.length > 0
+    ));
+    const isCustomCrawlSelectionMode = crawlConfig.source_channel_selection_mode === 'custom_selected';
+    const isCrawlSelectionMissing = isCustomCrawlSelectionMode && crawlAvailableChannels.length > 0 && !hasAnyCrawlAccountSelection;
+    const getSourceSessionVisualState = (report) => {
+        const statusText = report?.status_text || '';
+        const isLoggedIn = !!(report?.is_logged_in || report?.is_usable);
+        const requiresVerification = !!report?.requires_verification
+            || statusText.includes('风控')
+            || statusText.includes('滑块')
+            || statusText.includes('验证');
+
+        if (requiresVerification) {
+            return {
+                dotClass: 'bg-warning',
+                textClass: 'text-warning',
+                title: statusText || '需完成验证'
+            };
+        }
+        if (isLoggedIn) {
+            return {
+                dotClass: 'bg-success',
+                textClass: 'text-success',
+                title: statusText || '登录正常'
+            };
+        }
+        if (report?.last_checked_at) {
+            return {
+                dotClass: 'bg-error',
+                textClass: 'text-error',
+                title: statusText || '登录异常'
+            };
+        }
+        return {
+            dotClass: 'bg-secondary/60',
+            textClass: 'text-secondary',
+            title: statusText || '未检测'
+        };
+    };
+    const currentSourceSessionState = getSourceSessionVisualState(currentSourceAccount?.session_report);
+    const currentSourceSessionLoggedIn = !!(currentSourceAccount?.session_report?.is_logged_in || currentSourceAccount?.session_report?.is_usable);
+    const currentSourceStatusTextForDisplay = isSourceChannelLoggingIn
+        ? '等待扫码登录'
+        : (currentSourceAccount?.session_report?.status_text || '未检测');
+    const currentSourceStatusDotClassForDisplay = isSourceChannelLoggingIn
+        ? 'bg-primary'
+        : currentSourceSessionState.dotClass;
+    const currentSourceStatusTextClassForDisplay = isSourceChannelLoggingIn
+        ? 'text-primary'
+        : currentSourceSessionState.textClass;
     const selectableChipClass = (isActive) => (
         `flex items-center gap-1 rounded-full border px-3 py-1.5 text-[11px] font-sans transition-all duration-200 ${
             isActive
@@ -2328,6 +2574,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                 active_channel_id: channelId
             }
         }));
+        setSelectedCrawlChannelId(channelId);
         setMessage(null);
         setError(null);
     };
@@ -2344,9 +2591,15 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                 }
             };
         });
+        setSelectedCrawlChannelId('');
     };
 
     const handleRemoveSourceChannel = (channelId) => {
+        const nextChannels = currentSourceChannels.filter(item => item.channel_id !== channelId);
+        const fallbackChannel = nextChannels[0]?.channel_id || '';
+        const nextActiveId = nextChannels.some(item => item.channel_id === activeSourceChannelId)
+            ? activeSourceChannelId
+            : fallbackChannel;
         setConfigs(prev => {
             const channels = (prev.source_channels?.channels || []).filter(item => item.channel_id !== channelId);
             const nextChannels = channels.length ? channels : [createSourceChannel(1)];
@@ -2361,36 +2614,34 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                 }
             };
         });
+        if (selectedCrawlChannelId === channelId) {
+            setSelectedCrawlChannelId(nextActiveId);
+        }
     };
 
     const handleAddSourceAccount = () => {
-        let nextCreatedAccountId = '';
+        const baseChannelId = currentSourceChannel?.channel_id || 'ali1688';
+        const nextIndex = (currentSourceAccounts || []).length + 1;
+        const nextAccount = createSourceChannelAccount(baseChannelId, nextIndex);
         setCurrentSourceChannel(prev => {
             const accounts = prev.accounts || [];
-            const nextAccount = createSourceChannelAccount(prev.channel_id, accounts.length + 1);
-            nextCreatedAccountId = nextAccount.account_id;
-            const nextActiveAccountIds = Array.isArray(prev.active_account_ids) ? [...prev.active_account_ids] : (prev.active_account_id ? [prev.active_account_id] : []);
-            if (!nextActiveAccountIds.includes(nextAccount.account_id)) {
-                nextActiveAccountIds.push(nextAccount.account_id);
-            }
             return {
                 ...prev,
-                active_account_ids: nextActiveAccountIds,
-                active_account_id: nextAccount.account_id,
                 accounts: [...accounts, nextAccount]
             };
         });
-        setSelectedSourceAccountId(nextCreatedAccountId);
+        setSelectedSourceAccountId(nextAccount.account_id);
     };
 
     const handleRemoveSourceAccount = (accountId) => {
         setCurrentSourceChannel(prev => {
             const accounts = (prev.accounts || []).filter(item => item.account_id !== accountId);
             const nextAccounts = accounts.length ? accounts : [createSourceChannelAccount(prev.channel_id, 1)];
+            const nextLoginReadyAccounts = nextAccounts.filter(isSourceAccountLoginReady);
             const nextActiveAccountIds = (Array.isArray(prev.active_account_ids) ? prev.active_account_ids : (prev.active_account_id ? [prev.active_account_id] : []))
-                .filter(id => id !== accountId && nextAccounts.some(item => item.account_id === id));
-            if (nextActiveAccountIds.length === 0 && nextAccounts[0]?.account_id) {
-                nextActiveAccountIds.push(nextAccounts[0].account_id);
+                .filter(id => id !== accountId && nextLoginReadyAccounts.some(item => item.account_id === id));
+            if (nextActiveAccountIds.length === 0 && nextLoginReadyAccounts[0]?.account_id) {
+                nextActiveAccountIds.push(nextLoginReadyAccounts[0].account_id);
             }
             return {
                 ...prev,
@@ -2409,8 +2660,12 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     const handleSourceActiveAccountToggle = (accountId, checked) => {
         setCurrentSourceChannel(prev => {
             const accounts = prev.accounts || [];
+            const loginReadyAccounts = accounts.filter(isSourceAccountLoginReady);
+            if (!loginReadyAccounts.some(account => account.account_id === accountId)) {
+                return prev;
+            }
             let nextActiveAccountIds = Array.isArray(prev.active_account_ids) ? [...prev.active_account_ids] : (prev.active_account_id ? [prev.active_account_id] : []);
-            nextActiveAccountIds = nextActiveAccountIds.filter(id => accounts.some(item => item.account_id === id));
+            nextActiveAccountIds = nextActiveAccountIds.filter(id => loginReadyAccounts.some(item => item.account_id === id));
             if (checked) {
                 if (!nextActiveAccountIds.includes(accountId)) {
                     nextActiveAccountIds.push(accountId);
@@ -2418,8 +2673,8 @@ const SystemSettingsView = ({ hideHeader = false }) => {
             } else {
                 nextActiveAccountIds = nextActiveAccountIds.filter(id => id !== accountId);
             }
-            if (nextActiveAccountIds.length === 0 && accounts[0]?.account_id) {
-                nextActiveAccountIds = [accounts[0].account_id];
+            if (nextActiveAccountIds.length === 0 && loginReadyAccounts[0]?.account_id) {
+                nextActiveAccountIds = [loginReadyAccounts[0].account_id];
             }
             return {
                 ...prev,
@@ -2429,9 +2684,105 @@ const SystemSettingsView = ({ hideHeader = false }) => {
         });
     };
 
+    const upsertCrawlChannelSelection = (channelId, nextAccountIds) => {
+        setCrawlConfig(prev => {
+            const cleanedAccountIds = Array.from(new Set((nextAccountIds || []).filter(Boolean)));
+            const currentEntries = Array.isArray(prev.enabled_source_channels) ? [...prev.enabled_source_channels] : [];
+            const nextEntries = currentEntries.filter(item => item?.channel_id !== channelId);
+            if (cleanedAccountIds.length > 0) {
+                nextEntries.push({
+                    channel_id: channelId,
+                    enabled: true,
+                    account_ids: cleanedAccountIds,
+                });
+            }
+            return {
+                ...prev,
+                source_channel_selection_mode: 'custom_selected',
+                enabled_source_channels: nextEntries,
+            };
+        });
+    };
+
+    const handleCrawlChannelSwitch = (channelId) => {
+        setSelectedCrawlChannelId(channelId);
+    };
+
+    const handleCrawlChannelUseActiveAccounts = (channelId) => {
+        const channel = crawlAvailableChannels.find(item => item.channel_id === channelId);
+        if (!channel) return;
+        const nextAccountIds = (channel.crawl_accounts || []).map(item => item.account_id);
+        setCrawlSelectionAdjustmentNotice('');
+        lastCrawlSelectionAdjustmentRef.current = '';
+        upsertCrawlChannelSelection(channelId, nextAccountIds);
+        setSelectedCrawlChannelId(channelId);
+    };
+
+    const handleCrawlAccountToggle = (channelId, accountId, checked) => {
+        const channel = crawlAvailableChannels.find(item => item.channel_id === channelId);
+        if (!channel) return;
+        const selectableIds = (channel.crawl_accounts || []).map(item => item.account_id);
+        if (!selectableIds.includes(accountId)) return;
+        const currentSelectedIds = (crawlChannelSelectionMap[channelId]?.account_ids || []).filter(id => selectableIds.includes(id));
+        let nextSelectedIds = [...currentSelectedIds];
+        if (checked) {
+            if (!nextSelectedIds.includes(accountId)) {
+                nextSelectedIds.push(accountId);
+            }
+        } else {
+            nextSelectedIds = nextSelectedIds.filter(id => id !== accountId);
+        }
+        setCrawlSelectionAdjustmentNotice('');
+        lastCrawlSelectionAdjustmentRef.current = '';
+        upsertCrawlChannelSelection(channelId, nextSelectedIds);
+        setSelectedCrawlChannelId(channelId);
+    };
+
+    const upsertCrawlChannelSearchFilters = (channelId, updater) => {
+        const channel = currentSourceChannels.find(item => item.channel_id === channelId);
+        if (!channel) return;
+        const supportedFilters = getSupportedChannelSearchFilters(channel.channel_type);
+        if (supportedFilters.length === 0) return;
+
+        setCrawlConfig(prev => {
+            const currentEntries = Array.isArray(prev.channel_search_filters) ? [...prev.channel_search_filters] : [];
+            const existing = currentEntries.find(item => item?.channel_id === channelId);
+            const baseFilters = supportedFilters.reduce((acc, filter) => {
+                acc[filter.key] = !!existing?.filters?.[filter.key];
+                return acc;
+            }, {});
+            const rawNextFilters = typeof updater === 'function' ? updater(baseFilters) : (updater || baseFilters);
+            const normalizedFilters = supportedFilters.reduce((acc, filter) => {
+                acc[filter.key] = !!rawNextFilters[filter.key];
+                return acc;
+            }, {});
+            const nextEntries = currentEntries.filter(item => item?.channel_id !== channelId);
+            nextEntries.push({
+                channel_id: channelId,
+                filters: normalizedFilters,
+            });
+            return {
+                ...prev,
+                channel_search_filters: nextEntries,
+            };
+        });
+    };
+
+    const handleCrawlSearchFilterToggle = (channelId, filterKey, checked) => {
+        upsertCrawlChannelSearchFilters(channelId, currentFilters => ({
+            ...currentFilters,
+            [filterKey]: checked,
+        }));
+        setSelectedCrawlChannelId(channelId);
+    };
+
     const handleCheckSourceChannelStatus = async () => {
         if (!currentSourceChannel?.channel_id || !currentSourceAccount?.account_id) {
             setError('当前渠道账号配置不完整，无法检测状态');
+            return;
+        }
+        if (isSourceChannelLoggingIn) {
+            setError('当前账号正在进行 1688 登录，请先完成或关闭登录窗口后再检测状态');
             return;
         }
         setIsCheckingSourceChannelStatus(true);
@@ -2481,10 +2832,16 @@ const SystemSettingsView = ({ hideHeader = false }) => {
         try {
             if (!currentSourceChannel?.channel_id || !currentSourceAccount?.account_id) {
                 setIsSourceChannelLoggingIn(false);
+                setSourceChannelLoginResult('');
+                setSourceChannelLoginResultFinishedAt('');
+                setSourceChannelLoginErrorMessage('');
                 return;
             }
             if (!currentSourceChannelCapabilities.supportsSessionState) {
                 setIsSourceChannelLoggingIn(false);
+                setSourceChannelLoginResult('');
+                setSourceChannelLoginResultFinishedAt('');
+                setSourceChannelLoginErrorMessage('');
                 return;
             }
             const url = `/api/system/source_channel_login_status?channel_id=${encodeURIComponent(currentSourceChannel.channel_id)}&account_id=${encodeURIComponent(currentSourceAccount.account_id)}`;
@@ -2500,9 +2857,9 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                     })
                 );
                 setIsSourceChannelLoggingIn(res.data.is_logging_in || false);
-                if (res.data.err_msg) {
-                    setError(res.data.err_msg);
-                }
+                setSourceChannelLoginResult(res.data.login_result || '');
+                setSourceChannelLoginResultFinishedAt(res.data.login_result_finished_at || '');
+                setSourceChannelLoginErrorMessage(res.data.err_msg || '');
             }
         } catch (err) {
             console.error("Failed to fetch source channel login status:", err);
@@ -2515,8 +2872,15 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                 setError('当前渠道账号配置不完整，无法执行登录');
                 return;
             }
+            setMessage(null);
+            setError(null);
             sourceChannelLoginFlowRef.current = true;
+            sourceChannelLoginStartedAtRef.current = new Date().toISOString();
+            sourceChannelLoginHandledAtRef.current = '';
             setIsSourceChannelLoggingIn(true);
+            setSourceChannelLoginResult('');
+            setSourceChannelLoginResultFinishedAt('');
+            setSourceChannelLoginErrorMessage('');
             const resp = await fetch('/api/system/source_channel_login_trigger', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -2544,13 +2908,19 @@ const SystemSettingsView = ({ hideHeader = false }) => {
             } else {
                 setError(res.msg || '启动渠道账号登录失败');
                 sourceChannelLoginFlowRef.current = false;
+                sourceChannelLoginStartedAtRef.current = '';
+                sourceChannelLoginHandledAtRef.current = '';
                 setIsSourceChannelLoggingIn(false);
+                setSourceChannelLoginResult('failed');
             }
         } catch (err) {
             console.error("Trigger source channel login failed:", err);
             setError('网络连接异常，启动渠道账号登录失败');
             sourceChannelLoginFlowRef.current = false;
+            sourceChannelLoginStartedAtRef.current = '';
+            sourceChannelLoginHandledAtRef.current = '';
             setIsSourceChannelLoggingIn(false);
+            setSourceChannelLoginResult('failed');
         }
     };
 
@@ -2801,6 +3171,8 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                         notes: account.notes || '',
                         session_report: account.session_report || {
                             is_usable: false,
+                            is_logged_in: false,
+                            requires_verification: false,
                             account_name: '',
                             status_text: '未检测',
                             last_checked_at: '',
@@ -2860,9 +3232,14 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                 if (data.crawl) {
                     setCrawlConfig({
                         source_limit_1688: parseInt(data.crawl.source_limit_1688) || 10,
-                        source_filter_models: data.crawl.source_filter_models || []
+                        source_filter_models: data.crawl.source_filter_models || [],
+                        source_channel_selection_mode: data.crawl.source_channel_selection_mode || 'active_pool',
+                        enabled_source_channels: Array.isArray(data.crawl.enabled_source_channels) ? data.crawl.enabled_source_channels : [],
+                        channel_search_filters: Array.isArray(data.crawl.channel_search_filters) ? data.crawl.channel_search_filters : []
                     });
                 }
+                setCrawlSelectionAdjustmentNotice('');
+                lastCrawlSelectionAdjustmentRef.current = '';
                 setError(null);
             } else {
                 setError(res.msg || '加载配置失败');
@@ -2881,8 +3258,45 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     }, []);
 
     useEffect(() => {
+        if (effectiveSelectedCrawlChannelId && effectiveSelectedCrawlChannelId !== selectedCrawlChannelId) {
+            setSelectedCrawlChannelId(effectiveSelectedCrawlChannelId);
+        }
+    }, [effectiveSelectedCrawlChannelId, selectedCrawlChannelId]);
+
+    useEffect(() => {
+        const { normalized, adjustmentNotice } = normalizeLocalCrawlConfig(crawlConfig, currentSourceChannels);
+        const currentSnapshot = JSON.stringify({
+            source_channel_selection_mode: crawlConfig.source_channel_selection_mode,
+            enabled_source_channels: crawlConfig.enabled_source_channels || [],
+            channel_search_filters: crawlConfig.channel_search_filters || [],
+        });
+        const normalizedSnapshot = JSON.stringify({
+            source_channel_selection_mode: normalized.source_channel_selection_mode,
+            enabled_source_channels: normalized.enabled_source_channels || [],
+            channel_search_filters: normalized.channel_search_filters || [],
+        });
+
+        if (currentSnapshot !== normalizedSnapshot) {
+            setCrawlConfig(prev => ({
+                ...prev,
+                source_channel_selection_mode: normalized.source_channel_selection_mode,
+                enabled_source_channels: normalized.enabled_source_channels,
+                channel_search_filters: normalized.channel_search_filters,
+            }));
+        }
+
+        if (adjustmentNotice && adjustmentNotice !== lastCrawlSelectionAdjustmentRef.current) {
+            setCrawlSelectionAdjustmentNotice(adjustmentNotice);
+            lastCrawlSelectionAdjustmentRef.current = adjustmentNotice;
+        } else if (!adjustmentNotice && lastCrawlSelectionAdjustmentRef.current) {
+            setCrawlSelectionAdjustmentNotice('');
+            lastCrawlSelectionAdjustmentRef.current = '';
+        }
+    }, [crawlConfig, currentSourceChannels]);
+
+    useEffect(() => {
         fetchXianyuLoginStatus();
-        const pollInterval = isXianyuLoggingIn ? 1000 : 3000;
+        const pollInterval = isXianyuLoggingIn ? 1000 : 300000;
         const timer = setInterval(() => {
             fetchXianyuLoginStatus();
         }, pollInterval);
@@ -2896,7 +3310,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
             return undefined;
         }
         fetchSourceChannelLoginStatus();
-        const pollInterval = isSourceChannelLoggingIn ? 1000 : 3000;
+        const pollInterval = isSourceChannelLoggingIn ? 1000 : 300000;
         const timer = setInterval(() => {
             fetchSourceChannelLoginStatus();
         }, pollInterval);
@@ -2959,18 +3373,37 @@ const SystemSettingsView = ({ hideHeader = false }) => {
 
     useEffect(() => {
         const wasLoggingIn = prevSourceChannelLoggingInRef.current;
-        const isNowUsable = !!currentSourceAccount?.session_report?.is_usable;
+        const isNowLoggedIn = !!(currentSourceAccount?.session_report?.is_logged_in || currentSourceAccount?.session_report?.is_usable);
+        const finishedAt = sourceChannelLoginResultFinishedAt || '';
+        const startedAt = sourceChannelLoginStartedAtRef.current || '';
+        const isFreshAttemptResult = !!finishedAt && (!startedAt || finishedAt >= startedAt);
+        const isUnhandledResult = finishedAt && sourceChannelLoginHandledAtRef.current !== finishedAt;
 
-        if (sourceChannelLoginFlowRef.current && wasLoggingIn && !isSourceChannelLoggingIn) {
-            if (isNowUsable) {
-                setMessage(`货源渠道账号登录成功，当前会话已同步${currentSourceAccount?.session_report?.account_name ? `：${currentSourceAccount.session_report.account_name}` : ''}`);
+        if (sourceChannelLoginFlowRef.current && wasLoggingIn && !isSourceChannelLoggingIn && isFreshAttemptResult && isUnhandledResult) {
+            if (sourceChannelLoginResult === 'success' && isNowLoggedIn) {
+                setMessage(`货源渠道账号登录成功，当前会话已同步${currentSourceDisplayName ? `：${currentSourceDisplayName}` : ''}`);
                 setError(null);
+            } else if (sourceChannelLoginResult === 'cancelled') {
+                setMessage('你已关闭 1688 登录浏览器，本次登录已取消');
+                setError(null);
+            } else if (sourceChannelLoginResult === 'failed') {
+                setMessage(null);
+                setError(sourceChannelLoginErrorMessage || '货源渠道账号登录未完成或已取消');
             }
+            sourceChannelLoginHandledAtRef.current = finishedAt;
             sourceChannelLoginFlowRef.current = false;
+            sourceChannelLoginStartedAtRef.current = '';
         }
 
         prevSourceChannelLoggingInRef.current = isSourceChannelLoggingIn;
-    }, [isSourceChannelLoggingIn, currentSourceAccount]);
+    }, [
+        isSourceChannelLoggingIn,
+        currentSourceAccount,
+        currentSourceDisplayName,
+        sourceChannelLoginResult,
+        sourceChannelLoginResultFinishedAt,
+        sourceChannelLoginErrorMessage
+    ]);
 
     useEffect(() => {
         if (!message && !error) return undefined;
@@ -3056,6 +3489,12 @@ const SystemSettingsView = ({ hideHeader = false }) => {
             return;
         }
 
+        if (isCrawlSelectionMissing) {
+            setError('当前已切换为“手动选择货源账号”，请至少为一个渠道勾选登录成功的激活账号后再保存。');
+            setSaving(false);
+            return;
+        }
+
         const payload = {
             llm: updatedLlm,
             openapi: configs.openapi,
@@ -3133,15 +3572,20 @@ const SystemSettingsView = ({ hideHeader = false }) => {
             panelClass: 'border border-error/20 bg-[radial-gradient(circle_at_top,_rgba(239,68,68,0.14),_transparent_62%),linear-gradient(135deg,#fff1f2,#ffffff_58%)]'
         }
         : message
-            ? {
-                title: '操作成功',
-                text: message,
-                icon: 'check_circle',
-                iconWrapClass: 'bg-success/12 text-success',
-                titleClass: 'text-slate-900',
-                textClass: 'text-slate-600',
-                panelClass: 'border border-success/20 bg-[radial-gradient(circle_at_top,_rgba(34,197,94,0.16),_transparent_62%),linear-gradient(135deg,#f0fdf4,#ffffff_58%)]'
-            }
+            ? (() => {
+                const isLoginLaunching = message.includes('已启动') && message.includes('登录');
+                return {
+                    title: isLoginLaunching ? '正在打开登录页' : '操作成功',
+                    text: message,
+                    icon: isLoginLaunching ? 'open_in_new' : 'check_circle',
+                    iconWrapClass: isLoginLaunching ? 'bg-primary/12 text-primary' : 'bg-success/12 text-success',
+                    titleClass: 'text-slate-900',
+                    textClass: 'text-slate-600',
+                    panelClass: isLoginLaunching
+                        ? 'border border-primary/20 bg-[radial-gradient(circle_at_top,_rgba(197,86,16,0.14),_transparent_62%),linear-gradient(135deg,#fff7ed,#ffffff_58%)]'
+                        : 'border border-success/20 bg-[radial-gradient(circle_at_top,_rgba(34,197,94,0.16),_transparent_62%),linear-gradient(135deg,#f0fdf4,#ffffff_58%)]'
+                };
+            })()
             : null;
 
     return (
@@ -3222,7 +3666,18 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                             </div>
                             {llmList.map((item, idx) => (
                                 <div key={idx} className="p-4 rounded-xl bg-surface-container-low border border-border-hairline relative group ambient-shadow hover:border-primary/40 transition-colors">
-                                    <div className={`flex items-center justify-between ${item.is_collapsed ? 'mb-0' : 'mb-3'}`}>
+                                    {llmList.length > 1 && (
+                                        <button
+                                            type="button"
+                                            onClick={() => handleRemoveLlm(idx)}
+                                            className="absolute top-3 right-3 inline-flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:text-error hover:bg-error/8 transition-colors cursor-pointer"
+                                            title="删除此接口"
+                                        >
+                                            <span className="material-symbols-outlined text-[16px]">delete</span>
+                                        </button>
+                                    )}
+
+                                    <div className={`flex items-center ${item.is_collapsed ? 'mb-0' : 'mb-3'}`}>
                                         <div className="font-sans text-xs font-bold text-primary flex items-center gap-1.5">
                                             <span className="w-1.5 h-1.5 rounded-full bg-primary"></span>
                                             <span>接口 #{idx + 1}</span>
@@ -3230,7 +3685,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                         <button
                                             type="button"
                                             onClick={() => handleToggleLlmCard(idx)}
-                                            className="flex items-center gap-1 text-[11px] font-sans font-semibold text-secondary hover:text-primary transition-colors"
+                                            className="ml-3 flex items-center gap-1 text-[11px] font-sans font-semibold text-secondary hover:text-primary transition-colors"
                                         >
                                             <span>{item.is_collapsed ? '展开' : '收起'}</span>
                                             <span
@@ -3291,18 +3746,6 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                                 required
                                             />
                                         </div>
-                                        {llmList.length > 1 && (
-                                            <div className="flex justify-end pt-1">
-                                                <button 
-                                                    type="button"
-                                                    onClick={() => handleRemoveLlm(idx)}
-                                                    className="inline-flex h-7 w-7 items-center justify-center rounded-md text-secondary hover:text-error hover:bg-error/8 transition-colors cursor-pointer"
-                                                    title="删除此接口"
-                                                >
-                                                    <span className="material-symbols-outlined text-[16px]">delete</span>
-                                                </button>
-                                            </div>
-                                        )}
                                     </div>
                                     )}
                                 </div>
@@ -3634,99 +4077,64 @@ const SystemSettingsView = ({ hideHeader = false }) => {
 
                     {!sourceChannelsCollapsed && (
                         <div className="space-y-6">
-                            <div className="space-y-3">
-                                <div className="flex flex-wrap items-center gap-2">
-                                    {currentSourceChannels.map((channel, idx) => {
-                                        const isActive = channel.channel_id === activeSourceChannelId;
-                                        return (
-                                            <div
-                                                key={channel.channel_id}
-                                                className={selectableChipClass(isActive)}
-                                            >
-                                                <button
-                                                    type="button"
-                                                    onClick={() => handleSourceChannelSwitch(channel.channel_id)}
-                                                    className={selectableChipActionClass(isActive)}
-                                                >
-                                                    {channel.label || `货源渠道 ${idx + 1}`}
-                                                </button>
-                                                {currentSourceChannels.length > 1 && (
-                                                    <button
-                                                        type="button"
-                                                        onClick={() => handleRemoveSourceChannel(channel.channel_id)}
-                                                        className="material-symbols-outlined text-[14px] cursor-pointer opacity-70 hover:opacity-100"
-                                                        title="删除渠道"
+                            <div className="grid grid-cols-1 md:grid-cols-1 gap-4">
+                                <div className="space-y-1">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                        {currentSourceChannels.length > 1 ? (
+                                            currentSourceChannels.map((channel, idx) => {
+                                                const isActive = channel.channel_id === activeSourceChannelId;
+                                                return (
+                                                    <div
+                                                        key={channel.channel_id}
+                                                        className={selectableChipClass(isActive)}
                                                     >
-                                                        close
-                                                    </button>
-                                                )}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => handleSourceChannelSwitch(channel.channel_id)}
+                                                            className={selectableChipActionClass(isActive)}
+                                                        >
+                                                            {channel.label || `货源渠道 ${idx + 1}`}
+                                                        </button>
+                                                    </div>
+                                                );
+                                            })
+                                        ) : (
+                                            <div className={selectableChipClass(true)}>
+                                                <span className={selectableChipActionClass(true)}>
+                                                    {currentSourceChannel.label || '1688 货源渠道'}
+                                                </span>
                                             </div>
-                                        );
-                                    })}
-                                    <button
-                                        type="button"
-                                        onClick={handleAddSourceChannel}
-                                        className="px-3 py-1.5 rounded-full border border-dashed border-primary/35 text-primary text-[11px] font-sans font-semibold hover:bg-primary/5 transition-colors"
-                                    >
-                                        + 新增渠道
-                                    </button>
-                                </div>
-                                <h4 className="font-sans text-sm font-bold text-on-surface">渠道基础配置</h4>
-                            </div>
-
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                <div className="space-y-1">
-                                    <label className="block font-sans text-xs text-secondary font-semibold">渠道名称</label>
-                                    <input
-                                        type="text"
-                                        value={currentSourceChannel.label || ''}
-                                        onChange={(e) => setCurrentSourceChannel(prev => ({ ...prev, label: e.target.value }))}
-                                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans"
-                                        placeholder="例如：1688 主渠道"
-                                    />
-                                </div>
-                                <div className="space-y-1">
-                                    <label className="block font-sans text-xs text-secondary font-semibold">渠道类型</label>
-                                    <select
-                                        value={currentSourceChannel.channel_type || 'custom'}
-                                        onChange={(e) => setCurrentSourceChannel(prev => ({ ...prev, channel_type: e.target.value }))}
-                                        className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-xs rounded-lg px-3 py-2 focus:outline-none focus:border-primary transition-all font-sans cursor-pointer"
-                                    >
-                                        <option value="ali1688">1688</option>
-                                        <option value="taobao">淘宝（预留）</option>
-                                        <option value="pdd">拼多多（预留）</option>
-                                        <option value="custom">自定义渠道</option>
-                                    </select>
-                                </div>
-                                <div className="space-y-1">
-                                    <label className="block font-sans text-xs text-secondary font-semibold">当前激活账号</label>
-                                    <div className="w-full min-h-[38px] bg-surface-container-low border border-border-hairline rounded-lg px-3 py-2 flex flex-wrap items-center gap-3">
-                                        {currentSourceAccounts.map(account => {
-                                            const isChecked = activeSourceAccountIds.includes(account.account_id);
-                                            return (
-                                                <label key={account.account_id} className="inline-flex items-center gap-2 text-xs text-on-surface font-sans cursor-pointer">
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={isChecked}
-                                                        onChange={(e) => handleSourceActiveAccountToggle(account.account_id, e.target.checked)}
-                                                        className="rounded border-border-hairline text-primary focus:ring-primary/30"
-                                                    />
-                                                    <span>{account.label || account.account_id}</span>
-                                                </label>
-                                            );
-                                        })}
+                                        )}
                                     </div>
                                 </div>
                             </div>
 
-                            <div className="rounded-xl border border-border-hairline bg-surface-container-low px-4 py-3 flex flex-col gap-1">
-                                <div className="font-sans text-xs font-semibold text-on-surface">
-                                    渠道能力：{currentSourceChannelCapabilities.authTypeLabel}
-                                </div>
-                                <div className="font-sans text-[11px] text-secondary leading-relaxed">
-                                    {currentSourceChannelCapabilities.supportsLoginTrigger
-                                        ? '当前渠道已接入会话检测与登录触发，可直接在本卡片内维护账号登录态。'
-                                        : '当前渠道暂未接入专属登录适配；本期先保留多渠道结构与账号池骨架，后续按渠道能力补适配器。'}
+                            <div className="space-y-3">
+                                <h4 className="font-sans text-sm font-bold text-on-surface">当前激活账号</h4>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-1 gap-4">
+                                <div className="space-y-1">
+                                    <div className="w-full min-h-[38px] bg-surface-container-low border border-border-hairline rounded-lg px-3 py-2 flex flex-wrap items-center gap-3">
+                                        {loginReadySourceAccounts.length > 0 ? (
+                                            loginReadySourceAccounts.map(account => {
+                                                const isChecked = visibleActiveSourceAccountIds.includes(account.account_id);
+                                                return (
+                                                    <label key={account.account_id} className="inline-flex items-center gap-2 text-xs text-on-surface font-sans cursor-pointer">
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={isChecked}
+                                                            onChange={(e) => handleSourceActiveAccountToggle(account.account_id, e.target.checked)}
+                                                            className="rounded border-border-hairline text-primary focus:ring-primary/30"
+                                                        />
+                                                        <span>{account.label || account.account_id}</span>
+                                                    </label>
+                                                );
+                                            })
+                                        ) : (
+                                            <span className="text-xs text-secondary font-sans">暂无登录成功的账号，完成登录后才会展示在这里</span>
+                                        )}
+                                    </div>
                                 </div>
                             </div>
 
@@ -3734,17 +4142,8 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                 <div className="flex flex-wrap items-center gap-2">
                                     {currentSourceAccounts.map((account, idx) => {
                                         const isSelected = account.account_id === currentSourceAccountId;
-                                        const isActive = activeSourceAccountIds.includes(account.account_id);
-                                        const loginStatusDotClass = account.session_report?.is_usable
-                                            ? 'bg-success'
-                                            : account.session_report?.last_checked_at
-                                                ? 'bg-error'
-                                                : 'bg-secondary/60';
-                                        const loginStatusDotTitle = account.session_report?.is_usable
-                                            ? '登录正常'
-                                            : account.session_report?.last_checked_at
-                                                ? (account.session_report?.status_text || '登录异常')
-                                                : '未检测';
+                                        const isActive = visibleActiveSourceAccountIds.includes(account.account_id);
+                                        const loginVisualState = getSourceSessionVisualState(account.session_report);
                                         return (
                                             <div
                                                 key={account.account_id}
@@ -3758,7 +4157,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                                     {account.label || `渠道账号 ${idx + 1}`}
                                                 </button>
                                                 {isActive && (
-                                                    <span className={`inline-block w-1.5 h-1.5 rounded-full ${loginStatusDotClass}`} title={loginStatusDotTitle}></span>
+                                                    <span className={`inline-block w-1.5 h-1.5 rounded-full ${loginVisualState.dotClass}`} title={loginVisualState.title}></span>
                                                 )}
                                                 {currentSourceAccounts.length > 1 && (
                                                     <button
@@ -3817,14 +4216,27 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-3">
                                                 <div className="space-y-1">
                                                     <div className="flex items-center gap-2">
-                                                        <span className={`inline-block w-2 h-2 rounded-full ${currentSourceAccount.session_report?.is_usable ? 'bg-success' : 'bg-error'}`}></span>
-                                                        <span className="font-sans text-sm font-bold text-on-surface">
-                                                            {currentSourceAccount.session_report?.status_text || '未检测'}
+                                                        <span className={`inline-block w-2 h-2 rounded-full ${currentSourceStatusDotClassForDisplay}`}></span>
+                                                        <span className={`font-sans text-sm font-bold ${currentSourceStatusTextClassForDisplay}`}>
+                                                            {currentSourceStatusTextForDisplay}
                                                         </span>
                                                     </div>
                                                     <div className="font-sans text-xs text-secondary">
-                                                        账号名：{currentSourceAccount.session_report?.account_name || currentSourceAccount.label || '未识别'}
+                                                        真实账号名：{currentSourceRealtimeName || '未识别'}
                                                     </div>
+                                                    {currentSourceLabel && (
+                                                        <div className="font-sans text-[11px] text-secondary">
+                                                            账号备注：{currentSourceLabel}
+                                                            {isSourceNameFallback && (
+                                                                <span className="ml-1 text-[10px] text-primary">当前展示为备注兜底</span>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                    {currentSourceNameSource && (
+                                                        <div className="font-sans text-[10px] text-secondary/80">
+                                                            识别来源：{currentSourceNameSource}
+                                                        </div>
+                                                    )}
                                                     <div className="font-sans text-[11px] text-secondary">
                                                         最近检测：{currentSourceAccount.session_report?.last_checked_at || '暂无'}
                                                     </div>
@@ -3847,20 +4259,20 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                                                 className="px-4 py-2 bg-primary hover:bg-primary-hover text-on-primary rounded-lg font-sans text-xs font-bold transition-colors shadow-sm flex items-center gap-1.5 active:scale-95 duration-100"
                                                             >
                                                                 <span className="material-symbols-outlined text-[16px]">open_in_new</span>
-                                                                <span>{currentSourceAccount.session_report?.is_usable ? '重新登录' : '立即登录'}</span>
+                                                                <span>{currentSourceSessionLoggedIn ? '重新登录' : '立即登录'}</span>
                                                             </button>
                                                         )
                                                     )}
-                                                    <button
+            <button
                                                         type="button"
                                                         onClick={handleCheckSourceChannelStatus}
-                                                        disabled={isCheckingSourceChannelStatus}
-                                                        className="px-4 py-2 bg-surface-container-high hover:bg-surface-container text-on-surface disabled:opacity-60 rounded-lg font-sans text-xs font-bold transition-colors shadow-sm flex items-center gap-1.5 active:scale-95 duration-100"
+                                                        disabled={isCheckingSourceChannelStatus || isSourceChannelLoggingIn}
+                                                        className="px-4 py-2 bg-surface-container-high hover:bg-surface-container text-on-surface disabled:opacity-60 rounded-lg font-sans text-xs font-bold transition-colors shadow-sm flex items-center gap-1.5 active:scale-95 duration-100 disabled:cursor-not-allowed"
                                                     >
                                                         <span className={`material-symbols-outlined text-[16px] ${isCheckingSourceChannelStatus ? 'animate-spin' : ''}`}>
                                                             {isCheckingSourceChannelStatus ? 'autorenew' : 'sync'}
                                                         </span>
-                                                        <span>{isCheckingSourceChannelStatus ? '正在检测...' : '检测状态'}</span>
+                                                        <span>{isCheckingSourceChannelStatus ? '正在检测...' : (isSourceChannelLoggingIn ? '登录中不可检测' : '检测状态')}</span>
                                                     </button>
                                                 </div>
                                             </div>
@@ -3953,6 +4365,209 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                 </div>
                             </div>
 
+                            <div className="space-y-3 pt-2 border-t border-border-hairline/70">
+                                <div className="flex items-center justify-between gap-3 flex-wrap">
+                                    <label className="block font-sans text-xs text-secondary font-semibold">货源渠道配置</label>
+                                    <span className="font-sans text-[11px] text-secondary">
+                                        仅展示“已登录成功 + 已加入当前激活账号”的渠道账号
+                                    </span>
+                                </div>
+                                {crawlAvailableChannels.length === 0 ? (
+                                    <div className="p-4 bg-warning/5 border border-warning/15 rounded-xl flex items-center gap-3 text-warning">
+                                        <span className="material-symbols-outlined text-[20px]">warning</span>
+                                        <div className="font-sans text-xs leading-relaxed">
+                                            当前货源渠道号池中还没有可用于抓取的登录成功账号。请先去上方 <strong>“货源渠道号池”</strong> 完成账号登录，并将其加入当前激活账号。
+                                        </div>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-4">
+                                        {crawlSelectionAdjustmentNotice && (
+                                            <div className="rounded-xl border border-warning/20 bg-warning/5 px-4 py-3 flex items-start gap-3 text-warning">
+                                                <span className="material-symbols-outlined text-[18px] mt-0.5">info</span>
+                                                <div className="font-sans text-[11px] leading-relaxed">
+                                                    {crawlSelectionAdjustmentNotice}
+                                                </div>
+                                            </div>
+                                        )}
+                                        {!isCrawlEditorFollowingActiveSourceChannel && currentCrawlChannel && (
+                                            <div className="rounded-xl border border-primary/15 bg-primary/[0.04] px-4 py-3 flex items-start gap-3 text-primary">
+                                                <span className="material-symbols-outlined text-[18px] mt-0.5">sync_alt</span>
+                                                <div className="font-sans text-[11px] leading-relaxed">
+                                                    当前正在编辑的抓取渠道为 <strong>{currentCrawlChannel.label || currentCrawlChannel.channel_id}</strong>。
+                                                    {activeSourceChannelInCrawlPool
+                                                        ? (
+                                                            <> 上方切换货源渠道后，这里会自动跟随到对应渠道。</>
+                                                        )
+                                                        : (
+                                                            <> 当前上方选中的渠道还没有“已登录成功且加入当前激活账号”的可抓取账号，因此这里暂时回落到最近一个可编辑渠道。</>
+                                                        )}
+                                                </div>
+                                            </div>
+                                        )}
+                                        {isCrawlSelectionMissing && (
+                                            <div className="rounded-xl border border-warning/20 bg-warning/5 px-4 py-3 flex items-start gap-3 text-warning">
+                                                <span className="material-symbols-outlined text-[18px] mt-0.5">warning</span>
+                                                <div className="font-sans text-[11px] leading-relaxed">
+                                                    当前已进入“手动选择货源账号”模式，但还没有选中任何可参与抓取的账号。
+                                                    请为至少一个渠道勾选账号，或点击 <strong>“使用当前激活账号”</strong> 后再保存。
+                                                </div>
+                                            </div>
+                                        )}
+                                        <div className="flex flex-wrap items-center gap-2">
+                                            {crawlAvailableChannels.map(channel => {
+                                                const isFocused = channel.channel_id === effectiveSelectedCrawlChannelId;
+                                                const selectedCount = crawlChannelSelectionMap[channel.channel_id]?.account_ids?.length || 0;
+                                                const isEnabledForCrawl = selectedCount > 0;
+                                                return (
+                                                    <button
+                                                        key={channel.channel_id}
+                                                        type="button"
+                                                        onClick={() => handleCrawlChannelSwitch(channel.channel_id)}
+                                                        className={`px-3 py-1.5 rounded-full border text-[11px] font-sans font-semibold transition-all ${
+                                                            isFocused
+                                                                ? 'border-primary bg-primary text-on-primary shadow-[0_0_0_1px_rgba(197,86,16,0.32),0_10px_18px_rgba(197,86,16,0.22)]'
+                                                                : isEnabledForCrawl
+                                                                    ? 'border-primary/35 bg-primary/[0.06] text-primary hover:bg-primary/[0.1]'
+                                                                    : 'border-border-hairline bg-surface-container-low text-secondary hover:border-primary/25 hover:text-on-surface'
+                                                        }`}
+                                                    >
+                                                        <span>{channel.label || channel.channel_id}</span>
+                                                        <span className={`ml-1 ${isFocused ? 'text-on-primary/90' : isEnabledForCrawl ? 'text-primary/80' : 'text-secondary/80'}`}>
+                                                            {selectedCount > 0 ? `(${selectedCount})` : ''}
+                                                        </span>
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+
+                                        {currentCrawlChannel && (
+                                            <div className="rounded-xl border border-border-hairline bg-surface-container-low p-4 space-y-3">
+                                                <div className="flex items-center justify-between gap-3 flex-wrap">
+                                                    <div>
+                                                        <div className="font-sans text-xs font-bold text-on-surface">
+                                                            {currentCrawlChannel.label || currentCrawlChannel.channel_id}
+                                                        </div>
+                                                        <div className="mt-1 font-sans text-[11px] text-secondary">
+                                                            已登录且可参与抓取的账号：{(currentCrawlChannel.crawl_accounts || []).length} 个
+                                                        </div>
+                                                    </div>
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => handleCrawlChannelUseActiveAccounts(currentCrawlChannel.channel_id)}
+                                                        className="px-3 py-1.5 rounded-lg bg-primary/10 hover:bg-primary/15 text-primary text-[11px] font-sans font-semibold transition-colors"
+                                                    >
+                                                        使用当前激活账号
+                                                    </button>
+                                                </div>
+
+                                                {(currentCrawlChannel.crawl_accounts || []).length === 0 ? (
+                                                    <div className="rounded-lg border border-dashed border-border-hairline bg-surface-container-lowest px-3 py-3 text-[11px] text-secondary">
+                                                        当前渠道暂无“已登录成功且加入当前激活账号”的可选账号。
+                                                    </div>
+                                                ) : (
+                                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                                        {currentCrawlChannel.crawl_accounts.map(account => {
+                                                            const report = account.session_report || {};
+                                                            const isChecked = currentCrawlSelectedAccountIds.includes(account.account_id);
+                                                            return (
+                                                                <label
+                                                                    key={account.account_id}
+                                                                    className={`flex items-start gap-3 rounded-xl border px-3 py-3 cursor-pointer transition-all ${
+                                                                        isChecked
+                                                                            ? 'border-primary/45 bg-primary/[0.05] shadow-sm shadow-primary/5'
+                                                                            : 'border-border-hairline bg-surface-container-lowest hover:border-primary/20'
+                                                                    }`}
+                                                                >
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        className="mt-0.5 rounded border-secondary text-primary focus:ring-primary/20"
+                                                                        checked={isChecked}
+                                                                        onChange={(e) => handleCrawlAccountToggle(currentCrawlChannel.channel_id, account.account_id, e.target.checked)}
+                                                                    />
+                                                                    <div className="min-w-0 flex-1">
+                                                                        <div className="flex items-center gap-2 flex-wrap">
+                                                                            <span className="font-sans text-xs font-semibold text-on-surface">
+                                                                                {account.session_report?.account_name || account.label || account.account_id}
+                                                                            </span>
+                                                                            <span className="inline-flex items-center gap-1 text-[10px] text-success">
+                                                                                <span className="w-1.5 h-1.5 rounded-full bg-success"></span>
+                                                                                <span>{report.status_text || '登录正常'}</span>
+                                                                            </span>
+                                                                        </div>
+                                                                        <div className="mt-1 text-[11px] text-secondary">
+                                                                            渠道账号备注：{account.label || account.account_id}
+                                                                        </div>
+                                                                    </div>
+                                                                </label>
+                                                            );
+                                                        })}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+
+                                        {currentCrawlChannel && (
+                                            <div className="rounded-xl border border-border-hairline bg-surface-container-low p-4 space-y-4">
+                                                <div className="flex items-center justify-between gap-3 flex-wrap">
+                                                    <div>
+                                                        <div className="font-sans text-xs font-bold text-on-surface">
+                                                            当前渠道货源筛选项
+                                                        </div>
+                                                        <div className="mt-1 font-sans text-[11px] text-secondary">
+                                                            按渠道独立保存。切换渠道后，会自动切换到该渠道自己的筛选配置。
+                                                        </div>
+                                                    </div>
+                                                    <span className="px-2.5 py-1 rounded-full bg-surface-container-lowest border border-border-hairline text-[11px] font-sans text-secondary">
+                                                        {currentCrawlChannel.label || currentCrawlChannel.channel_id}
+                                                    </span>
+                                                </div>
+
+                                                {currentCrawlFilterMeta.length === 0 ? (
+                                                    <div className="rounded-lg border border-dashed border-border-hairline bg-surface-container-lowest px-3 py-3 text-[11px] text-secondary">
+                                                        当前渠道暂不支持列表筛选项配置。
+                                                    </div>
+                                                ) : (
+                                                    <div className="space-y-4">
+                                                        {Object.entries(currentCrawlFilterGroups).map(([groupName, filters]) => (
+                                                            <div key={groupName} className="space-y-2">
+                                                                <div className="font-sans text-[11px] font-semibold text-secondary">
+                                                                    {groupName}
+                                                                </div>
+                                                                <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+                                                                    {filters.map(filter => {
+                                                                        const isChecked = !!currentCrawlFilterValues[filter.key];
+                                                                        return (
+                                                                            <label
+                                                                                key={filter.key}
+                                                                                className={`flex items-center gap-2 rounded-xl border px-3 py-3 cursor-pointer transition-all ${
+                                                                                    isChecked
+                                                                                        ? 'border-primary/45 bg-primary/[0.05] text-primary shadow-sm shadow-primary/5'
+                                                                                        : 'border-border-hairline bg-surface-container-lowest text-on-surface hover:border-primary/20'
+                                                                                }`}
+                                                                            >
+                                                                                <input
+                                                                                    type="checkbox"
+                                                                                    className="rounded border-secondary text-primary focus:ring-primary/20"
+                                                                                    checked={isChecked}
+                                                                                    onChange={(e) => handleCrawlSearchFilterToggle(currentCrawlChannel.channel_id, filter.key, e.target.checked)}
+                                                                                />
+                                                                                <span className="font-sans text-xs font-semibold">
+                                                                                    {filter.label}
+                                                                                </span>
+                                                                            </label>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+
                             {/* 商品筛选使用的模型 */}
                             <div className="space-y-3 pt-2">
                                 <label className="block font-sans text-xs text-secondary font-semibold">商品相关性筛选模型（支持多选轮询）</label>
@@ -4016,7 +4631,6 @@ const App = () => {
     const [selectedTask, setSelectedTask] = useState(null);
     const [detailedItems, setDetailedItems] = useState([]); 
     const [selectedItem, setSelectedItem] = useState(null); 
-    const [sourcePage, setSourcePage] = useState(1);
     const [sysStatus, setSysStatus] = useState({});
     const [newKeyword, setNewKeyword] = useState("");
 
@@ -4027,6 +4641,7 @@ const App = () => {
     const [batchStatusMap, setBatchStatusMap] = useState({});
     const [batchResultMap, setBatchResultMap] = useState({});
     const [confirmDialog, setConfirmDialog] = useState(null);
+    const [sourceChannelFilter, setSourceChannelFilter] = useState("all");
 
     // 全局双主题状态机
     const [theme, setTheme] = useState(() => localStorage.getItem("xianyu-theme") || "light");
@@ -4323,6 +4938,281 @@ const App = () => {
         });
     };
 
+    const getItemUsedChannels = (group) => {
+        if (Array.isArray(group?.used_channels) && group.used_channels.length > 0) {
+            return group.used_channels;
+        }
+        const usedMap = {};
+        (group?.sources || []).forEach(source => {
+            const channelId = source?.source_channel_id || 'ali1688';
+            if (!usedMap[channelId]) {
+                usedMap[channelId] = {
+                    channel_id: channelId,
+                    channel_type: source?.source_channel_type || 'ali1688',
+                    channel_label: source?.source_channel_label || '1688 货源渠道',
+                };
+            }
+        });
+        return Object.values(usedMap);
+    };
+
+    const getTaskUsedChannels = (task) => {
+        if (Array.isArray(task?.used_channels) && task.used_channels.length > 0) {
+            return task.used_channels;
+        }
+        return [];
+    };
+
+    const channelSearchFilterLabelMap = {
+        rapid_invoice: '极速开票',
+        selected_distributors: '分销严选',
+        single_piece_drop_shipping: '一件代发',
+        seven_day_return: '7天无理由',
+        single_piece_free_shipping: '1件代发包邮',
+        free_shipping: '包邮',
+        freight_insurance_return: '退货包运费',
+        real_factory_verified: '真实工厂认证',
+        strength_verified: '实力认证',
+        official_logistics: '官方物流',
+        encrypted_waybill: '密文面单',
+    };
+
+    const getChannelFilterLabel = (filterKey) => channelSearchFilterLabelMap[filterKey] || filterKey;
+
+    const summarizeChannelFilterSnapshot = (snapshot) => {
+        if (!snapshot || typeof snapshot !== 'object') {
+            return {
+                configured: [],
+                queryInjected: [],
+                applied: [],
+                unapplied: [],
+                filterStatusMap: {},
+                queryVerificationDetails: {},
+                mappingStage: '',
+                mappingNotes: '',
+            };
+        }
+        const filterStatusMap = snapshot.filter_status_map && typeof snapshot.filter_status_map === 'object'
+            ? snapshot.filter_status_map
+            : {};
+        const configured = Array.isArray(snapshot.configured_enabled_filter_keys)
+            ? snapshot.configured_enabled_filter_keys
+            : Array.isArray(snapshot.configured_filter_keys)
+                ? snapshot.configured_filter_keys
+            : Array.isArray(snapshot.enabled_filter_keys)
+                ? snapshot.enabled_filter_keys
+                : Object.entries(snapshot.filters || {})
+                    .filter(([, enabled]) => !!enabled)
+                    .map(([key]) => key);
+        const queryInjected = Object.entries(filterStatusMap)
+            .filter(([, meta]) => meta?.status === 'query_injected_pending_verification')
+            .map(([key]) => key);
+        const applied = Object.entries(filterStatusMap)
+            .filter(([, meta]) => meta?.status === 'applied')
+            .map(([key]) => key);
+        const unapplied = Object.entries(filterStatusMap)
+            .filter(([, meta]) => meta?.status === 'unapplied')
+            .map(([key]) => key);
+        const fallbackQueryInjected = Array.isArray(snapshot.query_injected_filter_keys)
+            ? snapshot.query_injected_filter_keys
+            : [];
+        const fallbackApplied = Array.isArray(snapshot.applied_filter_keys) ? snapshot.applied_filter_keys : [];
+        const fallbackQueryInjectedPending = fallbackQueryInjected.filter((key) => !fallbackApplied.includes(key));
+        const fallbackUnapplied = (Array.isArray(snapshot.unapplied_filter_keys) ? snapshot.unapplied_filter_keys : [])
+            .filter((key) => !fallbackQueryInjected.includes(key));
+        const topLevelQueryVerificationDetails = snapshot.query_verification_details && typeof snapshot.query_verification_details === 'object'
+            ? snapshot.query_verification_details
+            : snapshot.verification_details && typeof snapshot.verification_details === 'object'
+                ? snapshot.verification_details
+                : {};
+        const statusMapVerificationDetails = Object.entries(filterStatusMap).reduce((acc, [key, meta]) => {
+            if (meta?.verification_detail && typeof meta.verification_detail === 'object') {
+                acc[key] = meta.verification_detail;
+            }
+            return acc;
+        }, {});
+        const queryVerificationDetails = {
+            ...statusMapVerificationDetails,
+            ...topLevelQueryVerificationDetails,
+        };
+        return {
+            configured,
+            queryInjected: queryInjected.length > 0 || applied.length > 0 || unapplied.length > 0 ? queryInjected : fallbackQueryInjectedPending,
+            applied: applied.length > 0 || queryInjected.length > 0 || unapplied.length > 0 ? applied : fallbackApplied,
+            unapplied: unapplied.length > 0 || queryInjected.length > 0 || applied.length > 0 ? unapplied : fallbackUnapplied,
+            filterStatusMap,
+            queryVerificationDetails,
+            mappingStage: snapshot.mapping_stage || '',
+            mappingNotes: snapshot.mapping_notes || '',
+        };
+    };
+
+    const getFilterStatusReasonText = (reason) => {
+        const reasonMap = {
+            query_filter_injected_pending_verification: '已注入结果页，但结果级验证仍未完成',
+            query_filter_not_applied_in_runtime: '当前 runtime 还未实际注入该 query 筛选项',
+            query_filter_navigation_failed: '已尝试跳转到带筛选参数的结果页，但页面导航失败',
+            query_param_not_retained: '已尝试注入筛选参数，但最终结果页未保留目标参数',
+            runtime_mapping_not_implemented_yet: '当前仅完成配置透传，真实映射尚未接入',
+            query_candidate_not_validated: '已识别到候选参数，但还未验证为真实生效',
+            ui_selector_not_stable: '页面控件定位暂未稳定，尚未进入真实生效',
+            ui_apply_not_observed: '页面控件已尝试执行，但当前未观察到稳定的结果变化',
+            special_panel_unmapped: '特殊入口尚未映射到可稳定执行的操作流',
+            special_panel_open_failed: '特殊入口已识别，但打开二级面板失败',
+            snapshot_only_until_semantics_confirmed: '语义仍待确认，暂不宣称已生效',
+            semantic_combo_not_confirmed: '组合语义尚未确认，暂不宣称该项可独立生效',
+        };
+        return reasonMap[reason] || reason || '';
+    };
+
+    const formatQueryVerificationDetail = (detail) => {
+        if (!detail || typeof detail !== 'object') {
+            return '';
+        }
+        if (detail.probe_mode === 'html_text_scan') {
+            const matchedTerms = Array.isArray(detail.matched_terms)
+                ? detail.matched_terms.filter(Boolean)
+                : [];
+            const probeTerms = Array.isArray(detail.probe_terms)
+                ? detail.probe_terms.filter(Boolean)
+                : [];
+            const detailParts = [];
+            if (matchedTerms.length > 0) {
+                detailParts.push(`页面文案命中：${matchedTerms.join(' / ')}`);
+            } else if (probeTerms.length > 0) {
+                detailParts.push(`探测文案：${probeTerms.join(' / ')}`);
+            }
+            if (Array.isArray(detail.semantic_dependencies) && detail.semantic_dependencies.length > 0) {
+                const dependencyLabels = detail.semantic_dependencies
+                    .map((dependencyKey) => getChannelFilterLabel(dependencyKey))
+                    .filter(Boolean);
+                if (dependencyLabels.length > 0) {
+                    detailParts.push(
+                        detail.dependencies_enabled
+                            ? `依赖已开启：${dependencyLabels.join(' + ')}`
+                            : `依赖未齐：${dependencyLabels.join(' + ')}`
+                    );
+                }
+            }
+            return detailParts.join(' · ');
+        }
+        const matchedParams = detail.matched_params && typeof detail.matched_params === 'object'
+            ? Object.entries(detail.matched_params)
+                .filter(([, value]) => !!value)
+                .map(([key, value]) => `${key}=${value}`)
+            : [];
+        if (matchedParams.length > 0) {
+            return matchedParams.join(' · ');
+        }
+        const observedValues = Array.isArray(detail.observed_values) ? detail.observed_values : [];
+        if (observedValues.length > 0) {
+            return `观察值：${observedValues.join(', ')}`;
+        }
+        const expectedValues = Array.isArray(detail.expected_values) ? detail.expected_values : [];
+        if (expectedValues.length > 0) {
+            return `目标值：${expectedValues.join(', ')}`;
+        }
+        return '';
+    };
+
+    const formatFilterMappingHint = (filterMeta, filterKey) => {
+        if (!filterMeta || typeof filterMeta !== 'object') {
+            return '';
+        }
+        const semanticDependencies = Array.isArray(filterMeta.semantic_dependencies)
+            ? filterMeta.semantic_dependencies
+                .map((dependencyKey) => getChannelFilterLabel(dependencyKey))
+                .filter(Boolean)
+            : [];
+        const verificationEntry = String(filterMeta.verification_entry || '').trim();
+        const mappingHint = String(filterMeta.mapping_hint || '').trim();
+        const hintParts = [];
+        if (semanticDependencies.length > 0) {
+            hintParts.push(`依赖项：${semanticDependencies.join(' + ')}`);
+        }
+        if (verificationEntry === 'config_filter_panel') {
+            hintParts.push('验证入口：配置筛选面板');
+        } else if (verificationEntry === 'search_result_semantic_combo') {
+            hintParts.push('验证入口：结果页组合语义比对');
+        } else if (verificationEntry === 'search_result_checkbox') {
+            hintParts.push('验证入口：结果页筛选区 checkbox');
+        } else if (verificationEntry) {
+            hintParts.push(`验证入口：${verificationEntry}`);
+        }
+        if (mappingHint) {
+            hintParts.push(mappingHint);
+        }
+        return hintParts.join(' · ');
+    };
+
+    const getSourceEstimatedProfit = (source, xianyuPrice) => {
+        const listingPrice = parseFloat(xianyuPrice || 0);
+        const costPrice = parseFloat(source?.min_price || 0);
+        return listingPrice - costPrice - 20;
+    };
+
+    const buildChannelGroupsFromSources = (sources = []) => {
+        const hasMeaningfulChannelFilterSnapshot = (snapshot) => {
+            if (!snapshot || typeof snapshot !== 'object') {
+                return false;
+            }
+            if (snapshot.mapping_stage && snapshot.mapping_stage !== 'snapshot_only') {
+                return true;
+            }
+            const listKeys = [
+                'configured_filter_keys',
+                'configured_enabled_filter_keys',
+                'enabled_filter_keys',
+                'applied_filter_keys',
+                'query_injected_filter_keys',
+                'unapplied_filter_keys',
+            ];
+            if (listKeys.some((key) => Array.isArray(snapshot[key]) && snapshot[key].length > 0)) {
+                return true;
+            }
+            const filterMap = snapshot.configured_filters && typeof snapshot.configured_filters === 'object'
+                ? snapshot.configured_filters
+                : snapshot.filters && typeof snapshot.filters === 'object'
+                    ? snapshot.filters
+                    : null;
+            return !!filterMap && Object.values(filterMap).some((value) => !!value);
+        };
+        const groups = [];
+        const groupMap = {};
+        sources.forEach(source => {
+            const channelId = source?.source_channel_id || 'ali1688';
+            if (!groupMap[channelId]) {
+                groupMap[channelId] = {
+                    channel_id: channelId,
+                    channel_type: source?.source_channel_type || 'ali1688',
+                    channel_label: source?.source_channel_label || '1688 货源渠道',
+                    source_count: 0,
+                    account_ids: [],
+                    account_labels: [],
+                    source_filter_snapshot: source?.source_filter_snapshot || {},
+                    sources: [],
+                };
+                groups.push(groupMap[channelId]);
+            }
+            const currentGroup = groupMap[channelId];
+            currentGroup.sources.push(source);
+            currentGroup.source_count += 1;
+            if (
+                hasMeaningfulChannelFilterSnapshot(source?.source_filter_snapshot)
+                && !hasMeaningfulChannelFilterSnapshot(currentGroup.source_filter_snapshot)
+            ) {
+                currentGroup.source_filter_snapshot = source.source_filter_snapshot;
+            }
+            if (source?.source_account_id && !currentGroup.account_ids.includes(source.source_account_id)) {
+                currentGroup.account_ids.push(source.source_account_id);
+            }
+            if (source?.source_account_label && !currentGroup.account_labels.includes(source.source_account_label)) {
+                currentGroup.account_labels.push(source.source_account_label);
+            }
+        });
+        return groups;
+    };
+
     const loadTaskResults = async (task) => {
         const resp = await fetch(`/api/task_details/${task.id}`);
         const data = await resp.json();
@@ -4331,17 +5221,44 @@ const App = () => {
         setActiveView("results");
     };
     
-    const enterItemDetail = (group) => { setSelectedItem(group); setSourcePage(1); setActiveView("item_detail"); };
+    const enterItemDetail = (group) => {
+        setSelectedItem(group);
+        setSourceChannelFilter("all");
+        setActiveView("item_detail");
+    };
     const completedTasks = tasks.filter(t => t.status === '已完成');
-    const pageSize = 4;
-    const totalPages = selectedItem ? Math.ceil((selectedItem.sources?.length || 0) / pageSize) : 0;
-    const paginatedSources = selectedItem ? (selectedItem.sources || []).slice((sourcePage - 1) * pageSize, sourcePage * pageSize) : [];
+    const resolvedChannelGroups = useMemo(() => {
+        if (!selectedItem) return [];
+        const rawGroups = Array.isArray(selectedItem.channel_groups) && selectedItem.channel_groups.length > 0
+            ? selectedItem.channel_groups
+            : buildChannelGroupsFromSources(selectedItem.sources || []);
+        const listingPrice = parseFloat(selectedItem.xianyu_item?.price || 0);
+        const decorateGroup = (group) => {
+            const sortedSources = [...(group.sources || [])].sort(
+                (left, right) => getSourceEstimatedProfit(right, listingPrice) - getSourceEstimatedProfit(left, listingPrice)
+            );
+            const bestEstimatedProfit = sortedSources.length > 0
+                ? Math.max(...sortedSources.map(source => getSourceEstimatedProfit(source, listingPrice)))
+                : Number.NEGATIVE_INFINITY;
+            return {
+                ...group,
+                sources: sortedSources,
+                best_estimated_profit: bestEstimatedProfit,
+            };
+        };
+        return rawGroups
+            .map(decorateGroup)
+            .filter(group => sourceChannelFilter === "all" || group.channel_id === sourceChannelFilter)
+            .sort((left, right) => {
+                return right.best_estimated_profit - left.best_estimated_profit;
+            });
+    }, [selectedItem, sourceChannelFilter]);
     const pageIntro = (() => {
         if (view === 'item_detail') return null;
         if (view === 'dashboard') return { icon: 'dashboard', title: '控制台中心', description: '全局扫描 Worker 统计面板及后台状态概览。' };
         if (view === 'tasks') return { icon: 'list_alt', title: '任务队列中心', description: '查看和管理各个品类的深度爬取状态。左侧显示活跃进行中队列，右侧显示归档历史。' };
-        if (view === 'results' && selectedTask) return { icon: 'query_stats', title: `“${selectedTask.keyword}” 爆款深度对比报告`, description: '每个爆款商品均可以点入查看 1688 货源深度对比表。' };
-        if (view === 'results') return { icon: 'travel_explore', title: '选品决策资产库', description: '系统已完成的爆款数据中心。点击各个品类卡片，可直接穿透查看商品的 1688 源头采购价与深度分析。' };
+        if (view === 'results' && selectedTask) return { icon: 'query_stats', title: `“${selectedTask.keyword}” 爆款深度对比报告`, description: '每个爆款商品均可以点入查看对应货源渠道的深度对比结果。' };
+        if (view === 'results') return { icon: 'travel_explore', title: '选品决策资产库', description: '系统已完成的爆款数据中心。点击各个品类卡片，可直接穿透查看商品的多渠道货源采购价与深度分析。' };
         if (view === 'published') return { icon: 'shopping_bag', title: '闲鱼上架商品中枢', description: '管理并监控已经在闲鱼铺货成功的商品，支持与 1688 源头采购价、物流信息实时联动。点击行项目可展开详情数据与下架控制。' };
         if (view === 'logs') return { icon: 'analytics', title: '任务日志中心', description: '实时监控扫描 Worker 的后台标准输出日志。' };
         if (view === 'token_stats') return { icon: 'generating_tokens', title: 'AI Token 计量舱', description: '系统大模型调用统计、模型消耗占比及审计流水线。' };
@@ -4353,7 +5270,7 @@ const App = () => {
             return {
                 icon: 'inventory_2',
                 title: '决策资产 / 货源明细',
-                description: '查看单个爆款商品对应的 1688 深度货源对比结果。'
+                description: '查看单个爆款商品对应的多渠道货源深度对比结果。'
             };
         }
         if (view === 'token_stats') {
@@ -4739,6 +5656,20 @@ const App = () => {
 
                                                 <p className="text-xs text-secondary mt-2">调研时间: {t.created_at}</p>
 
+                                                {getTaskUsedChannels(t).length > 0 && (
+                                                    <div className="flex flex-wrap gap-1.5 mt-3 min-h-[24px]">
+                                                        {getTaskUsedChannels(t).map(channel => (
+                                                            <span
+                                                                key={`archive-${t.id}-${channel.channel_id}`}
+                                                                className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px] font-semibold"
+                                                            >
+                                                                {channel.channel_label || channel.channel_id}
+                                                                {channel.source_count > 0 ? ` · ${channel.source_count}` : ''}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+
                                                 <div className="flex justify-between items-center border-t border-border-hairline/60 pt-3 mt-4">
                                                     <div className="flex items-center gap-3">
                                                             <span className="text-[10px] text-secondary font-mono">V.{t.version}</span>
@@ -4819,6 +5750,16 @@ const App = () => {
                                              <h3 className="text-xs font-bold text-on-surface line-clamp-2 h-9 leading-relaxed">
                                                  {group.xianyu_item?.title}
                                              </h3>
+                                             <div className="flex flex-wrap gap-1.5 mt-3 min-h-[24px]">
+                                                 {getItemUsedChannels(group).map(channel => (
+                                                     <span
+                                                         key={`${group.rank}-${channel.channel_id}`}
+                                                         className="px-2 py-0.5 rounded-full bg-surface-container text-secondary border border-border-hairline text-[10px] font-semibold"
+                                                     >
+                                                         {channel.channel_label || channel.channel_id}
+                                                     </span>
+                                                 ))}
+                                             </div>
                                              
                                              <div className="flex justify-between items-center mt-4 border-t border-border-hairline/60 pt-3">
                                                  <span className="text-base font-black text-primary">¥{group.xianyu_item?.price}</span>
@@ -4850,6 +5791,20 @@ const App = () => {
                                                  <div className="font-black text-on-surface text-lg group-hover:text-primary transition-colors">{t.keyword}</div>
                                                  <div className="text-xs text-secondary mt-2">调研时间: {t.created_at}</div>
                                              </div>
+
+                                             {getTaskUsedChannels(t).length > 0 && (
+                                                 <div className="flex flex-wrap justify-center gap-1.5 mt-3 min-h-[24px]">
+                                                     {getTaskUsedChannels(t).map(channel => (
+                                                         <span
+                                                             key={`results-${t.id}-${channel.channel_id}`}
+                                                             className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px] font-semibold"
+                                                         >
+                                                             {channel.channel_label || channel.channel_id}
+                                                             {channel.source_count > 0 ? ` · ${channel.source_count}` : ''}
+                                                         </span>
+                                                     ))}
+                                                 </div>
+                                             )}
                                              
                                              <div className="flex justify-between items-end border-t border-border-hairline/60 pt-2 font-mono text-[9px] text-secondary/60 mt-3">
                                                  <span>V.{t.version}</span>
@@ -4909,178 +5864,425 @@ const App = () => {
                          {/* 货源比价区域 */}
                          <div>
                              <header className="flex justify-between items-center mb-4 flex-wrap gap-4 border-b border-border-hairline pb-4">
-                                 <h3 className="font-sans text-sm font-bold text-on-surface">1688 货源深度对比表 ({selectedItem.sources?.length || 0} 条匹配)</h3>
-                                 
-                                 {/* 批量处理 */}
-                                 {selectableSources.length > 0 && (
-                                     <div className="flex items-center gap-4 bg-surface-container border border-border-hairline px-4 py-2 rounded-xl ambient-shadow">
-                                         <label className="text-xs text-secondary font-semibold cursor-pointer flex items-center gap-1">
-                                             <input 
-                                                 type="checkbox" 
-                                                 className="rounded border-secondary text-primary focus:ring-primary/20 w-4 h-4 cursor-pointer"
-                                                 checked={selectableSources.length > 0 && selectableSources.every(s => selectedIds.includes(s.db_id))}
-                                                 onChange={(e) => {
-                                                     if (e.target.checked) {
-                                                         setSelectedIds(selectableSources.map(s => s.db_id));
-                                                     } else {
-                                                         setSelectedIds([]);
-                                                     }
-                                                 }}
-                                             />
-                                             全选未丢弃
-                                         </label>
-                                         {hasSelectedBatchActions && (
-                                             <>
-                                                 <div className="w-px h-5 bg-border-hairline/60"></div>
-                                                 
-                                                 <div className="flex gap-2">
-                                                     {publishableIds.length > 0 && (
-                                                         <button 
-                                                             className="px-3.5 py-1.5 bg-primary hover:bg-primary-container text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
-                                                             disabled={batchPublishing || batchDepublishing || batchDeleting} 
-                                                             onClick={doBatchPublish}
-                                                         >
-                                                             {batchPublishing ? "云同步中..." : `🚀 批量发布 (${publishableIds.length})`}
-                                                         </button>
-                                                     )}
-                                                     {depublishableIds.length > 0 && (
-                                                         <button 
-                                                             className="px-3.5 py-1.5 bg-warning hover:bg-warning/80 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
-                                                             disabled={batchPublishing || batchDepublishing || batchDeleting} 
-                                                             onClick={doBatchDepublish}
-                                                         >
-                                                             {batchDepublishing ? "云同步中..." : `⚠️ 批量下架 (${depublishableIds.length})`}
-                                                         </button>
-                                                     )}
-                                                     {deletableIds.length > 0 && (
-                                                         <button 
-                                                             className="px-3.5 py-1.5 bg-error hover:bg-error/85 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
-                                                             disabled={batchPublishing || batchDepublishing || batchDeleting} 
-                                                             onClick={doBatchDelete}
-                                                         >
-                                                             {batchDeleting ? "云注销中..." : `🗑️ 批量删除 (${deletableIds.length})`}
-                                                         </button>
-                                                     )}
-                                                 </div>
-                                             </>
-                                         )}
+                                 <div>
+                                     <h3 className="font-sans text-sm font-bold text-on-surface">货源深度对比表 ({selectedItem.sources?.length || 0} 条匹配)</h3>
+                                     <div className="flex flex-wrap gap-1.5 mt-2">
+                                         {getItemUsedChannels(selectedItem).map(channel => (
+                                             <span
+                                                 key={`detail-${channel.channel_id}`}
+                                                 className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px] font-semibold"
+                                             >
+                                                 {channel.channel_label || channel.channel_id}
+                                             </span>
+                                         ))}
                                      </div>
-                                 )}
+                                 </div>
+                                 
+                                 <div className="flex flex-wrap items-center justify-end gap-3">
+                                     <div className="flex items-center gap-2 bg-surface-container border border-border-hairline px-3 py-2 rounded-xl ambient-shadow">
+                                         <span className="material-symbols-outlined text-[15px] text-secondary">swap_vert</span>
+                                         <span className="text-xs text-secondary font-semibold whitespace-nowrap">固定排序</span>
+                                         <span className="px-2.5 py-1 rounded-lg bg-surface-container-low border border-border-hairline text-xs font-semibold text-on-surface whitespace-nowrap">
+                                             预估纯利倒序
+                                         </span>
+                                     </div>
+
+                                     <div className="flex items-center gap-2 bg-surface-container border border-border-hairline px-3 py-2 rounded-xl ambient-shadow">
+                                         <span className="material-symbols-outlined text-[15px] text-secondary">filter_alt</span>
+                                         <span className="text-xs text-secondary font-semibold whitespace-nowrap">货源渠道</span>
+                                         <div className="relative">
+                                             <select
+                                                 value={sourceChannelFilter}
+                                                 onChange={(e) => setSourceChannelFilter(e.target.value)}
+                                                 className="appearance-none bg-surface-container-low border border-border-hairline rounded-lg pl-3 pr-8 py-1.5 text-xs font-semibold text-on-surface focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all"
+                                             >
+                                                 <option value="all">全部渠道</option>
+                                                 {getItemUsedChannels(selectedItem).map(channel => (
+                                                     <option key={`filter-${channel.channel_id}`} value={channel.channel_id}>
+                                                         {channel.channel_label || channel.channel_id}
+                                                     </option>
+                                                 ))}
+                                             </select>
+                                             <span className="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-secondary text-[16px] pointer-events-none">expand_more</span>
+                                         </div>
+                                     </div>
+
+                                     {selectableSources.length > 0 && (
+                                         <div className="flex items-center gap-4 bg-surface-container border border-border-hairline px-4 py-2 rounded-xl ambient-shadow">
+                                             <label className="text-xs text-secondary font-semibold cursor-pointer flex items-center gap-1">
+                                                 <input 
+                                                     type="checkbox" 
+                                                     className="rounded border-secondary text-primary focus:ring-primary/20 w-4 h-4 cursor-pointer"
+                                                     checked={selectableSources.length > 0 && selectableSources.every(s => selectedIds.includes(s.db_id))}
+                                                     onChange={(e) => {
+                                                         if (e.target.checked) {
+                                                             setSelectedIds(selectableSources.map(s => s.db_id));
+                                                         } else {
+                                                             setSelectedIds([]);
+                                                         }
+                                                     }}
+                                                 />
+                                                 全选未丢弃
+                                             </label>
+                                             {hasSelectedBatchActions && (
+                                                 <>
+                                                     <div className="w-px h-5 bg-border-hairline/60"></div>
+                                                     
+                                                     <div className="flex gap-2">
+                                                         {publishableIds.length > 0 && (
+                                                             <button 
+                                                                 className="px-3.5 py-1.5 bg-primary hover:bg-primary-container text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
+                                                                 disabled={batchPublishing || batchDepublishing || batchDeleting} 
+                                                                 onClick={doBatchPublish}
+                                                             >
+                                                                 {batchPublishing ? "云同步中..." : `🚀 批量发布 (${publishableIds.length})`}
+                                                             </button>
+                                                         )}
+                                                         {depublishableIds.length > 0 && (
+                                                             <button 
+                                                                 className="px-3.5 py-1.5 bg-warning hover:bg-warning/80 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
+                                                                 disabled={batchPublishing || batchDepublishing || batchDeleting} 
+                                                                 onClick={doBatchDepublish}
+                                                             >
+                                                                 {batchDepublishing ? "云同步中..." : `⚠️ 批量下架 (${depublishableIds.length})`}
+                                                             </button>
+                                                         )}
+                                                         {deletableIds.length > 0 && (
+                                                             <button 
+                                                                 className="px-3.5 py-1.5 bg-error hover:bg-error/85 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
+                                                                 disabled={batchPublishing || batchDepublishing || batchDeleting} 
+                                                                 onClick={doBatchDelete}
+                                                             >
+                                                                 {batchDeleting ? "云注销中..." : `🗑️ 批量删除 (${deletableIds.length})`}
+                                                             </button>
+                                                         )}
+                                                     </div>
+                                                 </>
+                                             )}
+                                         </div>
+                                     )}
+                                 </div>
+                                 <div className="w-full flex justify-end">
+                                     <span className="text-[11px] text-secondary">
+                                         当前结果固定按预估纯利从高到低排序，渠道筛选仅影响当前展示范围。
+                                     </span>
+                                 </div>
                              </header>
 
                              {/* 货源列表卡片 */}
                              <div className="space-y-4">
-                                 {paginatedSources.map((src, i) => { 
-                                     const marginVal = (selectedItem.xianyu_item?.price - src.min_price - 20).toFixed(2); 
-                                     const isDropped = !!src.drop_reason;
-                                     const isChecked = selectedIds.includes(src.db_id);
-                                     return (
-                                         <div 
-                                             className={`bg-surface-container-lowest border rounded-xl p-4 ambient-shadow flex justify-between items-center relative overflow-hidden group ${
-                                                 isDropped ? 'border-dashed border-outline-variant/60 opacity-60 bg-surface-container-low' : 'border-border-hairline hover:border-primary transition-colors'
-                                             }`} 
-                                             key={i}
-                                         >
-                                             <div className="flex gap-4 items-center flex-1 min-w-0">
-                                                 {!isDropped && (
-                                                     <input 
-                                                         type="checkbox" 
-                                                         className="rounded border-secondary text-primary focus:ring-primary/20 w-4 h-4 cursor-pointer shrink-0"
-                                                         checked={isChecked}
-                                                         onChange={(e) => {
-                                                             if (e.target.checked) {
-                                                                 setSelectedIds(prev => [...prev, src.db_id]);
-                                                             } else {
-                                                                 setSelectedIds(prev => prev.filter(id => id !== src.db_id));
-                                                             }
-                                                         }}
-                                                     />
-                                                 )}
-                                                 {src.images && src.images.length > 0 ? (
-                                                     <img 
-                                                         src={src.images[0]} 
-                                                         className="w-16 h-16 rounded-lg object-cover border border-border-hairline shrink-0" 
-                                                         referrerPolicy="no-referrer" 
-                                                     />
-                                                 ) : (
-                                                     <div className="w-16 h-16 rounded-lg bg-surface-container border border-border-hairline shrink-0 flex items-center justify-center text-secondary text-xs">无图</div>
-                                                 )}
-                                                 
-                                                 <div className="flex-1 min-w-0">
-                                                     <a 
-                                                         href={src.url} 
-                                                         target="_blank" 
-                                                         className={`font-semibold text-on-surface block text-sm leading-snug ${isDropped ? 'line-through text-secondary' : 'hover:text-primary transition-colors'}`}
-                                                     >
-                                                         {src.title}
-                                                     </a>
-                                                     <div className="flex gap-3 items-center mt-2.5 text-xs text-secondary">
-                                                         <span>{src.sku_count > 0 ? `${src.sku_count} 个多属性 SKU 规格` : '一口价商品'}</span>
-                                                         <span className="w-1.5 h-1.5 rounded-full bg-border-hairline"></span>
-                                                         <span className="font-mono bg-surface-container px-2 py-0.5 rounded text-[10px]">ID: {src.db_id}</span>
+                                {resolvedChannelGroups.map(group => (
+                                     <div key={`channel-group-${group.channel_id}`} className="space-y-3">
+                                         <div className="flex flex-wrap items-center gap-2 px-1">
+                                             <span className="font-sans text-xs font-bold text-on-surface">
+                                                 {group.channel_label || group.channel_id}
+                                             </span>
+                                             <span className="px-2 py-0.5 rounded-full bg-surface-container text-secondary border border-border-hairline text-[10px] font-semibold">
+                                                 {group.source_count} 条货源
+                                             </span>
+                                             {group.account_labels.map(accountLabel => (
+                                                 <span
+                                                     key={`${group.channel_id}-${accountLabel}`}
+                                                     className="px-2 py-0.5 rounded-full bg-surface-container-low text-secondary border border-border-hairline text-[10px]"
+                                                 >
+                                                     {accountLabel}
+                                                 </span>
+                                             ))}
+                                             {group.account_labels.length === 0 && (
+                                                 <span className="px-2 py-0.5 rounded-full bg-warning/8 text-warning border border-warning/20 text-[10px]">
+                                                     历史资产未记录账号快照
+                                                 </span>
+                                             )}
+                                         </div>
+
+                                         {(() => {
+                                             const filterSummary = summarizeChannelFilterSnapshot(group.source_filter_snapshot);
+                                             if (
+                                                 filterSummary.configured.length === 0 &&
+                                                 filterSummary.applied.length === 0 &&
+                                                 filterSummary.unapplied.length === 0
+                                             ) {
+                                                 return null;
+                                             }
+                                             return (
+                                                 <div className="px-1 flex flex-wrap items-center gap-2">
+                                                     {filterSummary.configured.length > 0 && (
+                                                         <div className="flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">已配置</span>
+                                                             {filterSummary.configured.map(filterKey => (
+                                                                 <span
+                                                                     key={`${group.channel_id}-configured-${filterKey}`}
+                                                                     className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px]"
+                                                                 >
+                                                                     {getChannelFilterLabel(filterKey)}
+                                                                 </span>
+                                                             ))}
+                                                         </div>
+                                                     )}
+                                                     {filterSummary.queryInjected.length > 0 && (
+                                                         <div className="flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">已注入待验证</span>
+                                                             {filterSummary.queryInjected.map(filterKey => (
+                                                                 <span
+                                                                     key={`${group.channel_id}-query-injected-${filterKey}`}
+                                                                     className="px-2 py-0.5 rounded-full bg-secondary/10 text-secondary border border-border-hairline text-[10px]"
+                                                                 >
+                                                                     {getChannelFilterLabel(filterKey)}
+                                                                 </span>
+                                                             ))}
+                                                         </div>
+                                                     )}
+                                                     {filterSummary.applied.length > 0 && (
+                                                         <div className="flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">已生效</span>
+                                                             {filterSummary.applied.map(filterKey => (
+                                                                 <span
+                                                                     key={`${group.channel_id}-applied-${filterKey}`}
+                                                                     className="px-2 py-0.5 rounded-full bg-success/8 text-success border border-success/20 text-[10px]"
+                                                                 >
+                                                                     {getChannelFilterLabel(filterKey)}
+                                                                 </span>
+                                                             ))}
+                                                         </div>
+                                                     )}
+                                                     {filterSummary.unapplied.length > 0 && (
+                                                         <div className="flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">待映射</span>
+                                                             {filterSummary.unapplied.map(filterKey => (
+                                                                 <span
+                                                                     key={`${group.channel_id}-unapplied-${filterKey}`}
+                                                                     className="px-2 py-0.5 rounded-full bg-warning/8 text-warning border border-warning/20 text-[10px]"
+                                                                 >
+                                                                     {getChannelFilterLabel(filterKey)}
+                                                                 </span>
+                                                             ))}
+                                                         </div>
+                                                     )}
+                                                     {filterSummary.mappingStage === 'snapshot_only' && !filterSummary.mappingNotes && (
+                                                         <span className="text-[10px] text-secondary">
+                                                             当前仅完成配置快照透传，真实搜索参数映射仍在继续接入。
+                                                         </span>
+                                                     )}
+                                                     {filterSummary.mappingNotes && (
+                                                         <span className="text-[10px] text-secondary">
+                                                             {filterSummary.mappingNotes}
+                                                         </span>
+                                                     )}
+                                                     {filterSummary.applied.length > 0 && (
+                                                         <div className="w-full flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">命中参数</span>
+                                                             {filterSummary.applied.map((filterKey) => {
+                                                                 const detailText = formatQueryVerificationDetail(
+                                                                     filterSummary.queryVerificationDetails?.[filterKey]
+                                                                 );
+                                                                 if (!detailText) {
+                                                                     return null;
+                                                                 }
+                                                                 return (
+                                                                     <span
+                                                                         key={`${group.channel_id}-applied-detail-${filterKey}`}
+                                                                         className="px-2 py-0.5 rounded-full bg-success/6 text-success border border-success/15 text-[10px]"
+                                                                     >
+                                                                         {getChannelFilterLabel(filterKey)}: {detailText}
+                                                                     </span>
+                                                                 );
+                                                             })}
+                                                         </div>
+                                                     )}
+                                                     {filterSummary.queryInjected.length > 0 && (
+                                                         <div className="w-full flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">待验证线索</span>
+                                                             {filterSummary.queryInjected.map((filterKey) => {
+                                                                 const detailText = formatQueryVerificationDetail(
+                                                                     filterSummary.queryVerificationDetails?.[filterKey]
+                                                                 );
+                                                                 const reasonText = getFilterStatusReasonText(
+                                                                     filterSummary.filterStatusMap?.[filterKey]?.reason
+                                                                 );
+                                                                 if (!detailText) {
+                                                                     return (
+                                                                         <span
+                                                                             key={`${group.channel_id}-pending-detail-${filterKey}`}
+                                                                             className="px-2 py-0.5 rounded-full bg-secondary/8 text-secondary border border-border-hairline text-[10px]"
+                                                                         >
+                                                                             {getChannelFilterLabel(filterKey)}{reasonText ? `: ${reasonText}` : ''}
+                                                                         </span>
+                                                                     );
+                                                                 }
+                                                                 return (
+                                                                     <span
+                                                                         key={`${group.channel_id}-pending-detail-${filterKey}`}
+                                                                         className="px-2 py-0.5 rounded-full bg-secondary/8 text-secondary border border-border-hairline text-[10px]"
+                                                                     >
+                                                                         {getChannelFilterLabel(filterKey)}: {detailText}{reasonText ? ` · ${reasonText}` : ''}
+                                                                     </span>
+                                                                 );
+                                                             })}
+                                                         </div>
+                                                     )}
+                                                     {filterSummary.unapplied.length > 0 && (
+                                                         <div className="w-full flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">未应用原因</span>
+                                                             {filterSummary.unapplied.map((filterKey) => {
+                                                                 const filterMeta = filterSummary.filterStatusMap?.[filterKey];
+                                                                 const reasonText = getFilterStatusReasonText(
+                                                                     filterMeta?.reason
+                                                                 );
+                                                                 const detailText = formatQueryVerificationDetail(
+                                                                     filterSummary.queryVerificationDetails?.[filterKey]
+                                                                 );
+                                                                 const hintText = formatFilterMappingHint(filterMeta, filterKey);
+                                                                 return (
+                                                                     <span
+                                                                         key={`${group.channel_id}-unapplied-reason-${filterKey}`}
+                                                                         className="px-2 py-0.5 rounded-full bg-warning/6 text-warning border border-warning/15 text-[10px]"
+                                                                     >
+                                                                         {getChannelFilterLabel(filterKey)}
+                                                                         {detailText ? `: ${detailText}` : ''}
+                                                                         {reasonText ? `${detailText ? ' · ' : ': '}${reasonText}` : ''}
+                                                                         {hintText ? ` · ${hintText}` : ''}
+                                                                     </span>
+                                                                 );
+                                                             })}
+                                                         </div>
+                                                     )}
+                                                 </div>
+                                             );
+                                         })()}
+
+                                         {group.sources.map((src, i) => { 
+                                             const marginVal = (selectedItem.xianyu_item?.price - src.min_price - 20).toFixed(2); 
+                                             const isDropped = !!src.drop_reason;
+                                             const isChecked = selectedIds.includes(src.db_id);
+                                             const sourceMetrics = [
+                                                 src.pickup_48h_text,
+                                                 src.pickup_24h_text,
+                                                 src.month_dispatch_text,
+                                                 src.seven_day_dispatch_text,
+                                                 src.listing_count_text,
+                                                 src.distributor_count_text,
+                                                 src.waybill_support_text,
+                                                 src.settled_years_text,
+                                             ].filter(Boolean);
+                                             return (
+                                                 <div 
+                                                     className={`bg-surface-container-lowest border rounded-xl p-4 ambient-shadow flex justify-between items-center relative overflow-hidden group ${
+                                                         isDropped ? 'border-dashed border-outline-variant/60 opacity-60 bg-surface-container-low' : 'border-border-hairline hover:border-primary transition-colors'
+                                                     }`} 
+                                                     key={`${group.channel_id}-${src.db_id}-${i}`}
+                                                 >
+                                                     <div className="flex gap-4 items-center flex-1 min-w-0">
+                                                         {!isDropped && (
+                                                             <input 
+                                                                 type="checkbox" 
+                                                                 className="rounded border-secondary text-primary focus:ring-primary/20 w-4 h-4 cursor-pointer shrink-0"
+                                                                 checked={isChecked}
+                                                                 onChange={(e) => {
+                                                                     if (e.target.checked) {
+                                                                         setSelectedIds(prev => [...prev, src.db_id]);
+                                                                     } else {
+                                                                         setSelectedIds(prev => prev.filter(id => id !== src.db_id));
+                                                                     }
+                                                                 }}
+                                                             />
+                                                         )}
+                                                         {src.images && src.images.length > 0 ? (
+                                                             <img 
+                                                                 src={src.images[0]} 
+                                                                 className="w-16 h-16 rounded-lg object-cover border border-border-hairline shrink-0" 
+                                                                 referrerPolicy="no-referrer" 
+                                                             />
+                                                         ) : (
+                                                             <div className="w-16 h-16 rounded-lg bg-surface-container border border-border-hairline shrink-0 flex items-center justify-center text-secondary text-xs">无图</div>
+                                                         )}
+                                                         
+                                                         <div className="flex-1 min-w-0">
+                                                             <a 
+                                                                 href={src.url} 
+                                                                 target="_blank" 
+                                                                 className={`font-semibold text-on-surface block text-sm leading-snug ${isDropped ? 'line-through text-secondary' : 'hover:text-primary transition-colors'}`}
+                                                             >
+                                                                 {src.title}
+                                                             </a>
+                                                             <div className="flex flex-wrap gap-3 items-center mt-2.5 text-xs text-secondary">
+                                                                 <span>{src.sku_count > 0 ? `${src.sku_count} 个多属性 SKU 规格` : '一口价商品'}</span>
+                                                                 <span className="w-1.5 h-1.5 rounded-full bg-border-hairline"></span>
+                                                                 <span className="font-mono bg-surface-container px-2 py-0.5 rounded text-[10px]">ID: {src.db_id}</span>
+                                                                 {src.source_account_label && (
+                                                                     <>
+                                                                         <span className="w-1.5 h-1.5 rounded-full bg-border-hairline"></span>
+                                                                         <span>{src.source_account_label}</span>
+                                                                     </>
+                                                                 )}
+                                                                 {src.company_name && (
+                                                                     <>
+                                                                         <span className="w-1.5 h-1.5 rounded-full bg-border-hairline"></span>
+                                                                         <span className="truncate max-w-[240px]" title={src.company_name}>商家: {src.company_name}</span>
+                                                                     </>
+                                                                 )}
+                                                             </div>
+                                                             {sourceMetrics.length > 0 && (
+                                                                 <div className="flex flex-wrap gap-2 mt-2">
+                                                                     {sourceMetrics.map(metric => {
+                                                                         const isPositiveMetric = metric.includes('支持') || metric.includes('揽收') || metric.includes('代发') || metric.includes('铺货数') || metric.includes('分销商数') || metric.includes('入驻');
+                                                                         const metricClass = metric.includes('不支持')
+                                                                             ? 'bg-error/8 text-error border-error/20'
+                                                                             : isPositiveMetric
+                                                                                 ? 'bg-success/8 text-success border-success/20'
+                                                                                 : 'bg-surface-container text-secondary border-border-hairline';
+                                                                         return (
+                                                                             <span
+                                                                                 key={`${src.db_id}-${metric}`}
+                                                                                 className={`px-2 py-0.5 rounded-full border text-[11px] leading-5 ${metricClass}`}
+                                                                             >
+                                                                                 {metric}
+                                                                             </span>
+                                                                         );
+                                                                     })}
+                                                                 </div>
+                                                             )}
+                                                         </div>
+                                                     </div>
+
+                                                     <div className="text-right pl-6 shrink-0 min-w-[200px] flex flex-col justify-between h-16">
+                                                         {isDropped ? (
+                                                             <div className="flex justify-end items-center h-full">
+                                                                 <span className="px-2.5 py-1 rounded bg-error/10 text-error border border-error/20 font-sans text-xs font-bold">
+                                                                     已过滤丢弃: {src.drop_reason}
+                                                                 </span>
+                                                             </div>
+                                                         ) : (
+                                                             <>
+                                                                 <div className="flex justify-end gap-3 items-baseline">
+                                                                     <span className="font-mono text-lg font-black text-on-surface">¥{src.min_price}</span>
+                                                                     <span className={`text-xs font-bold ${parseFloat(marginVal) > 50 ? 'text-success' : 'text-error'}`}>
+                                                                         预估纯利: ¥{marginVal}
+                                                                     </span>
+                                                                 </div>
+                                                                 
+                                                                 <PublishButton 
+                                                                     src={src} 
+                                                                     xianyuPrice={selectedItem.xianyu_item?.price} 
+                                                                     onStatusLoaded={handleStatusLoaded} 
+                                                                     batchStatus={batchStatusMap[src.db_id]}
+                                                                     batchResult={batchResultMap[src.db_id]}
+                                                                 />
+                                                             </>
+                                                         )}
                                                      </div>
                                                  </div>
-                                             </div>
-
-                                             <div className="text-right pl-6 shrink-0 min-w-[200px] flex flex-col justify-between h-16">
-                                                 {isDropped ? (
-                                                     <div className="flex justify-end items-center h-full">
-                                                         <span className="px-2.5 py-1 rounded bg-error/10 text-error border border-error/20 font-sans text-xs font-bold">
-                                                             已过滤丢弃: {src.drop_reason}
-                                                         </span>
-                                                     </div>
-                                                 ) : (
-                                                     <>
-                                                         <div className="flex justify-end gap-3 items-baseline">
-                                                             <span className="font-mono text-lg font-black text-on-surface">¥{src.min_price}</span>
-                                                             <span className={`text-xs font-bold ${parseFloat(marginVal) > 50 ? 'text-success' : 'text-error'}`}>
-                                                                 预估纯利: ¥{marginVal}
-                                                             </span>
-                                                         </div>
-                                                         
-                                                         <PublishButton 
-                                                             src={src} 
-                                                             xianyuPrice={selectedItem.xianyu_item?.price} 
-                                                             onStatusLoaded={handleStatusLoaded} 
-                                                             batchStatus={batchStatusMap[src.db_id]}
-                                                             batchResult={batchResultMap[src.db_id]}
-                                                         />
-                                                     </>
-                                                 )}
-                                             </div>
-                                         </div>
-                                     );
-                                 })}
+                                             );
+                                         })}
+                                     </div>
+                                 ))}
 
                                  {selectedItem.sources?.length === 0 && (
                                      <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-12 text-center text-xs text-secondary">
-                                         该爆款商品暂未匹配到对应的 1688 采购货源。
+                                         该爆款商品暂未匹配到对应的货源。
                                      </div>
                                  )}
 
-                                 {/* 分页 */}
-                                 {totalPages > 1 && (
-                                     <div className="flex justify-center items-center gap-1.5 mt-8">
-                                         <button 
-                                             className="w-8 h-8 flex items-center justify-center rounded border border-border-hairline text-secondary hover:bg-surface-container-low transition-colors disabled:opacity-40" 
-                                             disabled={sourcePage <= 1} 
-                                             onClick={() => setSourcePage(p => p - 1)}
-                                         >
-                                             <span className="material-symbols-outlined text-[18px]">chevron_left</span>
-                                         </button>
-                                         <span className="font-mono text-xs font-bold px-3 py-1 bg-primary/10 border border-primary/20 text-primary rounded">
-                                             第 {sourcePage} / {totalPages} 页
-                                         </span>
-                                         <button 
-                                             className="w-8 h-8 flex items-center justify-center rounded border border-border-hairline text-secondary hover:bg-surface-container-low transition-colors disabled:opacity-40" 
-                                             disabled={sourcePage >= totalPages} 
-                                             onClick={() => setSourcePage(p => p + 1)}
-                                         >
-                                             <span className="material-symbols-outlined text-[18px]">chevron_right</span>
-                                         </button>
-                                     </div>
-                                 )}
-                             </div>
+                            </div>
                          </div>
                      </div> 
                 ) : view === "published" ? <PublishedManager hideHeader={true} /> : null

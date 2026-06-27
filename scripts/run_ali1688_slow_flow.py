@@ -7,8 +7,15 @@ from playwright.async_api import async_playwright
 BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR / "src"))
 from xianyu_tools.config import settings
+from xianyu_tools.channel_search_filters import get_ali1688_channel_search_filter_meta
 from xianyu_tools.logging_util import get_unified_logger
 from xianyu_tools.source_adapter import Ali1688SourceAdapter
+from xianyu_tools.source_adapter.ali1688 import (
+    apply_ali1688_query_filters_to_url,
+    build_ali1688_query_filter_expectation,
+    get_ali1688_query_mapped_filter_keys,
+    verify_ali1688_query_filters_from_url,
+)
 from xianyu_tools.xianyu_adapter.browser_transport import (
     default_desktop_context_options, default_launch_args
 )
@@ -251,19 +258,419 @@ def _parse_dispatch_count(val_str: str) -> int:
     return int(num)
 
 
+def _normalize_metric_text(text: str) -> str:
+    if not text:
+        return ""
+    normalized = re.sub(r"<[^>]+>", " ", text)
+    normalized = html.unescape(normalized)
+    normalized = normalized.replace("\xa0", " ")
+    normalized = re.sub(r"\s+", " ", normalized)
+    return normalized.strip()
+
+
+def _load_channel_filter_snapshot(snapshot_file: str | None) -> dict:
+    if not snapshot_file:
+        return {}
+    try:
+        path = Path(snapshot_file)
+        if not path.exists():
+            return {}
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return settings.normalize_channel_search_filter_snapshot(raw)
+
+
+def _build_runtime_filter_snapshot(configured_snapshot: dict | None) -> dict:
+    configured_snapshot = configured_snapshot or {}
+    configured_filters = configured_snapshot.get("filters")
+    if not isinstance(configured_filters, dict):
+        configured_filters = {}
+    configured_filters = {str(key): bool(val) for key, val in configured_filters.items()}
+    enabled_filter_keys = [key for key, enabled in configured_filters.items() if enabled]
+    applied_filters: dict[str, bool] = {}
+    applied_filter_keys: list[str] = []
+    unapplied_filter_keys = list(enabled_filter_keys)
+    unapplied_reason_map = {
+        key: "runtime_mapping_not_implemented_yet"
+        for key in unapplied_filter_keys
+    }
+    filter_status_map = {
+        key: {
+            "configured": True,
+            "status": "unapplied",
+            "reason": unapplied_reason_map.get(key, ""),
+            "verification_detail": (
+                build_ali1688_query_filter_expectation(key)
+                if key in get_ali1688_query_mapped_filter_keys()
+                else {}
+            ),
+        }
+        for key in enabled_filter_keys
+    }
+    return settings.normalize_channel_search_filter_snapshot({
+        "channel_id": str(configured_snapshot.get("channel_id") or ""),
+        "channel_type": str(configured_snapshot.get("channel_type") or ""),
+        "filters": dict(configured_filters),
+        "supported_filter_keys": list(configured_snapshot.get("supported_filter_keys") or configured_filters.keys()),
+        "configured_filters": configured_filters,
+        "configured_enabled_filter_keys": enabled_filter_keys,
+        "query_injected_filter_keys": [],
+        "query_injected_query_params": {},
+        "query_verification_details": {},
+        "applied_filters": applied_filters,
+        "applied_filter_keys": applied_filter_keys,
+        "unapplied_filters": {key: True for key in unapplied_filter_keys},
+        "unapplied_filter_keys": unapplied_filter_keys,
+        "unapplied_reason_map": unapplied_reason_map,
+        "filter_status_map": filter_status_map,
+        "mapping_stage": "snapshot_only",
+        "mapping_notes": "当前仅记录配置快照，尚未将筛选项真实映射到 1688 搜索行为。",
+    })
+
+
+def _normalize_probe_text(text: str | None) -> str:
+    normalized = html.unescape(str(text or ""))
+    normalized = re.sub(r"<[^>]+>", " ", normalized)
+    normalized = normalized.replace("\xa0", " ")
+    normalized = re.sub(r"\s+", "", normalized)
+    return normalized
+
+
+def _mark_runtime_snapshot_non_query_probe(
+    runtime_snapshot: dict,
+    *,
+    observed_page_text: str | None,
+    result_url: str | None = None,
+) -> dict:
+    configured_filters = dict(runtime_snapshot.get("configured_filters") or {})
+    configured_enabled_filter_keys = list(runtime_snapshot.get("configured_enabled_filter_keys") or [])
+    filter_status_map = {
+        str(key): dict(value or {})
+        for key, value in dict(runtime_snapshot.get("filter_status_map") or {}).items()
+    }
+    query_keys = set(get_ali1688_query_mapped_filter_keys())
+    normalized_text = _normalize_probe_text(observed_page_text)
+    if not configured_enabled_filter_keys or not normalized_text:
+        return settings.normalize_channel_search_filter_snapshot({
+            **runtime_snapshot,
+            "filter_status_map": filter_status_map,
+        })
+
+    for key in configured_enabled_filter_keys:
+        if key in query_keys:
+            continue
+        current_meta = dict(filter_status_map.get(key) or {})
+        verification_detail = dict(current_meta.get("verification_detail") or {})
+        shared_meta = get_ali1688_channel_search_filter_meta(key)
+        probe_terms = [
+            str(item).strip()
+            for item in shared_meta.get("probe_terms") or []
+            if str(item).strip()
+        ]
+        matched_terms = [term for term in probe_terms if _normalize_probe_text(term) and _normalize_probe_text(term) in normalized_text]
+        verification_detail.update({
+            "probe_mode": "html_text_scan",
+            "probe_terms": probe_terms,
+            "matched_terms": matched_terms,
+            "text_visible": bool(matched_terms),
+        })
+        if result_url:
+            verification_detail["result_url"] = str(result_url)
+        semantic_dependencies = [
+            str(item).strip()
+            for item in current_meta.get("semantic_dependencies") or shared_meta.get("semantic_dependencies") or []
+            if str(item).strip()
+        ]
+        if semantic_dependencies:
+            verification_detail["semantic_dependencies"] = list(semantic_dependencies)
+            dependencies_enabled = all(bool(configured_filters.get(dep, False)) for dep in semantic_dependencies)
+            verification_detail["dependencies_enabled"] = dependencies_enabled
+            if (
+                current_meta.get("status") == "unapplied"
+                and matched_terms
+                and dependencies_enabled
+            ):
+                current_meta["reason"] = "snapshot_only_until_semantics_confirmed"
+                current_meta["mapping_stage"] = "mixed"
+        current_meta["verification_detail"] = verification_detail
+        filter_status_map[key] = current_meta
+
+    return settings.normalize_channel_search_filter_snapshot({
+        **runtime_snapshot,
+        "filter_status_map": filter_status_map,
+    })
+
+
+def _mark_runtime_snapshot_query_injected(
+    runtime_snapshot: dict,
+    *,
+    injected_filter_keys: list[str],
+    verified_filter_keys: list[str] | None = None,
+    applied_query_params: dict[str, str] | None,
+    verification_details: dict[str, dict] | None = None,
+    verification_mode: str | None = None,
+    result_url: str | None = None,
+) -> dict:
+    configured_filters = dict(runtime_snapshot.get("configured_filters") or {})
+    configured_enabled_filter_keys = list(runtime_snapshot.get("configured_enabled_filter_keys") or [])
+    query_injected_filter_keys = [
+        key for key in injected_filter_keys
+        if key in configured_enabled_filter_keys
+    ]
+    verified_filter_keys = [
+        key for key in (verified_filter_keys or [])
+        if key in query_injected_filter_keys
+    ]
+    unapplied_filter_keys = [
+        key for key in configured_enabled_filter_keys
+        if key not in verified_filter_keys
+    ]
+    query_mapped_keys = set(get_ali1688_query_mapped_filter_keys())
+    unapplied_reason_map = {}
+    for key in unapplied_filter_keys:
+        if key in query_injected_filter_keys and key not in verified_filter_keys:
+            unapplied_reason_map[key] = "query_filter_injected_pending_verification"
+        elif key in query_mapped_keys:
+            unapplied_reason_map[key] = "query_filter_not_applied_in_runtime"
+        else:
+            unapplied_reason_map[key] = "runtime_mapping_not_implemented_yet"
+    filter_status_map: dict[str, dict] = {}
+    for key in configured_enabled_filter_keys:
+        base_detail = (
+            build_ali1688_query_filter_expectation(key)
+            if key in query_mapped_keys
+            else {}
+        )
+        detail = {
+            **base_detail,
+            **dict((verification_details or {}).get(key) or {}),
+        }
+        if key in query_injected_filter_keys:
+            if verification_mode:
+                detail["verification_mode"] = str(verification_mode)
+            if result_url:
+                detail["result_url"] = str(result_url)
+        if key in verified_filter_keys:
+            filter_status_map[key] = {
+                "configured": True,
+                "mapping_stage": "query_mapped",
+                "status": "applied",
+                "reason": "",
+                "verification_detail": detail,
+            }
+        elif key in query_injected_filter_keys:
+            filter_status_map[key] = {
+                "configured": True,
+                "mapping_stage": "query_candidate",
+                "status": "query_injected_pending_verification",
+                "reason": unapplied_reason_map.get(key, ""),
+                "verification_detail": detail,
+            }
+        else:
+            filter_status_map[key] = {
+                "configured": True,
+                "status": "unapplied",
+                "reason": unapplied_reason_map.get(key, ""),
+                "verification_detail": detail,
+            }
+    if verified_filter_keys and len(verified_filter_keys) == len(query_injected_filter_keys):
+        mapping_stage = "query_mapped"
+        mapping_notes = "query 候选项已注入结果页 URL，并在最终结果 URL 中观察到对应筛选参数。"
+    elif query_injected_filter_keys:
+        mapping_stage = "mixed"
+        if verified_filter_keys:
+            mapping_notes = "部分 query 候选项已在最终结果 URL 中得到验证，其余项仍处于已注入待验证状态。"
+        else:
+            mapping_notes = "部分 query 候选项已拼入结果页 URL，但尚未完成结果级验证，暂不标记为已生效。"
+    else:
+        mapping_stage = "snapshot_only"
+        mapping_notes = "当前仅记录配置快照，尚未将筛选项真实映射到 1688 搜索行为。"
+    return settings.normalize_channel_search_filter_snapshot({
+        **runtime_snapshot,
+        "filters": dict(configured_filters),
+        "query_injected_filter_keys": list(query_injected_filter_keys),
+        "query_injected_query_params": dict(applied_query_params or {}),
+        "query_verification_details": dict(verification_details or {}),
+        "applied_filters": {key: True for key in verified_filter_keys},
+        "applied_filter_keys": list(verified_filter_keys),
+        "unapplied_filters": {key: True for key in unapplied_filter_keys},
+        "unapplied_filter_keys": unapplied_filter_keys,
+        "unapplied_reason_map": unapplied_reason_map,
+        "filter_status_map": filter_status_map,
+        "mapping_stage": mapping_stage,
+        "mapping_notes": mapping_notes,
+        "applied_query_params": dict(applied_query_params or {}),
+    })
+
+
+def _mark_runtime_snapshot_query_navigation_failed(
+    runtime_snapshot: dict,
+    *,
+    attempted_filter_keys: list[str],
+    attempted_query_params: dict[str, str] | None,
+    attempted_result_url: str | None,
+) -> dict:
+    configured_filters = dict(runtime_snapshot.get("configured_filters") or {})
+    configured_enabled_filter_keys = list(runtime_snapshot.get("configured_enabled_filter_keys") or [])
+    attempted_filter_keys = [
+        key for key in attempted_filter_keys
+        if key in configured_enabled_filter_keys
+    ]
+    query_mapped_keys = set(get_ali1688_query_mapped_filter_keys())
+    unapplied_filter_keys = list(configured_enabled_filter_keys)
+    unapplied_reason_map: dict[str, str] = {}
+    filter_status_map: dict[str, dict] = {}
+    for key in configured_enabled_filter_keys:
+        base_detail = (
+            build_ali1688_query_filter_expectation(key)
+            if key in query_mapped_keys
+            else {}
+        )
+        detail = dict(base_detail)
+        if key in attempted_filter_keys:
+            detail["verification_mode"] = "navigation_failed"
+            if attempted_result_url:
+                detail["attempted_result_url"] = str(attempted_result_url)
+            if attempted_query_params:
+                detail["attempted_query_params"] = dict(attempted_query_params)
+            reason = "query_filter_navigation_failed"
+            per_filter_stage = "query_candidate"
+        elif key in query_mapped_keys:
+            reason = "query_filter_not_applied_in_runtime"
+            per_filter_stage = "snapshot_only"
+        else:
+            reason = "runtime_mapping_not_implemented_yet"
+            per_filter_stage = "snapshot_only"
+        unapplied_reason_map[key] = reason
+        filter_status_map[key] = {
+            "configured": True,
+            "mapping_stage": per_filter_stage,
+            "status": "unapplied",
+            "reason": reason,
+            "verification_detail": detail,
+        }
+    mapping_stage = "mixed" if attempted_filter_keys else "snapshot_only"
+    mapping_notes = (
+        "已尝试将 query 候选项注入结果页 URL，但跳转失败，暂未进入结果级验证。"
+        if attempted_filter_keys
+        else "当前仅记录配置快照，尚未将筛选项真实映射到 1688 搜索行为。"
+    )
+    return settings.normalize_channel_search_filter_snapshot({
+        **runtime_snapshot,
+        "filters": dict(configured_filters),
+        "query_injected_filter_keys": [],
+        "query_injected_query_params": dict(attempted_query_params or {}),
+        "query_verification_details": {},
+        "applied_filters": {},
+        "applied_filter_keys": [],
+        "unapplied_filters": {key: True for key in unapplied_filter_keys},
+        "unapplied_filter_keys": list(unapplied_filter_keys),
+        "unapplied_reason_map": dict(unapplied_reason_map),
+        "filter_status_map": filter_status_map,
+        "mapping_stage": mapping_stage,
+        "mapping_notes": mapping_notes,
+        "applied_query_params": dict(attempted_query_params or {}),
+    })
+
+
+def _verify_and_mark_runtime_query_snapshot(
+    runtime_snapshot: dict,
+    *,
+    result_url: str,
+    injected_filter_keys: list[str],
+    applied_query_params: dict[str, str] | None,
+    logger=None,
+    verification_mode: str | None = None,
+) -> tuple[dict, list[str], dict[str, str], dict[str, dict]]:
+    verified_query_filter_keys, verified_query_params, query_verification_details = verify_ali1688_query_filters_from_url(
+        result_url,
+        injected_filter_keys,
+    )
+    if logger:
+        logger.info(
+            "[Search] Query filter verification result: %s",
+            {
+                "verified_filter_keys": verified_query_filter_keys,
+                "verification_details": query_verification_details,
+                "observed_query_params": verified_query_params,
+                "result_url": result_url,
+            },
+        )
+    next_snapshot = _mark_runtime_snapshot_query_injected(
+        runtime_snapshot,
+        injected_filter_keys=injected_filter_keys,
+        verified_filter_keys=verified_query_filter_keys,
+        applied_query_params=verified_query_params or applied_query_params,
+        verification_details=query_verification_details,
+        verification_mode=verification_mode,
+        result_url=result_url,
+    )
+    return next_snapshot, verified_query_filter_keys, verified_query_params, query_verification_details
+
+
+def _extract_metric_text(text: str, patterns: list[str]) -> str:
+    if not text:
+        return ""
+    for pattern in patterns:
+        match = re.search(pattern, text, re.IGNORECASE)
+        if match:
+            return re.sub(r"\s+", "", match.group(1).strip())
+    return ""
+
+
 def _extract_dispatch_metrics_from_text(text: str) -> dict:
+    normalized = _normalize_metric_text(text)
     seven_day = 0
     month = 0
-    if text:
-        match_7 = re.search(r'(?:7天|近7天)代发\s*([\d\.]+(?:万|k|K)?)', text)
+    listing_count = 0
+    distributor_count = 0
+    pickup_48h_text = _extract_metric_text(normalized, [r"(48H揽收\s*\d+%)"])
+    pickup_24h_text = _extract_metric_text(normalized, [r"(24H揽收\s*\d+%)"])
+    month_dispatch_text = _extract_metric_text(normalized, [r"((?:月代发|月成交|月代发量|月\s*代发)\s*[\d\.]+(?:万|k|K|\+|内)?)"])
+    seven_day_dispatch_text = _extract_metric_text(normalized, [r"((?:7天|近7天)代发\s*[\d\.]+(?:万|k|K|\+|内)?)"])
+    listing_count_text = _extract_metric_text(normalized, [r"(铺货数\s*[\d\.]+(?:万|k|K|\+|内)?)"])
+    distributor_count_text = _extract_metric_text(normalized, [r"(分销商数\s*[\d\.]+(?:万|k|K|\+|内)?)"])
+    waybill_support_text = _extract_metric_text(normalized, [r"(面单支持|不支持面单)"])
+    settled_years_text = _extract_metric_text(normalized, [r"(入驻\s*\d+\s*年)"])
+    company_name = ""
+    if normalized:
+        company_match = re.search(
+            r"入驻\s*\d+\s*年\s*([^\s]{2,48}?(?:公司|商行|经营部|科技|电子商务|贸易|工厂|厂|企业|中心|合作社|工作室))",
+            normalized,
+            re.IGNORECASE,
+        )
+        if company_match:
+            company_name = company_match.group(1).strip()
+
+        match_7 = re.search(r'(?:7天|近7天)代发\s*([\d\.]+(?:万|k|K)?(?:\+|内)?)', normalized)
         if match_7:
             seven_day = _parse_dispatch_count(match_7.group(1))
-        match_m = re.search(r'(?:月代发|月成交|月代发量|月\s*代发)\s*([\d\.]+(?:万|k|K)?)', text)
+        match_m = re.search(r'(?:月代发|月成交|月代发量|月\s*代发)\s*([\d\.]+(?:万|k|K)?(?:\+|内)?)', normalized)
         if match_m:
             month = _parse_dispatch_count(match_m.group(1))
+        match_listing = re.search(r'铺货数\s*([\d\.]+(?:万|k|K)?(?:\+|内)?)', normalized)
+        if match_listing:
+            listing_count = _parse_dispatch_count(match_listing.group(1))
+        match_distributor = re.search(r'分销商数\s*([\d\.]+(?:万|k|K)?(?:\+|内)?)', normalized)
+        if match_distributor:
+            distributor_count = _parse_dispatch_count(match_distributor.group(1))
     return {
+        "pickup_48h_text": pickup_48h_text,
+        "pickup_24h_text": pickup_24h_text,
+        "month_dispatch_text": month_dispatch_text,
+        "seven_day_dispatch_text": seven_day_dispatch_text,
+        "listing_count_text": listing_count_text,
+        "distributor_count_text": distributor_count_text,
+        "waybill_support_text": waybill_support_text,
+        "settled_years_text": settled_years_text,
+        "company_name": company_name,
         "seven_day_dispatch_count": seven_day,
         "month_dispatch_count": month,
+        "listing_count": listing_count,
+        "distributor_count": distributor_count,
     }
 
 
@@ -1196,6 +1603,10 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
 
 
 async def _run(args):
+    configured_filter_snapshot = _load_channel_filter_snapshot(
+        getattr(args, "channel_filter_snapshot_file", None)
+    )
+    runtime_filter_snapshot = _build_runtime_filter_snapshot(configured_filter_snapshot)
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     logger = get_unified_logger("1688Worker", log_file=args.log_file)
@@ -1346,7 +1757,64 @@ async def _run(args):
                 await context.close()
                 return
             await asyncio.sleep(8)
-        
+
+        configured_filters = runtime_filter_snapshot.get("configured_filters") or {}
+        filtered_result_url, applied_query_params, query_applied_filter_keys = apply_ali1688_query_filters_to_url(
+            page.url,
+            configured_filters,
+        )
+        if query_applied_filter_keys:
+            if filtered_result_url != page.url:
+                logger.info(
+                    "[Search] Applying channel query filters to result URL: %s",
+                    {
+                        "applied_filter_keys": query_applied_filter_keys,
+                        "filtered_result_url": filtered_result_url,
+                    },
+                )
+                filter_nav_success = await _ensure_page_navigated_safe(
+                    page,
+                    filtered_result_url,
+                    logger,
+                    timeout=45000,
+                )
+                if filter_nav_success:
+                    await asyncio.sleep(5)
+                    runtime_filter_snapshot, _, _, _ = _verify_and_mark_runtime_query_snapshot(
+                        runtime_filter_snapshot,
+                        result_url=page.url,
+                        injected_filter_keys=query_applied_filter_keys,
+                        applied_query_params=applied_query_params,
+                        logger=logger,
+                        verification_mode="post_navigation_url",
+                    )
+                else:
+                    logger.warning(
+                        "[Search] Failed to navigate to filtered result URL; marking attempted query filters as unapplied."
+                    )
+                    runtime_filter_snapshot = _mark_runtime_snapshot_query_navigation_failed(
+                        runtime_filter_snapshot,
+                        attempted_filter_keys=query_applied_filter_keys,
+                        attempted_query_params=applied_query_params,
+                        attempted_result_url=filtered_result_url,
+                    )
+            else:
+                logger.info(
+                    "[Search] Current result URL already contains requested query filters; verifying in-place.",
+                    extra={
+                        "applied_filter_keys": query_applied_filter_keys,
+                        "result_url": page.url,
+                    },
+                )
+                runtime_filter_snapshot, _, _, _ = _verify_and_mark_runtime_query_snapshot(
+                    runtime_filter_snapshot,
+                    result_url=page.url,
+                    injected_filter_keys=query_applied_filter_keys,
+                    applied_query_params=applied_query_params,
+                    logger=logger,
+                    verification_mode="in_place_url",
+                )
+
         from xianyu_tools.source_adapter.ali1688 import Ali1688CaptchaError, Ali1688PayloadError
         adapter = Ali1688SourceAdapter()
         candidates = []
@@ -1354,6 +1822,11 @@ async def _run(args):
         
         for attempt in range(1, 4):  # 最多尝试 3 次
             html_content = await page.content()
+            runtime_filter_snapshot = _mark_runtime_snapshot_non_query_probe(
+                runtime_filter_snapshot,
+                observed_page_text=html_content,
+                result_url=page.url,
+            )
             try:
                 # 判断是否是验证码页面或惩罚页面
                 if adapter._is_captcha_page(html_content) or "哎呦喂" in html_content or "空空如也" in html_content:
@@ -1402,8 +1875,19 @@ async def _run(args):
                 "title": c.title,
                 "item_url": c.item_url,
                 "price": c.price,
+                "pickup_48h_text": metrics["pickup_48h_text"],
+                "pickup_24h_text": metrics["pickup_24h_text"],
+                "month_dispatch_text": metrics["month_dispatch_text"],
+                "seven_day_dispatch_text": metrics["seven_day_dispatch_text"],
+                "listing_count_text": metrics["listing_count_text"],
+                "distributor_count_text": metrics["distributor_count_text"],
+                "waybill_support_text": metrics["waybill_support_text"],
+                "settled_years_text": metrics["settled_years_text"],
+                "company_name": metrics["company_name"] or c.shop_name or "",
                 "seven_day_dispatch_count": metrics["seven_day_dispatch_count"],
                 "month_dispatch_count": metrics["month_dispatch_count"],
+                "listing_count": metrics["listing_count"],
+                "distributor_count": metrics["distributor_count"],
             })
             
         top_candidates = _top_dispatch_candidates(parsed_candidates, args.detail_top_n)
@@ -1421,10 +1905,24 @@ async def _run(args):
                 "title": c["title"],
                 "item_url": c["item_url"],
                 "min_price": c["price"],
+                "pickup_48h_text": c.get("pickup_48h_text", ""),
+                "pickup_24h_text": c.get("pickup_24h_text", ""),
+                "month_dispatch_text": c.get("month_dispatch_text", ""),
+                "seven_day_dispatch_text": c.get("seven_day_dispatch_text", ""),
+                "listing_count_text": c.get("listing_count_text", ""),
+                "distributor_count_text": c.get("distributor_count_text", ""),
+                "waybill_support_text": c.get("waybill_support_text", ""),
+                "settled_years_text": c.get("settled_years_text", ""),
+                "company_name": c.get("company_name", ""),
+                "seven_day_dispatch_count": c.get("seven_day_dispatch_count", 0),
+                "month_dispatch_count": c.get("month_dispatch_count", 0),
+                "listing_count": c.get("listing_count", 0),
+                "distributor_count": c.get("distributor_count", 0),
                 "sku_count": 0,
                 "status": "pending",
                 "drop_reason": None,
-                "images": []
+                "images": [],
+                "source_filter_snapshot": runtime_filter_snapshot,
             }
 
             res = await _export_sku_from_detail_page(context, item_data, output_dir, i, logger)
@@ -1452,6 +1950,7 @@ def main():
     parser.add_argument("--detail-top-n", type=int, default=10)
     parser.add_argument("--target-keyword", required=False)
     parser.add_argument("--log-file", required=False)
+    parser.add_argument("--channel-filter-snapshot-file", required=False)
     args = parser.parse_args()
     asyncio.run(_run(args))
 

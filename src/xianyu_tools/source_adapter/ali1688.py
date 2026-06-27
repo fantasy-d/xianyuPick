@@ -6,17 +6,19 @@ import time
 from scrapling import Selector
 from dataclasses import dataclass
 from html import unescape
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from xianyu_tools.channel_search_filters import (
+    get_ali1688_query_filter_definitions,
+    get_ali1688_query_mapped_filter_keys as get_shared_ali1688_query_mapped_filter_keys,
+)
 from xianyu_tools.models import RawSourceItem
 
 ALI1688_SEARCH_URL = "https://s.1688.com/selloffer/offer_search.htm"
-ALI1688_FIXED_QUERY_PARAMS = {
-    "filtOfferTags": "1988226,98306,235906",
-    "complexTags": "1001",
+ALI1688_BASE_QUERY_PARAMS = {
     "tags": "386434",
 }
 ALI1688_DEFAULT_HEADERS = {
@@ -58,6 +60,178 @@ class Ali1688Config:
     default_begin_page: int = 1
 
 
+def get_ali1688_query_mapped_filter_keys() -> list[str]:
+    return list(get_shared_ali1688_query_mapped_filter_keys())
+
+
+def get_ali1688_query_filter_definition(filter_key: str) -> dict[str, Any]:
+    meta = get_ali1688_query_filter_definitions().get(str(filter_key)) or {}
+    param_name = str(meta.get("param") or "").strip()
+    values = [
+        str(item).strip()
+        for item in meta.get("values") or []
+        if str(item).strip()
+    ]
+    verify_alias_params = [
+        str(item).strip()
+        for item in meta.get("verify_alias_params") or []
+        if str(item).strip()
+    ]
+    if param_name and not verify_alias_params:
+        verify_alias_params = [param_name]
+    return {
+        "mapping_type": str(meta.get("mapping_type") or "query_candidate").strip() or "query_candidate",
+        "param": param_name,
+        "values": values,
+        "verify_alias_params": verify_alias_params,
+    }
+
+
+def build_ali1688_query_filter_expectation(
+    filter_key: str,
+) -> dict[str, Any]:
+    meta = get_ali1688_query_filter_definition(filter_key)
+    return {
+        "mapping_type": meta.get("mapping_type") or "query_candidate",
+        "param": meta.get("param") or "",
+        "expected_values": list(meta.get("values") or []),
+        "verify_alias_params": list(meta.get("verify_alias_params") or []),
+    }
+
+
+def _merge_csv_query_values(existing_value: str | None, new_values: list[str]) -> str:
+    merged: list[str] = []
+    seen: set[str] = set()
+    for raw_value in [*(existing_value or "").split(","), *new_values]:
+        value = str(raw_value or "").strip()
+        if not value or value in seen:
+            continue
+        seen.add(value)
+        merged.append(value)
+    return ",".join(merged)
+
+
+def _parse_query_params_with_merge(query: str) -> dict[str, str]:
+    merged_query: dict[str, str] = {}
+    for key, value in parse_qsl(query, keep_blank_values=True):
+        key_text = str(key or "").strip()
+        if not key_text:
+            continue
+        value_text = str(value or "").strip()
+        if key_text in merged_query:
+            merged_query[key_text] = _merge_csv_query_values(
+                merged_query.get(key_text),
+                [value_text],
+            )
+        else:
+            merged_query[key_text] = value_text
+    return merged_query
+
+
+def build_ali1688_query_filter_params(
+    search_filters: Mapping[str, Any] | None,
+) -> tuple[dict[str, str], list[str]]:
+    if not isinstance(search_filters, Mapping):
+        return {}, []
+
+    query_filter_definitions = get_ali1688_query_filter_definitions()
+    query_params: dict[str, str] = {}
+    applied_filter_keys: list[str] = []
+    for key in query_filter_definitions:
+        if not bool(search_filters.get(key, False)):
+            continue
+        meta = get_ali1688_query_filter_definition(key)
+        param_name = str(meta.get("param") or "").strip()
+        values = [str(item).strip() for item in meta.get("values") or [] if str(item).strip()]
+        if not param_name or not values:
+            continue
+        if param_name in {"filtOfferTags", "complexTags"}:
+            query_params[param_name] = _merge_csv_query_values(query_params.get(param_name), values)
+        else:
+            query_params[param_name] = values[-1]
+        applied_filter_keys.append(key)
+    return query_params, applied_filter_keys
+
+
+def apply_ali1688_query_filters_to_url(
+    url: str,
+    search_filters: Mapping[str, Any] | None,
+) -> tuple[str, dict[str, str], list[str]]:
+    parsed = urlparse(url)
+    existing_query = _parse_query_params_with_merge(parsed.query)
+    for key, value in ALI1688_BASE_QUERY_PARAMS.items():
+        existing_query.setdefault(key, value)
+
+    filter_params, applied_filter_keys = build_ali1688_query_filter_params(search_filters)
+    for key, value in filter_params.items():
+        if key in {"filtOfferTags", "complexTags"}:
+            existing_query[key] = _merge_csv_query_values(existing_query.get(key), value.split(","))
+        else:
+            existing_query[key] = value
+
+    new_query = urlencode(existing_query, doseq=False)
+    new_url = urlunparse(parsed._replace(query=new_query))
+    return new_url, existing_query, applied_filter_keys
+
+
+def verify_ali1688_query_filter_keys_from_url(
+    url: str,
+    injected_filter_keys: list[str] | None,
+) -> tuple[list[str], dict[str, str]]:
+    verified_filter_keys, observed_query, _ = verify_ali1688_query_filters_from_url(
+        url,
+        injected_filter_keys,
+    )
+    return verified_filter_keys, observed_query
+
+
+def verify_ali1688_query_filters_from_url(
+    url: str,
+    injected_filter_keys: list[str] | None,
+) -> tuple[list[str], dict[str, str], dict[str, dict[str, Any]]]:
+    parsed = urlparse(url or "")
+    observed_query = _parse_query_params_with_merge(parsed.query)
+    if not injected_filter_keys:
+        return [], observed_query, {}
+
+    verified_filter_keys: list[str] = []
+    verification_details: dict[str, dict[str, Any]] = {}
+    for key in injected_filter_keys:
+        meta = get_ali1688_query_filter_definition(str(key))
+        if not meta.get("param"):
+            continue
+        expected_values = {
+            str(item).strip()
+            for item in meta.get("values") or []
+            if str(item).strip()
+        }
+        alias_params = list(meta.get("verify_alias_params") or [])
+        observed_values: set[str] = set()
+        matched_params: dict[str, str] = {}
+        for param_name in alias_params:
+            raw_value = str(observed_query.get(param_name) or "").strip()
+            if not raw_value:
+                continue
+            matched_params[str(param_name)] = raw_value
+            observed_values.update(
+                value.strip()
+                for value in raw_value.split(",")
+                if value.strip()
+            )
+        matched_values = sorted(expected_values.intersection(observed_values))
+        if expected_values and matched_values:
+            verified_filter_keys.append(str(key))
+        verification_details[str(key)] = {
+            "status": "verified" if matched_values else "pending_verification",
+            "expected_values": sorted(expected_values),
+            "observed_values": sorted(observed_values),
+            "matched_values": matched_values,
+            "matched_params": matched_params,
+            "verify_alias_params": list(alias_params),
+        }
+    return verified_filter_keys, observed_query, verification_details
+
+
 class Ali1688SourceAdapter:
     def __init__(
         self,
@@ -68,15 +242,27 @@ class Ali1688SourceAdapter:
         self.config = config or Ali1688Config()
         self.transport = transport or self._get
 
-    def build_search_url(self, keyword: str, *, page: int = 1) -> str:
-        encoded_keyword = quote(keyword, safe="", encoding="gbk", errors="ignore")
-        return (
-            f"{ALI1688_SEARCH_URL}?keywords={encoded_keyword}"
-            f"&beginPage={max(page, self.config.default_begin_page)}"
-            f"&filtOfferTags={ALI1688_FIXED_QUERY_PARAMS['filtOfferTags']}"
-            f"&complexTags={ALI1688_FIXED_QUERY_PARAMS['complexTags']}"
-            f"&tags={ALI1688_FIXED_QUERY_PARAMS['tags']}"
+    def build_search_url(
+        self,
+        keyword: str,
+        *,
+        page: int = 1,
+        search_filters: Mapping[str, Any] | None = None,
+    ) -> str:
+        base_query = {
+            "keywords": str(keyword or ""),
+            "beginPage": str(max(page, self.config.default_begin_page)),
+            **ALI1688_BASE_QUERY_PARAMS,
+        }
+        filter_query, _ = build_ali1688_query_filter_params(search_filters)
+        query = urlencode(
+            {**base_query, **filter_query},
+            doseq=False,
+            encoding="gbk",
+            errors="ignore",
+            quote_via=quote,
         )
+        return urlunparse(urlparse(ALI1688_SEARCH_URL)._replace(query=query))
 
     def search(
         self,
@@ -85,14 +271,23 @@ class Ali1688SourceAdapter:
         limit: int = 20,
         source: int = 10,
         page: int = 1,
+        search_filters: Mapping[str, Any] | None = None,
     ) -> list[RawSourceItem]:
-        url = self.build_search_url(keyword, page=page)
+        url = self.build_search_url(keyword, page=page, search_filters=search_filters)
         items = self.search_from_result_url(url, limit=limit)
+        query_filter_params, applied_filter_keys = build_ali1688_query_filter_params(search_filters)
         for item in items:
             item.metadata.setdefault("source_type", source)
             item.metadata.setdefault("source_query", keyword)
             item.metadata.setdefault("search_url", url)
-            item.metadata.setdefault("filter_flags", dict(ALI1688_FIXED_QUERY_PARAMS))
+            item.metadata.setdefault(
+                "filter_flags",
+                {
+                    **ALI1688_BASE_QUERY_PARAMS,
+                    **query_filter_params,
+                },
+            )
+            item.metadata.setdefault("applied_query_filter_keys", list(applied_filter_keys))
         return items
 
     def search_from_result_url(self, url: str, *, limit: int = 20) -> list[RawSourceItem]:

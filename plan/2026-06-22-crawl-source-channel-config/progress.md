@@ -1,0 +1,309 @@
+# 进度日志：商品爬取与筛选配置增加货源渠道配置
+
+> 计划状态：已完成
+
+## 2026-06-22
+
+### 已完成
+- 读取 `planning-with-files-zh` 技能说明，按要求使用文件化计划。
+- 检查 `plan/` 目录，确认已有两份历史计划：
+  - `2026-06-13-source-channel-pool`
+  - `2026-06-16-ali1688-account-name-realtime`
+- 梳理当前代码现状：
+  - `web/app.jsx` 中“商品爬取与筛选配置”只有抓取数量与模型筛选配置
+  - `source_channels` 已独立存在并完成账号池能力
+  - 后端已具备 `source_channels` 相关读写与状态接口
+  - “决策资产库”列表与详情页当前都没有渠道维度展示
+  - `/api/task_details/{task_id}` 返回的 `sources` 数据当前不带渠道字段
+  - `scripts/run_full_pipeline.py` 当前写入 `ali1688_sources` 时也没有落渠道元数据
+- 创建新计划目录：
+  - `plan/2026-06-22-crawl-source-channel-config/`
+- 新增计划文件：
+  - `task_plan.md`
+  - `findings.md`
+  - `progress.md`
+- 根据新增需求，已将“决策资产库展示使用渠道、详情页按渠道分组”补充进计划范围
+- 已完成抓取落库链路的渠道元数据补齐：
+  - `scripts/run_full_pipeline.py` 在写入 `ali1688_sources` 时，开始同步写入：
+    - `source_channel_id`
+    - `source_channel_label`
+    - `source_account_id`
+    - `source_account_label`
+- 已完成系统配置运行时补齐：
+  - `src/xianyu_tools/config.py` 的激活 1688 运行时配置已能返回：
+    - `channel_label`
+    - `account_label`
+  - 便于抓取主流程在不重复推断的前提下直接拿到“实际使用渠道 / 账号”上下文
+- 已完成资产详情接口扩展：
+  - `src/web_api/main.py` 的 `/api/task_details/{task_id}` 已开始返回每条货源的渠道字段
+  - 同时补充：
+    - `used_channels`
+    - `channel_groups`
+  - 并按 `source_channel_label -> min_price` 的顺序稳定返回
+- 已完成前端资产展示联动：
+  - `web/app.jsx` 中“决策资产库”卡片已增加“使用渠道”标签展示
+  - “货源明细”详情页标题区已增加渠道标签展示
+  - 详情页货源列表已改为按渠道分组渲染
+  - 渠道组头部会展示：
+    - 渠道名称
+    - 当前组货源数量
+    - 参与账号标签（若存在）
+  - 详情页前端不再基于“分页后的扁平 sources”临时分组，而是优先直接消费后端返回的 `channel_groups`
+  - 这样可以避免同一渠道的货源被分页拆散，保证“按渠道区分”的展示语义稳定成立
+- 已完成 `crawl_config` 新结构的后端归一化能力：
+  - `src/xianyu_tools/config.py` 新增 `normalize_crawl_config(...)`
+  - 配置结构开始支持：
+    - `source_channel_selection_mode`
+    - `enabled_source_channels`
+  - 归一化会自动过滤：
+    - 不存在的渠道
+    - 不存在的账号
+    - 未登录成功 / 不可用的账号
+  - 当未显式保存渠道选择时，会默认回落到“货源渠道号池”中当前启用渠道的 `active_account_ids`
+- 已完成抓取运行时渠道账号选择器：
+  - `src/xianyu_tools/config.py` 新增：
+    - `get_crawl_source_account_runtimes(...)`
+    - `get_effective_crawl_source_runtime(...)`
+  - 当前实现会优先从 `crawl_config.enabled_source_channels` 中挑选账号
+  - 对 1688 会基于状态文件中的关键 Cookie 判断是否可用
+  - 可用账号列表支持在运行时按索引轮转
+- 已完成主抓取流程接入：
+  - `scripts/run_full_pipeline.py` 不再固定读取“当前激活 1688 账号”
+  - 现在会按爆款序号轮转读取 `crawl_config` 选中的可用 1688 账号
+  - 同一条货源落库时也会记录本次实际使用的渠道与账号
+- 已完成系统配置保存链路接入：
+  - `src/web_api/main.py` 在保存 `/api/system/configs` 时，`crawl` 配置会先走新的归一化逻辑再入库
+  - `system_configs` 初始化同步也已补上 `crawl`
+- 已完成系统设置页“商品爬取与筛选配置”的渠道选择 UI 首版：
+  - `web/app.jsx` 中新增“货源渠道配置”区块
+  - 当前仅展示“已登录成功且加入当前激活账号”的可选账号
+  - 支持：
+    - 切换渠道页签
+    - 一键使用当前渠道的激活账号
+    - 对当前渠道的可用账号做多选
+  - 用户一旦手动调整，会将 `source_channel_selection_mode` 切换为 `custom_selected`
+
+### 当前判断
+- “货源渠道配置”应新增在 `crawl_config` 下，而不是继续塞入 `source_channels`。
+- 该配置的职责是“定义抓取时参与的渠道与账号范围”，不是“维护登录状态”。
+- 首期实现时，前端应只暴露“登录成功且已加入当前激活账号”的可选账号。
+- 本计划不能只覆盖系统设置页与抓取入口，还必须覆盖“决策资产库”这条结果展示链路。
+- 当前“资产结果展示链路”已不再局限于 1688 单一来源文案，而是开始向“通用货源渠道展示”收敛。
+- 当前“抓取配置 -> 运行时渠道选择 -> 抓取落库渠道回显”主链路已经打通，但还需要继续做前端联调验证与边界清洗验证。
+- 当前后端归一化规则已与前端选择规则对齐：
+  - 不仅过滤“不存在账号”
+  - 也过滤“未登录成功 / 不可用账号”
+  - 因此即使前端传入了脏选择，后端也会自动收敛
+
+### 待继续推进
+- 继续检查前端首版 UI 的交互细节，确认保存、刷新、切换渠道时回显一致。
+- 补齐对历史资产的兼容验证，确认无渠道字段的旧数据在前端仍能平滑展示。
+- 视后续实现复杂度，决定详情页最终消费：
+  - 前端基于扁平 `sources` 分组
+  - 或后端直接消费 `channel_groups`
+
+### 最小验证
+- 代码静态检查已确认以下关键字段已贯通：
+  - `source_channel_id`
+  - `source_channel_label`
+  - `source_account_id`
+  - `source_account_label`
+  - `used_channels`
+  - `channel_groups`
+- 已完成前端静态校验，确认详情页旧分页分组残留已清理：
+  - `paginatedChannelGroups`
+  - `sourcePage`
+  - `setSourcePage`
+- 已完成抓取配置归一化的最小运行验证：
+  - `custom_selected` 模式下，若传入的账号集合包含“未登录账号 / 不存在账号”，后端会自动剔除，只保留可用账号
+  - `active_pool` 模式下，后端只会回落到“当前激活且实际可用”的账号，不再把未登录账号误带入抓取配置
+- 已核对 `/api/system/configs` 的保存链路：
+  - `source_channels` 会先走 `normalize_source_channels_config(...)`
+  - `crawl` 会走 `settings.normalize_crawl_config(...)`
+  - 保存前还会再次按 LLM 白名单过滤 `source_filter_models`
+- 已完成真实接口联调验证：
+  - 重启本地 `uvicorn` 服务后，请求 `GET /api/system/configs`
+  - 当前返回结果已确认：
+    - `crawl.source_channel_selection_mode = active_pool`
+    - `crawl.enabled_source_channels = [{ channel_id: "ali1688", account_ids: ["ali1688-account-1"] }]`
+  - 说明配置层补齐 `active_account_ids` 与运行时路径后，`active_pool` 的自动回落已经在真实接口层生效
+- 已使用可写缓存目录完成 Python 语法校验：
+  - `PYTHONPYCACHEPREFIX=/private/tmp/codex-pycache python3 -m py_compile src/web_api/main.py src/xianyu_tools/config.py scripts/run_full_pipeline.py`
+- 前端 JSX 目前已做人工结构检查，但还未做浏览器侧联调验证。
+- 已完成真实任务详情接口最小验证：
+  - `GET /api/task_details/6e3aba47` 当前返回结构确认为：
+    - 顶层：`{ task_id, details }`
+    - `details[*]` 内已包含：
+      - `used_channels`
+      - `channel_groups`
+      - `sources`
+  - 其中样本首条详情已验证：
+    - `used_channels_count = 1`
+    - `channel_groups_count = 1`
+    - `group_sample = ali1688 / 1688 货源渠道 / 10 条货源`
+- 已补充历史资产样本扫描验证：
+  - 连续检查 7 个已完成任务的详情接口返回
+  - 结论：
+    - 渠道维度字段已经稳定存在
+    - 但当前历史样本中的 `source_account_id / source_account_label` 均为空
+  - 当前判断：
+    - 这更像是“历史资产生成时尚未写入账号快照”
+    - 不是详情接口遗漏字段
+    - 后续若要在资产详情中稳定展示“实际使用账号”，需要依赖新链路生成的数据，或补做历史数据回填
+- 已补充“商品爬取与筛选配置 -> 货源渠道配置”的手动选择校验：
+  - 当前当用户切换到 `custom_selected` 手动模式、但一个账号都没勾选时：
+    - 页面会先展示显式橙色警告提示
+    - 点击“保存并同步配置”会被前端直接拦截
+  - 这样可以避免“空手动选择”被静默保存，补上 Phase 5 中的保存前校验提示
+- 已补充保存后的“自动收敛反馈”：
+  - `POST /api/system/configs` 现在会比较：
+    - 用户提交的 `crawl.enabled_source_channels`
+    - 后端归一化后的有效选择
+  - 当存在以下情况时，成功提示会显式说明：
+    - 无效渠道被移除
+    - 不存在 / 不可用账号被自动剔除
+  - 真实接口验证结果：
+    - 提交包含 `bogus-channel-404` 与 `bogus-account-404` 的手动抓取配置
+    - 返回提示：
+      - `配置已保存并同步成功。无效渠道已自动移除：bogus-channel-404；不可用账号已自动收敛：ali1688: bogus-account-404；bogus-channel-404: bogus-account-1`
+- 已顺手修复一次联调误操作造成的本地配置污染：
+  - 从 `config/llm.json.bak` 恢复了 LLM 接口配置
+  - 从 `config/openapi.json.bak` 恢复了 OpenAPI 的 `appid / app_secret / channel_cat_id`
+  - 当前 `config/config.json` 已再次包含：
+    - 1 组 LLM 配置
+    - 正确的闲鱼 OpenAPI 主账号参数
+- 已补充前端本地联动收敛：
+  - `web/app.jsx` 新增 `normalizeLocalCrawlConfig(...)`
+  - 当前当“货源渠道号池”发生以下本地变化时，抓取配置会自动清理无效选择：
+    - 渠道被禁用或移除
+    - 账号不再属于“当前激活账号”
+    - 账号登录状态不再可用
+  - 同时会在“货源渠道配置”卡片中展示橙色提示，明确说明：
+    - 哪些渠道被自动移除
+    - 哪些账号被自动收敛
+  - 这样可以覆盖 Phase 7 中“账号池变化后抓取配置如何自愈与回显”的前端场景
+- 已补充历史资产详情提示：
+  - 对于旧任务中尚未写入 `source_account_label` 的渠道组
+  - 详情页渠道分组头部会显示：
+    - `历史资产未记录账号快照`
+  - 这样可以把“历史数据本身没有账号快照”和“新链路回写失败”明确区分开
+- 已修正本地自动收敛提示的清理行为：
+  - 当前当用户手动修正渠道/账号选择后
+  - 若已不存在需要自动收敛的无效项，`crawlSelectionAdjustmentNotice` 会自动清空
+  - 避免“之前的自动收敛提示”残留在页面上，造成误导
+- 已完成货源渠道配置辅助逻辑解耦：
+  - 新增 `src/xianyu_tools/source_channel_config.py`
+  - 将以下公共逻辑从 `src/web_api/main.py` 抽离为可复用模块：
+    - `normalize_source_channels_config(...)`
+    - `strip_source_channel_runtime_fields(...)`
+    - `normalize_active_source_account_ids(...)`
+    - `get_source_channel(...)`
+    - `get_source_channel_account(...)`
+  - `scripts/validate_source_channel_config.py` 已改为直接依赖该模块，不再导入 `main.py`
+  - 这样后端纯验证脚本不会再被 FastAPI / 数据库初始化副作用污染
+- 已完成解耦后的验证回归：
+  - ` /opt/anaconda3/envs/mytools/bin/python -m py_compile src/web_api/main.py src/xianyu_tools/config.py src/xianyu_tools/source_channel_config.py scripts/run_full_pipeline.py scripts/validate_source_channel_config.py`
+  - `/opt/anaconda3/envs/mytools/bin/python scripts/validate_source_channel_config.py`
+  - 当前四项检查全部通过：
+    - `source_channel_storage_cleanup`
+    - `custom_selected_normalization`
+    - `active_pool_fallback`
+    - `runtime_selection`
+- 已同步修正计划阶段状态：
+  - 阶段 8“测试与验证计划”中的前端联调验证、资产页联调验证、抓取入口验证已完成方案设计
+  - 阶段 9 当前进入“最后做联调与边界修正”的收口阶段
+  - 后续剩余重点不再是补设计，而是补浏览器侧真实联调证据与必要修正
+- 已完成一轮真实浏览器联调（2026-06-24）：
+  - 启动本地服务：
+    - `export PYTHONPATH=$PYTHONPATH:/Users/mac/PycharmProjects/mytools/xianyu-tools/src && /opt/anaconda3/envs/mytools/bin/uvicorn src.web_api.main:app --host 127.0.0.1 --port 8000`
+  - 在浏览器中打开 `http://127.0.0.1:8000/` 并进入“系统设置 -> 商品爬取与筛选配置”
+  - 当前页面已确认真实展示：
+    - `货源渠道配置`
+    - `仅展示“已登录成功 + 已加入当前激活账号”的渠道账号`
+    - `1688 货源渠道(1)`
+    - 已勾选账号 `tb4884575_2012 / 登录正常 / 渠道账号备注：1688 账号 1`
+  - 说明“登录成功账号才出现”这一前端联调项已有真实浏览器证据
+- 已补充配置接口与页面回显交叉验证（2026-06-24）：
+  - `GET /api/system/configs` 当前确认：
+    - `crawl.source_channel_selection_mode = custom_selected`
+    - `crawl.enabled_source_channels = [{ channel_id: \"ali1688\", account_ids: [\"ali1688-account-1\"] }]`
+  - 与系统设置页中的真实勾选状态一致
+  - 说明“保存后刷新页面保持一致”至少在当前单渠道样本下已具备接口与页面双重证据
+- 已完成资产页面真实浏览器验证（2026-06-24）：
+  - 在“决策资产库”进入 `花露水` 任务结果页后，真实页面已看到每个爆款卡片携带渠道标签：
+    - `1688 货源渠道`
+  - 继续进入单商品“决策资产 / 货源明细”页后，真实页面已看到：
+    - `货源深度对比表 (10 条匹配)`
+    - 渠道组头：`1688 货源渠道`
+    - 分组信息：`10 条货源`
+    - 历史兼容提示：`历史资产未记录账号快照`
+  - 说明“详情页按渠道分组”和“历史资产兼容提示”已具备真实浏览器证据
+- 当前真实联调边界已确认：
+  - 现有本地数据仅覆盖“单渠道 + 历史资产缺少账号快照”场景
+  - 尚未拿到“多渠道真实资产”样本，因此“多渠道结果页同时展示多个渠道组”的浏览器侧证据仍待补齐
+- 已补齐多渠道真实样本联调（2026-06-24）：
+  - 新增脚本：
+    - `scripts/create_multichannel_validation_fixture.py`
+  - 该脚本会向本地数据库写入一组可重复生成的验证任务：
+    - `task_id = mch62401`
+    - `keyword = 多渠道联调样本`
+    - 单个爆款商品下包含 2 条货源
+    - 渠道分别为：
+      - `1688 货源渠道`
+      - `义乌渠道`
+  - 已通过真实浏览器验证：
+    - 任务结果页的爆款卡片同时展示两个渠道标签：
+      - `1688 货源渠道`
+      - `义乌渠道`
+    - 单商品“决策资产 / 货源明细”页同时展示两个渠道组：
+      - `1688 货源渠道 / 1 条货源 / 1688 账号 1`
+      - `义乌渠道 / 1 条货源 / 义乌 账号 1`
+  - 至此，“单渠道 / 多渠道 / 历史资产无账号快照”三类前端验证样本都已经补齐
+- 已同步完成计划收口：
+  - `task_plan.md` 当前阶段已切换为 `已完成`
+  - 表示“货源渠道配置 + 决策资产库渠道回显 + 详情页按渠道分组”的本轮目标已完成
+
+## 2026-06-25
+
+### 收口验证
+- **状态：** complete
+- 执行的操作：
+  - 重新读取 `task_plan.md / progress.md / findings.md`，核对剩余交付项
+  - 静态核对关键代码落点：
+    - `web/app.jsx`
+    - `src/xianyu_tools/config.py`
+    - `src/web_api/main.py`
+    - `scripts/run_full_pipeline.py`
+  - 运行抓取配置专项校验脚本：
+    - `/opt/anaconda3/envs/mytools/bin/python scripts/validate_source_channel_config.py`
+  - 调用真实配置接口：
+    - `GET /api/system/configs`
+  - 调用真实多渠道资产详情接口：
+    - `GET /api/task_details/mch62401`
+- 当前结果：
+  - `validate_source_channel_config.py` 四项检查全部通过：
+    - `source_channel_storage_cleanup`
+    - `custom_selected_normalization`
+    - `active_pool_fallback`
+    - `runtime_selection`
+  - `GET /api/system/configs` 已确认当前返回：
+    - `crawl.source_channel_selection_mode = custom_selected`
+    - `crawl.enabled_source_channels = [{ channel_id: "ali1688", account_ids: ["ali1688-account-1"] }]`
+  - `GET /api/task_details/mch62401` 已确认返回：
+    - `used_channels = ["1688 货源渠道", "义乌渠道"]`
+    - `channel_groups` 中同时包含 `ali1688` 与 `yiwu-market`
+    - 组内账号快照分别为：
+      - `1688 账号 1`
+      - `义乌 账号 1`
+  - 说明“抓取配置 -> 运行时 -> 落库 -> 决策资产列表/详情回显”的主链路证据已闭环
+  - 阶段 2 的配置模型设计勾选项已按实际完成状态补齐
+  - 阶段 9“最后做联调与边界修正”已完成
+  - 当前该计划目录下的任务拆解已全部完成，并具备对应代码与验证证据
+
+### 下一步建议
+- 优先做一轮本地联调，验证：
+  - 渠道账号多选保存后是否能稳定回显
+  - 未登录账号不会误入抓取配置
+  - 主流程运行时是否按所选账号轮转
+- 继续补齐“保存前校验提示 / 联动收敛提示”等 Phase 5、Phase 7 尾项。
+- 再继续补齐历史资产兼容与更多边界场景。
