@@ -4,6 +4,7 @@ from typing import Any
 
 ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS: dict[str, dict[str, Any]] = {
     "rapid_invoice": {
+        "label": "极速开票",
         "mapping_type": "query_candidate",
         "group": "service_capability",
         "query_param": "complexTags",
@@ -11,6 +12,7 @@ ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS: dict[str, dict[str, Any]] = {
         "verify_alias_params": ["complexTags"],
     },
     "selected_distributors": {
+        "label": "分销严选",
         "mapping_type": "ui_checkbox_candidate",
         "group": "distribution_capability",
         "probe_terms": ["分销严选"],
@@ -18,6 +20,7 @@ ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS: dict[str, dict[str, Any]] = {
         "mapping_hint": "当前依赖 1688 搜索结果页筛选区 checkbox，需先确认 selector 稳定后再验证真实生效。",
     },
     "single_piece_drop_shipping": {
+        "label": "一件代发",
         "mapping_type": "query_candidate",
         "group": "distribution_capability",
         "query_param": "filtOfferTags",
@@ -25,6 +28,7 @@ ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS: dict[str, dict[str, Any]] = {
         "verify_alias_params": ["filtOfferTags", "offerTags"],
     },
     "seven_day_return": {
+        "label": "7天无理由",
         "mapping_type": "ui_checkbox_candidate",
         "group": "after_sales_capability",
         "probe_terms": ["7天无理由"],
@@ -32,6 +36,7 @@ ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS: dict[str, dict[str, Any]] = {
         "mapping_hint": "当前依赖结果页售后保障筛选 checkbox，需观察选中态与结果变化是否稳定。",
     },
     "single_piece_free_shipping": {
+        "label": "1件代发包邮",
         "mapping_type": "semantic_combo_candidate",
         "group": "distribution_capability",
         "probe_terms": ["1件代发包邮"],
@@ -40,6 +45,7 @@ ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS: dict[str, dict[str, Any]] = {
         "mapping_hint": "需先验证是否等价于“一件代发 + 包邮”的组合语义，再决定是否保留独立映射。",
     },
     "free_shipping": {
+        "label": "包邮",
         "mapping_type": "query_candidate",
         "group": "service_capability",
         "query_param": "freeShipping",
@@ -47,6 +53,7 @@ ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS: dict[str, dict[str, Any]] = {
         "verify_alias_params": ["freeShipping"],
     },
     "freight_insurance_return": {
+        "label": "退货包运费",
         "mapping_type": "query_candidate",
         "group": "after_sales_capability",
         "query_param": "complexTags",
@@ -54,6 +61,7 @@ ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS: dict[str, dict[str, Any]] = {
         "verify_alias_params": ["complexTags"],
     },
     "real_factory_verified": {
+        "label": "真实工厂认证",
         "mapping_type": "ui_checkbox_candidate",
         "group": "qualification_capability",
         "probe_terms": ["真实工厂认证"],
@@ -61,6 +69,7 @@ ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS: dict[str, dict[str, Any]] = {
         "mapping_hint": "当前依赖结果页资质认证筛选 checkbox，需先完成稳定 selector 定位。",
     },
     "strength_verified": {
+        "label": "实力认证",
         "mapping_type": "ui_checkbox_candidate",
         "group": "qualification_capability",
         "probe_terms": ["实力认证"],
@@ -68,6 +77,7 @@ ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS: dict[str, dict[str, Any]] = {
         "mapping_hint": "当前依赖结果页资质认证筛选 checkbox，需验证勾选后是否存在稳定结果变化。",
     },
     "official_logistics": {
+        "label": "官方物流",
         "mapping_type": "query_candidate",
         "group": "service_capability",
         "query_param": "filtOfferTags",
@@ -75,11 +85,15 @@ ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS: dict[str, dict[str, Any]] = {
         "verify_alias_params": ["filtOfferTags", "offerTags"],
     },
     "encrypted_waybill": {
+        "label": "密文面单",
         "mapping_type": "special_panel_candidate",
         "group": "service_capability",
         "probe_terms": ["密文面单"],
         "verification_entry": "config_filter_panel",
         "mapping_hint": "当前更像二级配置面板入口，需要先确认主搜索页能否稳定打开对应配置面板。",
+        "observation_scope": "result_page_text",
+        "entry_signal_type": "text_term",
+        "next_required_action": "panel_open_and_toggle",
     },
 }
 
@@ -100,6 +114,7 @@ def get_ali1688_channel_search_filter_meta(filter_key: str) -> dict[str, Any]:
     key = str(filter_key or "").strip()
     raw_meta = ALI1688_CHANNEL_SEARCH_FILTER_DEFINITIONS.get(key) or {}
     return {
+        "label": str(raw_meta.get("label") or key).strip() or key,
         "mapping_type": str(raw_meta.get("mapping_type") or "snapshot_only").strip() or "snapshot_only",
         "group": str(raw_meta.get("group") or "").strip(),
         "query_param": str(raw_meta.get("query_param") or "").strip(),
@@ -125,6 +140,9 @@ def get_ali1688_channel_search_filter_meta(filter_key: str) -> dict[str, Any]:
             for item in raw_meta.get("probe_terms") or []
             if str(item).strip()
         ],
+        "observation_scope": str(raw_meta.get("observation_scope") or "").strip(),
+        "entry_signal_type": str(raw_meta.get("entry_signal_type") or "").strip(),
+        "next_required_action": str(raw_meta.get("next_required_action") or "").strip(),
     }
 
 

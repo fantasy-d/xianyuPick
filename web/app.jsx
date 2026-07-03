@@ -4963,6 +4963,19 @@ const App = () => {
         return [];
     };
 
+    const getTaskChannelSummaries = (task) => {
+        if (Array.isArray(task?.channel_summaries) && task.channel_summaries.length > 0) {
+            return task.channel_summaries.map((channel) => ({
+                ...channel,
+                filter_summary: normalizeChannelFilterSummary(channel?.filter_summary),
+            }));
+        }
+        return getTaskUsedChannels(task).map((channel) => ({
+            ...channel,
+            filter_summary: normalizeChannelFilterSummary(channel?.filter_summary),
+        }));
+    };
+
     const channelSearchFilterLabelMap = {
         rapid_invoice: '极速开票',
         selected_distributors: '分销严选',
@@ -4979,18 +4992,27 @@ const App = () => {
 
     const getChannelFilterLabel = (filterKey) => channelSearchFilterLabelMap[filterKey] || filterKey;
 
-    const summarizeChannelFilterSnapshot = (snapshot) => {
+    const buildEmptyChannelFilterSummary = () => ({
+        configured: [],
+        configuredPending: [],
+        queryInjected: [],
+        applied: [],
+        unapplied: [],
+        unsupported: false,
+        configuredFilterCount: 0,
+        filterStatusMap: {},
+        queryVerificationDetails: {},
+        mappingStage: '',
+        mappingNotes: '',
+        runtimeAuditStage: '',
+        runtimeAuditSource: '',
+        legacyMissingSnapshot: false,
+        hasRuntimeSignal: false,
+    });
+
+    const summarizeChannelFilterSnapshot = (snapshot, channelType = '') => {
         if (!snapshot || typeof snapshot !== 'object') {
-            return {
-                configured: [],
-                queryInjected: [],
-                applied: [],
-                unapplied: [],
-                filterStatusMap: {},
-                queryVerificationDetails: {},
-                mappingStage: '',
-                mappingNotes: '',
-            };
+            return buildEmptyChannelFilterSummary();
         }
         const filterStatusMap = snapshot.filter_status_map && typeof snapshot.filter_status_map === 'object'
             ? snapshot.filter_status_map
@@ -5035,16 +5057,143 @@ const App = () => {
             ...statusMapVerificationDetails,
             ...topLevelQueryVerificationDetails,
         };
+        const resolvedChannelType = String(snapshot.channel_type || channelType || '').trim().toLowerCase();
+        const unsupported = !!resolvedChannelType && resolvedChannelType !== 'ali1688';
+        const configuredPendingReasonSet = new Set([
+            'runtime_mapping_not_implemented_yet',
+            'query_candidate_not_validated',
+            'semantic_combo_not_confirmed',
+            'snapshot_only_until_semantics_confirmed',
+            'special_panel_unmapped',
+            'special_panel_entry_detected_unmapped',
+        ]);
+        const configuredPending = configured.filter((filterKey) => {
+            const filterMeta = filterStatusMap?.[filterKey];
+            if (!filterMeta || typeof filterMeta !== 'object') {
+                return true;
+            }
+            if (filterMeta.status !== 'unapplied') {
+                return false;
+            }
+            const perFilterMappingStage = String(filterMeta.mapping_stage || '').trim();
+            const reason = String(filterMeta.reason || '').trim();
+            return perFilterMappingStage === 'snapshot_only' || configuredPendingReasonSet.has(reason);
+        });
+        const appliedSet = new Set(applied);
+        const queryInjectedSet = new Set(queryInjected);
+        const configuredPendingSet = new Set(configuredPending);
+        const unappliedStrict = unapplied.filter((filterKey) => (
+            !appliedSet.has(filterKey)
+            && !queryInjectedSet.has(filterKey)
+            && !configuredPendingSet.has(filterKey)
+        ));
         return {
             configured,
+            configuredPending,
             queryInjected: queryInjected.length > 0 || applied.length > 0 || unapplied.length > 0 ? queryInjected : fallbackQueryInjectedPending,
             applied: applied.length > 0 || queryInjected.length > 0 || unapplied.length > 0 ? applied : fallbackApplied,
-            unapplied: unapplied.length > 0 || queryInjected.length > 0 || applied.length > 0 ? unapplied : fallbackUnapplied,
+            unapplied: unapplied.length > 0 || queryInjected.length > 0 || applied.length > 0 ? unappliedStrict : fallbackUnapplied,
+            unsupported,
+            configuredFilterCount: configured.length,
             filterStatusMap,
             queryVerificationDetails,
             mappingStage: snapshot.mapping_stage || '',
             mappingNotes: snapshot.mapping_notes || '',
+            runtimeAuditStage: String(snapshot.runtime_audit_stage || '').trim(),
+            runtimeAuditSource: String(snapshot.runtime_audit_source || '').trim(),
+            legacyMissingSnapshot: false,
+            hasRuntimeSignal: applied.length > 0 || queryInjected.length > 0 || unapplied.length > 0,
         };
+    };
+
+    const normalizeChannelFilterSummary = (summary, fallbackSnapshot = null, channelType = '') => {
+        if (summary && typeof summary === 'object') {
+            const configured = Array.isArray(summary.configured) ? summary.configured : [];
+            return {
+                ...buildEmptyChannelFilterSummary(),
+                configured,
+                configuredPending: Array.isArray(summary.configuredPending)
+                    ? summary.configuredPending
+                    : Array.isArray(summary.configured_pending)
+                        ? summary.configured_pending
+                        : [],
+                queryInjected: Array.isArray(summary.queryInjected)
+                    ? summary.queryInjected
+                    : Array.isArray(summary.query_injected)
+                        ? summary.query_injected
+                        : [],
+                applied: Array.isArray(summary.applied) ? summary.applied : [],
+                unapplied: Array.isArray(summary.unapplied) ? summary.unapplied : [],
+                unsupported: !!summary.unsupported,
+                configuredFilterCount: Number.isFinite(Number(summary.configuredFilterCount))
+                    ? Number(summary.configuredFilterCount)
+                    : Number.isFinite(Number(summary.configured_filter_count))
+                        ? Number(summary.configured_filter_count)
+                        : configured.length,
+                filterStatusMap: summary.filterStatusMap && typeof summary.filterStatusMap === 'object'
+                    ? summary.filterStatusMap
+                    : summary.filter_status_map && typeof summary.filter_status_map === 'object'
+                        ? summary.filter_status_map
+                        : {},
+                queryVerificationDetails: summary.queryVerificationDetails && typeof summary.queryVerificationDetails === 'object'
+                    ? summary.queryVerificationDetails
+                    : summary.query_verification_details && typeof summary.query_verification_details === 'object'
+                        ? summary.query_verification_details
+                        : summary.verification_details && typeof summary.verification_details === 'object'
+                            ? summary.verification_details
+                            : {},
+                mappingStage: String(summary.mappingStage || summary.mapping_stage || '').trim(),
+                mappingNotes: String(summary.mappingNotes || summary.mapping_notes || '').trim(),
+                runtimeAuditStage: String(summary.runtimeAuditStage || summary.runtime_audit_stage || '').trim(),
+                runtimeAuditSource: String(summary.runtimeAuditSource || summary.runtime_audit_source || '').trim(),
+                legacyMissingSnapshot: !!(summary.legacyMissingSnapshot ?? summary.legacy_missing_snapshot),
+                hasRuntimeSignal: !!(summary.hasRuntimeSignal ?? summary.has_runtime_signal),
+            };
+        }
+        if (fallbackSnapshot && typeof fallbackSnapshot === 'object') {
+            return summarizeChannelFilterSnapshot(fallbackSnapshot, channelType);
+        }
+        return buildEmptyChannelFilterSummary();
+    };
+
+    const hasRenderableChannelFilterSummary = (summary) => (
+        !!summary
+        && (
+            summary.configured.length > 0
+            || summary.configuredPending.length > 0
+            || summary.queryInjected.length > 0
+            || summary.applied.length > 0
+            || summary.unapplied.length > 0
+            || summary.legacyMissingSnapshot
+            || summary.unsupported
+            || !!summary.runtimeAuditStage
+        )
+    );
+
+    const formatRuntimeAuditStage = (stage) => {
+        const stageText = String(stage || '').trim();
+        const stageLabelMap = {
+            initialized: '运行审计：已初始化',
+            image_download_failed: '运行审计：图片下载失败',
+            prewarm_failed: '运行审计：首页预热失败',
+            image_search_home_failed: '运行审计：图搜首页失败',
+            direct_url_fallback_failed: '运行审计：直连兜底失败',
+            query_filter_post_navigation_verified: '运行审计：query 跳转后已验证',
+            query_filter_navigation_failed: '运行审计：query 跳转失败',
+            query_filter_in_place_verified: '运行审计：query 原位已验证',
+            visible_filter_toggle_checked: '运行审计：已检查可见筛选项',
+            special_panel_candidate_checked: '运行审计：已检查特殊面板入口',
+            parse_failed_final: '运行审计：最终解析失败',
+            summary_written: '运行审计：已写入货源结果',
+        };
+        if (!stageText) {
+            return '';
+        }
+        if (stageText.startsWith('html_text_probe_attempt_')) {
+            const attempt = stageText.replace('html_text_probe_attempt_', '');
+            return `运行审计：第 ${attempt} 次文本探测`;
+        }
+        return stageLabelMap[stageText] || `运行审计：${stageText}`;
     };
 
     const getFilterStatusReasonText = (reason) => {
@@ -5058,6 +5207,7 @@ const App = () => {
             ui_selector_not_stable: '页面控件定位暂未稳定，尚未进入真实生效',
             ui_apply_not_observed: '页面控件已尝试执行，但当前未观察到稳定的结果变化',
             special_panel_unmapped: '特殊入口尚未映射到可稳定执行的操作流',
+            special_panel_entry_detected_unmapped: '结果页已观察到特殊入口线索，但二级面板动作链路尚未映射完成',
             special_panel_open_failed: '特殊入口已识别，但打开二级面板失败',
             snapshot_only_until_semantics_confirmed: '语义仍待确认，暂不宣称已生效',
             semantic_combo_not_confirmed: '组合语义尚未确认，暂不宣称该项可独立生效',
@@ -5069,6 +5219,47 @@ const App = () => {
         if (!detail || typeof detail !== 'object') {
             return '';
         }
+        const layoutLabelMap = {
+            image_result_filter_bar: '图搜结果页筛选栏',
+            standard_search_filter_bar: '标准搜索页筛选栏',
+            unknown: '未识别页面布局',
+        };
+        const selectorStrategyLabelMap = {
+            image_config_filter: '图搜配置筛选容器',
+            image_config_label: '图搜配置标签',
+            image_bottom_filter_option: '图搜底部筛选项',
+            image_bottom_option_label: '图搜底部筛选标签',
+            standard_search_filter_item: '标准搜索筛选项',
+            standard_select_item: '标准搜索下拉项',
+            standard_col_item: '标准搜索列项',
+            text_fallback: '文本兜底节点',
+        };
+        const selectorResolutionModeLabelMap = {
+            selector_candidate: '稳定 selector',
+            text_fallback: '文本兜底',
+        };
+        const semanticConclusionLabelMap = {
+            dependency_pair_incomplete: '语义结论：依赖组合未齐，暂不能判断独立语义',
+            dependency_pair_ready_pending_runtime: '语义结论：依赖组合已齐备，待真实动作验证',
+            dependency_pair_strong_verified: '语义结论：依赖组合已通过真实强证据确认',
+            independent_entry_observed_pending_result_validation: '语义结论：已观察到独立入口，待结果侧验证',
+            independent_entry_no_result_shift: '语义结论：独立入口可点击，但结果侧暂未观察到变化',
+            independent_entry_result_shift_observed: '语义结论：独立入口动作后已观察到结果变化',
+        };
+        const specialPanelConclusionLabelMap = {
+            entry_signal_detected_pending_panel_mapping: '入口结论：已观察到特殊入口线索，待面板动作映射',
+            panel_open_or_toggle_failed: '入口结论：已尝试打开面板或切换筛选，但动作未完成',
+            panel_action_applied_no_result_shift: '入口结论：面板动作已命中，但结果侧暂未观察到变化',
+            panel_action_result_shift_observed: '入口结论：面板动作后已观察到结果变化',
+            panel_active_condition_observed: '入口结论：结果页已存在该筛选的已选条件',
+        };
+        const verificationModeLabelMap = {
+            in_place_url: '原位 URL 校验',
+            post_navigation_url: '跳转后 URL 校验',
+            navigation_failed: '跳转失败校验',
+            dom_toggle_action: '筛选项勾选动作校验',
+            dom_panel_action: '面板动作校验',
+        };
         if (detail.probe_mode === 'html_text_scan') {
             const matchedTerms = Array.isArray(detail.matched_terms)
                 ? detail.matched_terms.filter(Boolean)
@@ -5077,24 +5268,196 @@ const App = () => {
                 ? detail.probe_terms.filter(Boolean)
                 : [];
             const detailParts = [];
+            const semanticConclusionLabel = semanticConclusionLabelMap[String(detail.semantic_conclusion || '').trim()];
+            if (semanticConclusionLabel) {
+                detailParts.push(semanticConclusionLabel);
+            }
+            const specialPanelConclusionLabel = specialPanelConclusionLabelMap[String(detail.special_panel_conclusion || '').trim()];
+            if (specialPanelConclusionLabel) {
+                detailParts.push(specialPanelConclusionLabel);
+            }
             if (matchedTerms.length > 0) {
                 detailParts.push(`页面文案命中：${matchedTerms.join(' / ')}`);
             } else if (probeTerms.length > 0) {
                 detailParts.push(`探测文案：${probeTerms.join(' / ')}`);
+            }
+            if (detail.observation_scope === 'result_page_text') {
+                detailParts.push('证据来源：结果页文本');
+            }
+            if (detail.text_visible === true) {
+                detailParts.push('页面可见：是');
+            } else if (detail.text_visible === false) {
+                detailParts.push('页面可见：否');
+            }
+            if (detail.entry_signal_detected === true) {
+                detailParts.push('已观察到入口线索');
+            }
+            const entrySignalType = String(detail.entry_signal_type || '').trim();
+            if (entrySignalType === 'text_term') {
+                detailParts.push('入口线索：页面文案命中');
+            } else if (entrySignalType) {
+                detailParts.push(`入口线索：${entrySignalType}`);
             }
             if (Array.isArray(detail.semantic_dependencies) && detail.semantic_dependencies.length > 0) {
                 const dependencyLabels = detail.semantic_dependencies
                     .map((dependencyKey) => getChannelFilterLabel(dependencyKey))
                     .filter(Boolean);
                 if (dependencyLabels.length > 0) {
-                    detailParts.push(
-                        detail.dependencies_enabled
-                            ? `依赖已开启：${dependencyLabels.join(' + ')}`
-                            : `依赖未齐：${dependencyLabels.join(' + ')}`
+                        detailParts.push(
+                            detail.dependencies_enabled
+                                ? `依赖已开启：${dependencyLabels.join(' + ')}`
+                                : `依赖未齐：${dependencyLabels.join(' + ')}`
                     );
                 }
             }
+            if (detail.semantic_verification_stage === 'dependency_pair_enabled') {
+                detailParts.push('阶段：依赖组合已齐备，待真实动作验证');
+            } else if (detail.semantic_verification_stage === 'dependency_pair_incomplete') {
+                detailParts.push('阶段：依赖组合未齐备');
+            }
+            if (detail.next_required_action === 'panel_open_and_toggle') {
+                detailParts.push('下一步：补齐面板打开与勾选动作');
+            }
+            const verificationMode = String(detail.verification_mode || '').trim();
+            if (verificationMode) {
+                detailParts.push(`校验方式：${verificationModeLabelMap[verificationMode] || verificationMode}`);
+            }
+            const resultUrl = String(detail.result_url || '').trim();
+            if (resultUrl) {
+                detailParts.push(`结果页：${resultUrl}`);
+            }
             return detailParts.join(' · ');
+        }
+        if (detail.probe_mode === 'dom_toggle_action' || detail.probe_mode === 'dom_panel_action') {
+            const detailParts = [];
+            const semanticConclusionLabel = semanticConclusionLabelMap[String(detail.semantic_conclusion || '').trim()];
+            if (semanticConclusionLabel) {
+                detailParts.push(semanticConclusionLabel);
+            }
+            const specialPanelConclusionLabel = specialPanelConclusionLabelMap[String(detail.special_panel_conclusion || '').trim()];
+            if (specialPanelConclusionLabel) {
+                detailParts.push(specialPanelConclusionLabel);
+            }
+            const layoutLabel = layoutLabelMap[String(detail.page_filter_layout || '').trim()] || String(detail.page_filter_layout || '').trim();
+            if (layoutLabel) {
+                detailParts.push(`页面布局：${layoutLabel}`);
+            }
+            const selectorStrategy = String(detail.entry_selector_strategy || '').trim();
+            if (selectorStrategy) {
+                const selectorLabel = selectorStrategyLabelMap[selectorStrategy] || selectorStrategy;
+                detailParts.push(`点击入口：${selectorLabel}`);
+            }
+            const selectorResolutionMode = String(detail.selector_resolution_mode || '').trim();
+            if (selectorResolutionMode) {
+                const selectorResolutionLabel = selectorResolutionModeLabelMap[selectorResolutionMode] || selectorResolutionMode;
+                detailParts.push(`定位方式：${selectorResolutionLabel}`);
+            }
+            if (Array.isArray(detail.selector_candidates_tried) && detail.selector_candidates_tried.length > 0) {
+                const selectorStrategies = detail.selector_candidates_tried
+                    .map((candidate) => {
+                        const strategy = String(candidate?.strategy || '').trim();
+                        return selectorStrategyLabelMap[strategy] || strategy;
+                    })
+                    .filter(Boolean);
+                if (selectorStrategies.length > 0) {
+                    detailParts.push(`候选定位链路：${selectorStrategies.join(' -> ')}`);
+                }
+            }
+            if (detail.text_fallback_considered === true) {
+                detailParts.push('已评估文本兜底');
+            } else if (detail.text_fallback_considered === false) {
+                detailParts.push('未退化到文本兜底');
+            }
+            if (detail.probe_mode === 'dom_panel_action') {
+                const triggerText = String(detail.panel_trigger_text || '').trim();
+                if (triggerText) {
+                    detailParts.push(`面板触发器：${triggerText}`);
+                }
+                if (detail.panel_trigger_clicked === true) {
+                    detailParts.push('已尝试打开二级面板');
+                }
+                if (Array.isArray(detail.panel_trigger_candidates) && detail.panel_trigger_candidates.length > 0) {
+                    detailParts.push(`触发词顺序：${detail.panel_trigger_candidates.join(' / ')}`);
+                }
+                const panelVisibleVia = String(detail.panel_visible_via || '').trim();
+                if (panelVisibleVia === 'term_visible') {
+                    detailParts.push('面板可见来源：入口直接可见');
+                } else if (panelVisibleVia) {
+                    detailParts.push(`面板可见来源：${panelVisibleVia}`);
+                }
+            }
+            if (detail.entry_click_attempted === true) {
+                detailParts.push(
+                    detail.entry_click_succeeded === true
+                        ? '已执行点击动作'
+                        : '已尝试点击但未成功'
+                );
+            }
+            if (detail.panel_term_visible_before_action === true || detail.panel_term_visible_after_action === true) {
+                detailParts.push(
+                    `入口可见：动作前${detail.panel_term_visible_before_action ? '是' : '否'} / 动作后${detail.panel_term_visible_after_action ? '是' : '否'}`
+                );
+            }
+            if (
+                typeof detail.panel_term_selected_before_action === 'boolean'
+                || typeof detail.panel_term_selected_after_action === 'boolean'
+            ) {
+                detailParts.push(
+                    `选中态：动作前${detail.panel_term_selected_before_action ? '是' : '否'} / 动作后${detail.panel_term_selected_after_action ? '是' : '否'}`
+                );
+            }
+            const selectedVia = String(detail.panel_term_selected_via_after_action || '').trim();
+            if (selectedVia === 'active_condition_text') {
+                detailParts.push('选中来源：结果页已选条件条');
+            } else if (selectedVia) {
+                detailParts.push(`选中来源：${selectedVia}`);
+            }
+            if (detail.independent_ui_entry_observed === true) {
+                detailParts.push('已观察到独立 UI 入口');
+            }
+            if (detail.result_url_changed === true) {
+                detailParts.push('已观察到结果页 URL 变化');
+            }
+            if (detail.result_signature_changed === true) {
+                detailParts.push('已观察到结果签名变化');
+            } else if (
+                detail.result_signature_before_action
+                || detail.result_signature_after_action
+            ) {
+                const beforeCount = Number(detail.result_signature_before_action?.item_count || 0);
+                const afterCount = Number(detail.result_signature_after_action?.item_count || 0);
+                detailParts.push(`结果签名：动作前${beforeCount}条 / 动作后${afterCount}条`);
+            }
+            if (detail.semantic_verification_stage === 'direct_entry_result_shift_observed') {
+                detailParts.push('阶段：独立入口动作后已观察到结果变化');
+            } else if (detail.semantic_verification_stage === 'direct_entry_result_shift_not_observed') {
+                detailParts.push('阶段：独立入口动作后暂未观察到结果变化');
+            } else if (detail.semantic_verification_stage === 'dependency_pair_strong_verified') {
+                detailParts.push('阶段：依赖组合已通过真实强证据确认');
+            }
+            if (detail.observation_scope === 'result_page_text') {
+                detailParts.push('证据来源：结果页可见筛选区');
+            }
+            if (detail.next_required_action === 'panel_open_and_toggle') {
+                detailParts.push('下一步：继续收紧面板打开与勾选闭环');
+            }
+            const verificationMode = String(detail.verification_mode || '').trim();
+            if (verificationMode) {
+                detailParts.push(`校验方式：${verificationModeLabelMap[verificationMode] || verificationMode}`);
+            }
+            const resultUrl = String(detail.result_url || '').trim();
+            if (resultUrl) {
+                detailParts.push(`结果页：${resultUrl}`);
+            }
+            return detailParts.join(' · ');
+        }
+        const verificationMode = String(detail.verification_mode || '').trim();
+        if (verificationMode) {
+            const verificationModeLabel = verificationModeLabelMap[verificationMode] || verificationMode;
+            if (verificationMode === 'navigation_failed' && detail.attempted_result_url) {
+                return `校验方式：${verificationModeLabel} · 目标结果页：${detail.attempted_result_url}`;
+            }
+            return `校验方式：${verificationModeLabel}`;
         }
         const matchedParams = detail.matched_params && typeof detail.matched_params === 'object'
             ? Object.entries(detail.matched_params)
@@ -5111,6 +5474,9 @@ const App = () => {
         const expectedValues = Array.isArray(detail.expected_values) ? detail.expected_values : [];
         if (expectedValues.length > 0) {
             return `目标值：${expectedValues.join(', ')}`;
+        }
+        if (detail.attempted_result_url) {
+            return `目标结果页：${detail.attempted_result_url}`;
         }
         return '';
     };
@@ -5139,16 +5505,68 @@ const App = () => {
         } else if (verificationEntry) {
             hintParts.push(`验证入口：${verificationEntry}`);
         }
+        if (filterMeta.observation_scope === 'result_page_text') {
+            hintParts.push('观察范围：结果页文本');
+        }
+        if (filterMeta.next_required_action === 'panel_open_and_toggle') {
+            hintParts.push('后续动作：面板打开与勾选');
+        }
         if (mappingHint) {
             hintParts.push(mappingHint);
         }
         return hintParts.join(' · ');
     };
 
+    const formatSourceFilterSummaryChipTitle = (filterSummary, filterKey) => {
+        if (!filterSummary || typeof filterSummary !== 'object' || !filterKey) {
+            return '';
+        }
+        const filterMeta = filterSummary.filterStatusMap?.[filterKey];
+        const detailText = formatQueryVerificationDetail(
+            filterSummary.queryVerificationDetails?.[filterKey]
+        );
+        const reasonText = getFilterStatusReasonText(filterMeta?.reason);
+        const hintText = formatFilterMappingHint(filterMeta, filterKey);
+        return [detailText, reasonText, hintText].filter(Boolean).join(' · ');
+    };
+
     const getSourceEstimatedProfit = (source, xianyuPrice) => {
+        if (Number.isFinite(Number(source?.estimated_profit))) {
+            return Number(source.estimated_profit);
+        }
         const listingPrice = parseFloat(xianyuPrice || 0);
         const costPrice = parseFloat(source?.min_price || 0);
         return listingPrice - costPrice - 20;
+    };
+
+    const formatTaskChannelSummaryText = (channel) => {
+        const summary = normalizeChannelFilterSummary(channel?.filter_summary);
+        if (summary.unsupported) {
+            return '当前渠道不支持';
+        }
+        if (summary.legacyMissingSnapshot) {
+            return '历史快照缺失';
+        }
+        const parts = [];
+        if (summary.configured.length > 0) {
+            parts.push(`已启用 ${summary.configured.length}`);
+        }
+        if (summary.applied.length > 0) {
+            parts.push(`已生效 ${summary.applied.length}`);
+        }
+        if (summary.queryInjected.length > 0) {
+            parts.push(`待验证 ${summary.queryInjected.length}`);
+        }
+        if (summary.configuredPending.length > 0) {
+            parts.push(`已配置未验证 ${summary.configuredPending.length}`);
+        }
+        if (summary.unapplied.length > 0) {
+            parts.push(`未应用 ${summary.unapplied.length}`);
+        }
+        if (summary.runtimeAuditStage) {
+            parts.push(formatRuntimeAuditStage(summary.runtimeAuditStage));
+        }
+        return parts.join(' · ');
     };
 
     const buildChannelGroupsFromSources = (sources = []) => {
@@ -5229,30 +5647,60 @@ const App = () => {
     const completedTasks = tasks.filter(t => t.status === '已完成');
     const resolvedChannelGroups = useMemo(() => {
         if (!selectedItem) return [];
-        const rawGroups = Array.isArray(selectedItem.channel_groups) && selectedItem.channel_groups.length > 0
+        const hasApiProvidedChannelGroups = Array.isArray(selectedItem.channel_groups) && selectedItem.channel_groups.length > 0;
+        const rawGroups = hasApiProvidedChannelGroups
             ? selectedItem.channel_groups
             : buildChannelGroupsFromSources(selectedItem.sources || []);
         const listingPrice = parseFloat(selectedItem.xianyu_item?.price || 0);
         const decorateGroup = (group) => {
-            const sortedSources = [...(group.sources || [])].sort(
-                (left, right) => getSourceEstimatedProfit(right, listingPrice) - getSourceEstimatedProfit(left, listingPrice)
-            );
-            const bestEstimatedProfit = sortedSources.length > 0
-                ? Math.max(...sortedSources.map(source => getSourceEstimatedProfit(source, listingPrice)))
+            const normalizedSources = hasApiProvidedChannelGroups
+                ? [...(group.sources || [])]
+                : [...(group.sources || [])].sort(
+                    (left, right) => getSourceEstimatedProfit(right, listingPrice) - getSourceEstimatedProfit(left, listingPrice)
+                );
+            const bestEstimatedProfit = normalizedSources.length > 0
+                ? Math.max(...normalizedSources.map(source => getSourceEstimatedProfit(source, listingPrice)))
                 : Number.NEGATIVE_INFINITY;
+            const normalizedFilterSummary = group.filter_summary && typeof group.filter_summary === 'object'
+                ? normalizeChannelFilterSummary(
+                    group.filter_summary,
+                    group.source_filter_snapshot,
+                    group.channel_type
+                )
+                : summarizeChannelFilterSnapshot(group.source_filter_snapshot, group.channel_type);
             return {
                 ...group,
-                sources: sortedSources,
-                best_estimated_profit: bestEstimatedProfit,
+                sources: normalizedSources,
+                best_estimated_profit: Number.isFinite(Number(group?.best_estimated_profit))
+                    ? Number(group.best_estimated_profit)
+                    : bestEstimatedProfit,
+                filter_summary: normalizedFilterSummary,
             };
         };
-        return rawGroups
+        const decoratedGroups = rawGroups
             .map(decorateGroup)
-            .filter(group => sourceChannelFilter === "all" || group.channel_id === sourceChannelFilter)
-            .sort((left, right) => {
+            .filter(group => sourceChannelFilter === "all" || group.channel_id === sourceChannelFilter);
+        if (hasApiProvidedChannelGroups) {
+            return decoratedGroups;
+        }
+        return decoratedGroups.sort((left, right) => {
+            if (right.best_estimated_profit !== left.best_estimated_profit) {
                 return right.best_estimated_profit - left.best_estimated_profit;
-            });
+            }
+            return String(left.channel_label || left.channel_id || '').localeCompare(
+                String(right.channel_label || right.channel_id || ''),
+                'zh-CN'
+            );
+        });
     }, [selectedItem, sourceChannelFilter]);
+    const sourceSortStrategyLabel = String(
+        selectedItem?.source_sort_strategy?.label
+        || '预估纯利倒序'
+    ).trim() || '预估纯利倒序';
+    const sourceSortStrategyDescription = String(
+        selectedItem?.source_sort_strategy?.description
+        || '当前结果固定按预估纯利从高到低排序，渠道筛选仅影响当前展示范围。'
+    ).trim() || '当前结果固定按预估纯利从高到低排序，渠道筛选仅影响当前展示范围。';
     const pageIntro = (() => {
         if (view === 'item_detail') return null;
         if (view === 'dashboard') return { icon: 'dashboard', title: '控制台中心', description: '全局扫描 Worker 统计面板及后台状态概览。' };
@@ -5656,16 +6104,22 @@ const App = () => {
 
                                                 <p className="text-xs text-secondary mt-2">调研时间: {t.created_at}</p>
 
-                                                {getTaskUsedChannels(t).length > 0 && (
-                                                    <div className="flex flex-wrap gap-1.5 mt-3 min-h-[24px]">
-                                                        {getTaskUsedChannels(t).map(channel => (
-                                                            <span
-                                                                key={`archive-${t.id}-${channel.channel_id}`}
-                                                                className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px] font-semibold"
-                                                            >
-                                                                {channel.channel_label || channel.channel_id}
-                                                                {channel.source_count > 0 ? ` · ${channel.source_count}` : ''}
-                                                            </span>
+                                                {getTaskChannelSummaries(t).length > 0 && (
+                                                    <div className="flex flex-wrap gap-2 mt-3 min-h-[24px]">
+                                                        {getTaskChannelSummaries(t).map(channel => (
+                                                            <div key={`archive-${t.id}-${channel.channel_id}`} className="flex flex-col gap-1">
+                                                                <span
+                                                                    className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px] font-semibold"
+                                                                >
+                                                                    {channel.channel_label || channel.channel_id}
+                                                                    {channel.source_count > 0 ? ` · ${channel.source_count}` : ''}
+                                                                </span>
+                                                                {formatTaskChannelSummaryText(channel) && (
+                                                                    <span className="text-[10px] text-secondary px-1">
+                                                                        {formatTaskChannelSummaryText(channel)}
+                                                                    </span>
+                                                                )}
+                                                            </div>
                                                         ))}
                                                     </div>
                                                 )}
@@ -5792,19 +6246,25 @@ const App = () => {
                                                  <div className="text-xs text-secondary mt-2">调研时间: {t.created_at}</div>
                                              </div>
 
-                                             {getTaskUsedChannels(t).length > 0 && (
-                                                 <div className="flex flex-wrap justify-center gap-1.5 mt-3 min-h-[24px]">
-                                                     {getTaskUsedChannels(t).map(channel => (
-                                                         <span
-                                                             key={`results-${t.id}-${channel.channel_id}`}
-                                                             className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px] font-semibold"
-                                                         >
-                                                             {channel.channel_label || channel.channel_id}
-                                                             {channel.source_count > 0 ? ` · ${channel.source_count}` : ''}
-                                                         </span>
-                                                     ))}
-                                                 </div>
-                                             )}
+                                            {getTaskChannelSummaries(t).length > 0 && (
+                                                <div className="flex flex-wrap justify-center gap-2 mt-3 min-h-[24px]">
+                                                    {getTaskChannelSummaries(t).map(channel => (
+                                                        <div key={`results-${t.id}-${channel.channel_id}`} className="flex flex-col items-center gap-1">
+                                                            <span
+                                                                className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px] font-semibold"
+                                                            >
+                                                                {channel.channel_label || channel.channel_id}
+                                                                {channel.source_count > 0 ? ` · ${channel.source_count}` : ''}
+                                                            </span>
+                                                            {formatTaskChannelSummaryText(channel) && (
+                                                                <span className="text-[10px] text-secondary">
+                                                                    {formatTaskChannelSummaryText(channel)}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            )}
                                              
                                              <div className="flex justify-between items-end border-t border-border-hairline/60 pt-2 font-mono text-[9px] text-secondary/60 mt-3">
                                                  <span>V.{t.version}</span>
@@ -5883,7 +6343,7 @@ const App = () => {
                                          <span className="material-symbols-outlined text-[15px] text-secondary">swap_vert</span>
                                          <span className="text-xs text-secondary font-semibold whitespace-nowrap">固定排序</span>
                                          <span className="px-2.5 py-1 rounded-lg bg-surface-container-low border border-border-hairline text-xs font-semibold text-on-surface whitespace-nowrap">
-                                             预估纯利倒序
+                                             {sourceSortStrategyLabel}
                                          </span>
                                      </div>
 
@@ -5964,7 +6424,7 @@ const App = () => {
                                  </div>
                                  <div className="w-full flex justify-end">
                                      <span className="text-[11px] text-secondary">
-                                         当前结果固定按预估纯利从高到低排序，渠道筛选仅影响当前展示范围。
+                                         {sourceSortStrategyDescription}
                                      </span>
                                  </div>
                              </header>
@@ -5996,27 +6456,103 @@ const App = () => {
                                          </div>
 
                                          {(() => {
-                                             const filterSummary = summarizeChannelFilterSnapshot(group.source_filter_snapshot);
-                                             if (
-                                                 filterSummary.configured.length === 0 &&
-                                                 filterSummary.applied.length === 0 &&
-                                                 filterSummary.unapplied.length === 0
-                                             ) {
-                                                 return null;
-                                             }
-                                             return (
+                                            const filterSummary = normalizeChannelFilterSummary(
+                                                group.filter_summary,
+                                                group.source_filter_snapshot,
+                                                group.channel_type
+                                            );
+                                            if (
+                                                filterSummary.configuredPending.length === 0 &&
+                                                filterSummary.applied.length === 0 &&
+                                                filterSummary.unapplied.length === 0 &&
+                                                filterSummary.queryInjected.length === 0 &&
+                                                !filterSummary.legacyMissingSnapshot &&
+                                                !filterSummary.unsupported
+                                            ) {
+                                                return null;
+                                            }
+                                            return (
                                                  <div className="px-1 flex flex-wrap items-center gap-2">
                                                      {filterSummary.configured.length > 0 && (
                                                          <div className="flex flex-wrap items-center gap-1.5">
-                                                             <span className="text-[10px] font-semibold text-secondary">已配置</span>
+                                                             <span className="text-[10px] font-semibold text-secondary">当前渠道货源筛选项</span>
                                                              {filterSummary.configured.map(filterKey => (
                                                                  <span
                                                                      key={`${group.channel_id}-configured-${filterKey}`}
+                                                                     className="px-2 py-0.5 rounded-full bg-surface-container-low text-on-surface border border-border-hairline text-[10px]"
+                                                                 >
+                                                                     {getChannelFilterLabel(filterKey)}
+                                                                 </span>
+                                                             ))}
+                                                         </div>
+                                                     )}
+                                                     {filterSummary.unsupported && (
+                                                         <div className="flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">当前渠道不支持</span>
+                                                             <span className="px-2 py-0.5 rounded-full bg-surface-container-low text-secondary border border-border-hairline text-[10px]">
+                                                                 当前渠道暂不支持 1688 搜索筛选项
+                                                             </span>
+                                                         </div>
+                                                     )}
+                                                     {filterSummary.legacyMissingSnapshot && (
+                                                         <div className="flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">历史快照缺失</span>
+                                                             <span className="px-2 py-0.5 rounded-full bg-surface-container-low text-secondary border border-border-hairline text-[10px]">
+                                                                 该渠道资产生成时尚未记录筛选快照，当前无法回溯当时使用的搜索筛选策略
+                                                             </span>
+                                                         </div>
+                                                     )}
+                                                     {filterSummary.runtimeAuditStage && (
+                                                         <div className="flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">运行证据</span>
+                                                             <span
+                                                                 className="px-2 py-0.5 rounded-full bg-surface-container-low text-secondary border border-border-hairline text-[10px]"
+                                                                 title={filterSummary.runtimeAuditSource || ''}
+                                                             >
+                                                                 {formatRuntimeAuditStage(filterSummary.runtimeAuditStage)}
+                                                             </span>
+                                                         </div>
+                                                     )}
+                                                     {filterSummary.configuredPending.length > 0 && (
+                                                         <div className="flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">已配置未验证</span>
+                                                             {filterSummary.configuredPending.map(filterKey => (
+                                                                 <span
+                                                                     key={`${group.channel_id}-configured-pending-${filterKey}`}
                                                                      className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px]"
                                                                  >
                                                                      {getChannelFilterLabel(filterKey)}
                                                                  </span>
                                                              ))}
+                                                         </div>
+                                                     )}
+                                                     {filterSummary.configuredPending.length > 0 && (
+                                                         <div className="w-full flex flex-wrap items-center gap-1.5">
+                                                             <span className="text-[10px] font-semibold text-secondary">配置态线索</span>
+                                                             {filterSummary.configuredPending.map((filterKey) => {
+                                                                 const filterMeta = filterSummary.filterStatusMap?.[filterKey];
+                                                                 const detailText = formatQueryVerificationDetail(
+                                                                     filterSummary.queryVerificationDetails?.[filterKey]
+                                                                 );
+                                                                 const reasonText = getFilterStatusReasonText(
+                                                                     filterMeta?.reason
+                                                                 );
+                                                                 const hintText = formatFilterMappingHint(filterMeta, filterKey);
+                                                                 if (!detailText && !reasonText && !hintText) {
+                                                                     return null;
+                                                                 }
+                                                                 return (
+                                                                     <span
+                                                                         key={`${group.channel_id}-configured-pending-detail-${filterKey}`}
+                                                                         className="px-2 py-0.5 rounded-full bg-primary/6 text-primary border border-primary/15 text-[10px]"
+                                                                     >
+                                                                         {getChannelFilterLabel(filterKey)}
+                                                                         {detailText ? `: ${detailText}` : ''}
+                                                                         {reasonText ? `${detailText ? ' · ' : ': '}${reasonText}` : ''}
+                                                                         {hintText ? ` · ${hintText}` : ''}
+                                                                     </span>
+                                                                 );
+                                                             })}
                                                          </div>
                                                      )}
                                                      {filterSummary.queryInjected.length > 0 && (
@@ -6047,7 +6583,7 @@ const App = () => {
                                                      )}
                                                      {filterSummary.unapplied.length > 0 && (
                                                          <div className="flex flex-wrap items-center gap-1.5">
-                                                             <span className="text-[10px] font-semibold text-secondary">待映射</span>
+                                                             <span className="text-[10px] font-semibold text-secondary">未应用</span>
                                                              {filterSummary.unapplied.map(filterKey => (
                                                                  <span
                                                                      key={`${group.channel_id}-unapplied-${filterKey}`}
@@ -6151,20 +6687,29 @@ const App = () => {
                                          })()}
 
                                          {group.sources.map((src, i) => { 
-                                             const marginVal = (selectedItem.xianyu_item?.price - src.min_price - 20).toFixed(2); 
+                                             const estimatedProfit = getSourceEstimatedProfit(
+                                                 src,
+                                                 selectedItem.xianyu_item?.price
+                                             );
+                                             const marginVal = estimatedProfit.toFixed(2);
                                              const isDropped = !!src.drop_reason;
                                              const isChecked = selectedIds.includes(src.db_id);
-                                             const sourceMetrics = [
-                                                 src.pickup_48h_text,
-                                                 src.pickup_24h_text,
-                                                 src.month_dispatch_text,
-                                                 src.seven_day_dispatch_text,
-                                                 src.listing_count_text,
-                                                 src.distributor_count_text,
-                                                 src.waybill_support_text,
-                                                 src.settled_years_text,
-                                             ].filter(Boolean);
-                                             return (
+                                            const sourceMetrics = [
+                                                src.pickup_48h_text,
+                                                src.pickup_24h_text,
+                                                src.month_dispatch_text,
+                                                src.seven_day_dispatch_text,
+                                                src.listing_count_text,
+                                                src.distributor_count_text,
+                                                src.waybill_support_text,
+                                                src.settled_years_text,
+                                            ].filter(Boolean);
+                                            const sourceFilterSummary = normalizeChannelFilterSummary(
+                                                src.source_filter_summary,
+                                                src.source_filter_snapshot,
+                                                src.source_channel_type
+                                            );
+                                            return (
                                                  <div 
                                                      className={`bg-surface-container-lowest border rounded-xl p-4 ambient-shadow flex justify-between items-center relative overflow-hidden group ${
                                                          isDropped ? 'border-dashed border-outline-variant/60 opacity-60 bg-surface-container-low' : 'border-border-hairline hover:border-primary transition-colors'
@@ -6241,6 +6786,93 @@ const App = () => {
                                                                      })}
                                                                  </div>
                                                              )}
+                                                             {hasRenderableChannelFilterSummary(sourceFilterSummary) && (
+                                                                 <div className="flex flex-wrap gap-2 mt-2.5 items-center">
+                                                                     <span className="text-[10px] font-semibold text-secondary">本货源筛选摘要</span>
+                                                                     {sourceFilterSummary.legacyMissingSnapshot && (
+                                                                         <span className="px-2 py-0.5 rounded-full border text-[10px] bg-surface-container-low text-secondary border-border-hairline">
+                                                                             历史快照缺失
+                                                                         </span>
+                                                                     )}
+                                                                     {sourceFilterSummary.unsupported && (
+                                                                         <span className="px-2 py-0.5 rounded-full border text-[10px] bg-surface-container-low text-secondary border-border-hairline">
+                                                                             当前渠道不支持
+                                                                         </span>
+                                                                     )}
+                                                                     {sourceFilterSummary.runtimeAuditStage && (
+                                                                         <span
+                                                                             className="px-2 py-0.5 rounded-full border text-[10px] bg-surface-container-low text-secondary border-border-hairline"
+                                                                             title={sourceFilterSummary.runtimeAuditSource || ''}
+                                                                         >
+                                                                             {formatRuntimeAuditStage(sourceFilterSummary.runtimeAuditStage)}
+                                                                         </span>
+                                                                     )}
+                                                                     {sourceFilterSummary.configuredPending.length > 0 && (
+                                                                         <div className="flex flex-wrap gap-1.5 items-center">
+                                                                             <span className="px-2 py-0.5 rounded-full border text-[10px] bg-primary/8 text-primary border-primary/15">
+                                                                                 已配置未验证
+                                                                             </span>
+                                                                             {sourceFilterSummary.configuredPending.map((filterKey) => (
+                                                                                 <span
+                                                                                     key={`${src.db_id}-source-configured-pending-${filterKey}`}
+                                                                                     className="px-2 py-0.5 rounded-full border text-[10px] bg-primary/6 text-primary border-primary/10"
+                                                                                     title={formatSourceFilterSummaryChipTitle(sourceFilterSummary, filterKey)}
+                                                                                 >
+                                                                                     {getChannelFilterLabel(filterKey)}
+                                                                                 </span>
+                                                                             ))}
+                                                                         </div>
+                                                                     )}
+                                                                     {sourceFilterSummary.queryInjected.length > 0 && (
+                                                                         <div className="flex flex-wrap gap-1.5 items-center">
+                                                                             <span className="px-2 py-0.5 rounded-full border text-[10px] bg-secondary/10 text-secondary border-border-hairline">
+                                                                                 已注入待验证
+                                                                             </span>
+                                                                             {sourceFilterSummary.queryInjected.map((filterKey) => (
+                                                                                 <span
+                                                                                     key={`${src.db_id}-source-query-injected-${filterKey}`}
+                                                                                     className="px-2 py-0.5 rounded-full border text-[10px] bg-secondary/6 text-secondary border-border-hairline"
+                                                                                     title={formatSourceFilterSummaryChipTitle(sourceFilterSummary, filterKey)}
+                                                                                 >
+                                                                                     {getChannelFilterLabel(filterKey)}
+                                                                                 </span>
+                                                                             ))}
+                                                                         </div>
+                                                                     )}
+                                                                     {sourceFilterSummary.applied.length > 0 && (
+                                                                         <div className="flex flex-wrap gap-1.5 items-center">
+                                                                             <span className="px-2 py-0.5 rounded-full border text-[10px] bg-success/8 text-success border-success/20">
+                                                                                 已生效
+                                                                             </span>
+                                                                             {sourceFilterSummary.applied.map((filterKey) => (
+                                                                                 <span
+                                                                                     key={`${src.db_id}-source-applied-${filterKey}`}
+                                                                                     className="px-2 py-0.5 rounded-full border text-[10px] bg-success/6 text-success border-success/15"
+                                                                                     title={formatSourceFilterSummaryChipTitle(sourceFilterSummary, filterKey)}
+                                                                                 >
+                                                                                     {getChannelFilterLabel(filterKey)}
+                                                                                 </span>
+                                                                             ))}
+                                                                         </div>
+                                                                     )}
+                                                                     {sourceFilterSummary.unapplied.length > 0 && (
+                                                                         <div className="flex flex-wrap gap-1.5 items-center">
+                                                                             <span className="px-2 py-0.5 rounded-full border text-[10px] bg-warning/8 text-warning border-warning/20">
+                                                                                 未应用
+                                                                             </span>
+                                                                             {sourceFilterSummary.unapplied.map((filterKey) => (
+                                                                                 <span
+                                                                                     key={`${src.db_id}-source-unapplied-${filterKey}`}
+                                                                                     className="px-2 py-0.5 rounded-full border text-[10px] bg-warning/6 text-warning border-warning/15"
+                                                                                     title={formatSourceFilterSummaryChipTitle(sourceFilterSummary, filterKey)}
+                                                                                 >
+                                                                                     {getChannelFilterLabel(filterKey)}
+                                                                                 </span>
+                                                                             ))}
+                                                                         </div>
+                                                                     )}
+                                                                 </div>
+                                                             )}
                                                          </div>
                                                      </div>
 
@@ -6255,7 +6887,7 @@ const App = () => {
                                                              <>
                                                                  <div className="flex justify-end gap-3 items-baseline">
                                                                      <span className="font-mono text-lg font-black text-on-surface">¥{src.min_price}</span>
-                                                                     <span className={`text-xs font-bold ${parseFloat(marginVal) > 50 ? 'text-success' : 'text-error'}`}>
+                                                                     <span className={`text-xs font-bold ${estimatedProfit > 50 ? 'text-success' : 'text-error'}`}>
                                                                          预估纯利: ¥{marginVal}
                                                                      </span>
                                                                  </div>

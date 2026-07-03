@@ -582,12 +582,23 @@ class ConfigManager:
         return ""
 
     @staticmethod
+    def _normalize_filter_label(channel_type: str | None, filter_key: str) -> str:
+        normalized_key = str(filter_key or "").strip()
+        if str(channel_type or "").strip().lower() == "ali1688":
+            meta = get_ali1688_channel_search_filter_meta(normalized_key)
+            return str(meta.get("label") or normalized_key).strip() or normalized_key
+        return normalized_key
+
+    @staticmethod
     def _normalize_filter_extra_meta(channel_type: str | None, filter_key: str) -> Dict[str, Any]:
         if str(channel_type or "").strip().lower() != "ali1688":
             return {
                 "semantic_dependencies": [],
                 "verification_entry": "",
                 "mapping_hint": "",
+                "observation_scope": "",
+                "entry_signal_type": "",
+                "next_required_action": "",
             }
         meta = get_ali1688_channel_search_filter_meta(str(filter_key or "").strip())
         return {
@@ -598,6 +609,9 @@ class ConfigManager:
             ],
             "verification_entry": str(meta.get("verification_entry") or "").strip(),
             "mapping_hint": str(meta.get("mapping_hint") or "").strip(),
+            "observation_scope": str(meta.get("observation_scope") or "").strip(),
+            "entry_signal_type": str(meta.get("entry_signal_type") or "").strip(),
+            "next_required_action": str(meta.get("next_required_action") or "").strip(),
         }
 
     @staticmethod
@@ -613,10 +627,8 @@ class ConfigManager:
         if status == "applied":
             if mapping_type == "query_candidate":
                 return "query_mapped"
-            if mapping_type in {"ui_checkbox_candidate", "special_panel_candidate"}:
+            if mapping_type in {"ui_checkbox_candidate", "special_panel_candidate", "semantic_combo_candidate"}:
                 return "ui_automation"
-            if mapping_type == "semantic_combo_candidate":
-                return "mixed"
         if status == "query_injected_pending_verification":
             return "query_candidate"
         return "snapshot_only"
@@ -644,6 +656,53 @@ class ConfigManager:
         if normalized_mapping_type == "semantic_combo_candidate":
             return "semantic_combo_not_confirmed"
         return "runtime_mapping_not_implemented_yet"
+
+    @staticmethod
+    def _derive_semantic_conclusion(
+        *,
+        mapping_type: str,
+        verification_detail: Dict[str, Any] | None,
+    ) -> str:
+        if str(mapping_type or "").strip() != "semantic_combo_candidate":
+            return ""
+        detail = dict(verification_detail or {})
+        stage = str(detail.get("semantic_verification_stage") or "").strip()
+        if stage == "direct_entry_result_shift_observed":
+            return "independent_entry_result_shift_observed"
+        if stage == "direct_entry_result_shift_not_observed":
+            return "independent_entry_no_result_shift"
+        if stage == "dependency_pair_enabled":
+            return "dependency_pair_ready_pending_runtime"
+        if stage == "dependency_pair_strong_verified":
+            return "dependency_pair_strong_verified"
+        if stage == "dependency_pair_incomplete":
+            return "dependency_pair_incomplete"
+        if detail.get("independent_ui_entry_observed") is True:
+            return "independent_entry_observed_pending_result_validation"
+        return ""
+
+    @staticmethod
+    def _derive_special_panel_conclusion(
+        *,
+        mapping_type: str,
+        status: str,
+        verification_detail: Dict[str, Any] | None,
+    ) -> str:
+        if str(mapping_type or "").strip() != "special_panel_candidate":
+            return ""
+        detail = dict(verification_detail or {})
+        if detail.get("entry_signal_detected") is True and str(detail.get("verification_mode") or "").strip() != "dom_panel_action":
+            return "entry_signal_detected_pending_panel_mapping"
+        if str(detail.get("verification_mode") or "").strip() == "dom_panel_action":
+            if str(status or "").strip() == "applied":
+                if str(detail.get("panel_term_selected_via_after_action") or "").strip() == "active_condition_text":
+                    return "panel_active_condition_observed"
+                if detail.get("result_signature_changed") is True or detail.get("result_url_changed") is True:
+                    return "panel_action_result_shift_observed"
+                return "panel_action_applied_no_result_shift"
+            if detail.get("panel_trigger_clicked") is True or detail.get("entry_click_attempted") is True:
+                return "panel_open_or_toggle_failed"
+        return ""
 
     def normalize_channel_search_filter_snapshot(
         self,
@@ -742,9 +801,23 @@ class ConfigManager:
                 status=status,
                 raw_mapping_stage=str(raw_meta.get("mapping_stage") or "").strip(),
             )
+            semantic_conclusion = self._derive_semantic_conclusion(
+                mapping_type=mapping_type,
+                verification_detail=verification_detail,
+            )
+            if semantic_conclusion and not str(verification_detail.get("semantic_conclusion") or "").strip():
+                verification_detail["semantic_conclusion"] = semantic_conclusion
+            special_panel_conclusion = self._derive_special_panel_conclusion(
+                mapping_type=mapping_type,
+                status=status,
+                verification_detail=verification_detail,
+            )
+            if special_panel_conclusion and not str(verification_detail.get("special_panel_conclusion") or "").strip():
+                verification_detail["special_panel_conclusion"] = special_panel_conclusion
             filter_status_map[key] = {
                 "configured": True,
                 "supported": key in supported_filter_keys,
+                "label": self._normalize_filter_label(resolved_channel_type, key),
                 "mapping_type": mapping_type,
                 "mapping_stage": per_filter_mapping_stage,
                 "group": filter_group,
@@ -754,6 +827,11 @@ class ConfigManager:
                 "semantic_dependencies": list(extra_meta.get("semantic_dependencies") or []),
                 "verification_entry": str(extra_meta.get("verification_entry") or "").strip(),
                 "mapping_hint": str(extra_meta.get("mapping_hint") or "").strip(),
+                "observation_scope": str(extra_meta.get("observation_scope") or "").strip(),
+                "entry_signal_type": str(extra_meta.get("entry_signal_type") or "").strip(),
+                "next_required_action": str(extra_meta.get("next_required_action") or "").strip(),
+                "semantic_conclusion": semantic_conclusion,
+                "special_panel_conclusion": special_panel_conclusion,
             }
 
         if filter_status_map:
@@ -780,6 +858,7 @@ class ConfigManager:
                     **self._normalize_filter_extra_meta(resolved_channel_type, key),
                     "configured": True,
                     "supported": key in supported_filter_keys,
+                    "label": self._normalize_filter_label(resolved_channel_type, key),
                     "mapping_type": self._normalize_filter_mapping_type(resolved_channel_type, key),
                     "mapping_stage": self._derive_filter_mapping_stage(
                         mapping_type=self._normalize_filter_mapping_type(resolved_channel_type, key),
@@ -810,6 +889,19 @@ class ConfigManager:
                         )
                     ),
                     "verification_detail": dict(query_verification_details.get(key) or {}),
+                    "semantic_conclusion": self._derive_semantic_conclusion(
+                        mapping_type=self._normalize_filter_mapping_type(resolved_channel_type, key),
+                        verification_detail=dict(query_verification_details.get(key) or {}),
+                    ),
+                    "special_panel_conclusion": self._derive_special_panel_conclusion(
+                        mapping_type=self._normalize_filter_mapping_type(resolved_channel_type, key),
+                        status=(
+                            "applied" if key in applied_filter_keys
+                            else "query_injected_pending_verification" if key in query_injected_filter_keys
+                            else "unapplied"
+                        ),
+                        verification_detail=dict(query_verification_details.get(key) or {}),
+                    ),
                 }
                 for key in configured_enabled_filter_keys
             }
@@ -832,6 +924,8 @@ class ConfigManager:
 
         mapping_stage = str(raw_snapshot.get("mapping_stage") or "").strip() or "snapshot_only"
         mapping_notes = str(raw_snapshot.get("mapping_notes") or "").strip()
+        runtime_audit_stage = str(raw_snapshot.get("runtime_audit_stage") or "").strip()
+        runtime_audit_source = str(raw_snapshot.get("runtime_audit_source") or "").strip()
         if not mapping_notes:
             if mapping_stage == "query_mapped":
                 mapping_notes = "query 候选项已进入最终结果页验证闭环。"
@@ -871,6 +965,10 @@ class ConfigManager:
             "filters": dict(normalized_filters),
             "configured_filters": dict(normalized_filters),
             "supported_filter_keys": list(supported_filter_keys),
+            "filter_labels": {
+                key: self._normalize_filter_label(resolved_channel_type, key)
+                for key in supported_filter_keys
+            },
             "configured_filter_keys": list(configured_enabled_filter_keys),
             "configured_filter_count": len(configured_enabled_filter_keys),
             "enabled_filter_keys": list(configured_enabled_filter_keys),
@@ -898,6 +996,8 @@ class ConfigManager:
             "filter_status_map": filter_status_map,
             "mapping_stage": mapping_stage,
             "mapping_notes": mapping_notes,
+            "runtime_audit_stage": runtime_audit_stage,
+            "runtime_audit_source": runtime_audit_source,
         }
 
     def get_channel_search_filter_snapshot(

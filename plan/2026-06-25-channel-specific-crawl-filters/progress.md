@@ -351,3 +351,59 @@
 
 ---
 *当前处于“调研深化 + 实施前拆批”阶段：配置模型与前端编辑区已落位，下一步应先补 runtime 快照透传与结果回流，而不是直接硬猜全部筛选参数。*
+
+## 会话：2026-07-03
+
+### 计划状态复核与验证收敛
+- **状态：** completed
+- 执行的操作：
+  - 复核 `task_plan.md`、`progress.md` 与当前代码事实。
+  - 确认当前代码已经具备：
+    - 渠道级 `channel_search_filters` 配置归一化。
+    - 按渠道隔离与默认初始化。
+    - runtime 快照写入。
+    - `_channel_filter_runtime_snapshot.json` 审计产物。
+    - `ali1688_sources.source_filter_snapshot_json` 入库。
+    - `/api/tasks` 任务级渠道摘要。
+    - `/api/task_details/{task_id}` 渠道组与单条货源筛选摘要。
+    - 前端详情页渠道筛选摘要与固定排序说明。
+  - 修复 `validate_runtime_audit_todo_report_cli_contract()` 的环境污染问题：
+    - 原用例扫描 `outputs scratch`，会被仓库已有真实强证据审计文件影响。
+    - 已改为临时空目录验证“缺少强证据时 `passed=false`”。
+    - 这是验证隔离修复，不改变生产逻辑。
+  - 更新 `task_plan.md`：
+    - 阶段 1 ~ 6 标记为 `completed`。
+    - 验收清单全部勾选。
+    - 明确后续真实站点动作强证据继续归档到 `2026-06-26-channel-search-capability-config`。
+
+### 本轮验证
+- Python 编译检查通过：
+
+```bash
+PYTHONPATH=src /opt/anaconda3/envs/mytools/bin/python -m py_compile scripts/validate_source_channel_config.py scripts/inspect_channel_filter_runtime_audit.py
+```
+
+- 完整渠道筛选配置验证通过：
+
+```bash
+PYTHONPATH=src /opt/anaconda3/envs/mytools/bin/python scripts/validate_source_channel_config.py
+```
+
+- 输出：
+  - `status = passed`
+  - 覆盖 58 个检查项
+  - 包含：
+    - `channel_search_filters_normalization`
+    - `channel_search_filters_default_initialization`
+    - `channel_search_filters_per_channel_isolation`
+    - `channel_search_filters_follow_active_channel_selection`
+    - `channel_search_filter_runtime_state_projection`
+    - `query_filter_in_place_runtime_verification`
+    - `detail_channel_filter_summary_contract`
+    - `detail_source_filter_summary_contract`
+    - `task_channel_summary_contract`
+    - `runtime_audit_todo_report_cli_contract`
+
+### 当前结论
+- 本计划关注的“按渠道配置 1688 商品列表筛选项，并进入 runtime / 入库 / API / 前端追溯”的主链路已经闭环。
+- 后续如果继续推进真实站点筛选动作，不应在本计划里重复建链路，而应进入 `plan/2026-06-26-channel-search-capability-config/` 做具体筛选项的真实强证据回归。

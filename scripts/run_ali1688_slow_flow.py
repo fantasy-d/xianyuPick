@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-import argparse, asyncio, json, html, random, re, sys, logging
+import argparse, asyncio, json, html, random, re, sys, logging, time
 from pathlib import Path
 from playwright.async_api import async_playwright
+from typing import Any
 
 # --- 导入统一日志工具 ---
 BASE_DIR = Path(__file__).resolve().parents[1]
@@ -331,6 +332,100 @@ def _build_runtime_filter_snapshot(configured_snapshot: dict | None) -> dict:
     })
 
 
+def _write_runtime_filter_snapshot_audit(
+    output_dir: Path,
+    runtime_snapshot: dict,
+    *,
+    stage: str,
+    logger=None,
+    extra: dict | None = None,
+) -> dict:
+    """Persist the latest runtime filter evidence even when later parsing fails."""
+    audit_stage = str(stage or "unknown")
+    normalized_snapshot = settings.normalize_channel_search_filter_snapshot({
+        **dict(runtime_snapshot or {}),
+        "runtime_audit_stage": audit_stage,
+        "runtime_audit_source": "_channel_filter_runtime_snapshot.json",
+    })
+    audit_generated_at_epoch = time.time()
+    audit_run_id = (
+        f"{int(audit_generated_at_epoch)}-"
+        f"{normalized_snapshot.get('channel_id') or 'unknown-channel'}-"
+        f"{audit_stage}"
+    )
+    payload = {
+        "stage": audit_stage,
+        "audit_generated_at_epoch": audit_generated_at_epoch,
+        "audit_run_id": audit_run_id,
+        "channel_id": normalized_snapshot.get("channel_id") or "",
+        "channel_type": normalized_snapshot.get("channel_type") or "",
+        "configured_enabled_filter_keys": normalized_snapshot.get("configured_enabled_filter_keys") or [],
+        "query_injected_filter_keys": normalized_snapshot.get("query_injected_filter_keys") or [],
+        "applied_filter_keys": normalized_snapshot.get("applied_filter_keys") or [],
+        "unapplied_filter_keys": normalized_snapshot.get("unapplied_filter_keys") or [],
+        "mapping_stage": normalized_snapshot.get("mapping_stage") or "",
+        "filter_status_map": normalized_snapshot.get("filter_status_map") or {},
+        "query_verification_details": normalized_snapshot.get("query_verification_details") or {},
+        "snapshot": normalized_snapshot,
+    }
+    if isinstance(extra, dict) and extra:
+        payload["extra"] = dict(extra)
+
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        audit_path = output_dir / "_channel_filter_runtime_snapshot.json"
+        audit_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        event_path = output_dir / "_channel_filter_runtime_events.jsonl"
+        with event_path.open("a", encoding="utf-8") as fp:
+            fp.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        if logger:
+            logger.info(
+                "[Search] Channel filter runtime snapshot persisted: %s",
+                {
+                    "stage": payload["stage"],
+                    "audit_path": str(audit_path),
+                    "configured_enabled_filter_keys": payload["configured_enabled_filter_keys"],
+                    "applied_filter_keys": payload["applied_filter_keys"],
+                    "unapplied_filter_keys": payload["unapplied_filter_keys"],
+                },
+            )
+    except Exception as audit_err:
+        if logger:
+            logger.warning(f"[Search] Failed to persist channel filter runtime snapshot: {audit_err}")
+    return normalized_snapshot
+
+
+def _mark_runtime_filter_snapshot_navigation_blocked(
+    runtime_snapshot: dict,
+    *,
+    stage: str,
+    url: str | None = None,
+    reason: str = "navigation_blocked_by_verification",
+) -> dict:
+    filter_status_map = {
+        str(key): dict(value or {})
+        for key, value in dict(runtime_snapshot.get("filter_status_map") or {}).items()
+    }
+    for key, meta in filter_status_map.items():
+        if meta.get("status") in {"applied", "query_injected_pending_verification"}:
+            continue
+        verification_detail = dict(meta.get("verification_detail") or {})
+        if url:
+            verification_detail["blocked_url"] = str(url)
+        verification_detail["blocked_stage"] = str(stage or "")
+        meta["status"] = "blocked"
+        meta["reason"] = reason
+        meta["mapping_stage"] = "navigation_blocked"
+        meta["verification_detail"] = verification_detail
+        filter_status_map[key] = meta
+    return settings.normalize_channel_search_filter_snapshot({
+        **dict(runtime_snapshot or {}),
+        "filter_status_map": filter_status_map,
+        "mapping_stage": "navigation_blocked",
+        "mapping_notes": "1688 页面进入验证码/登录验证，筛选项尚未进入真实搜索页动作阶段。",
+    })
+
+
 def _normalize_probe_text(text: str | None) -> str:
     normalized = html.unescape(str(text or ""))
     normalized = re.sub(r"<[^>]+>", " ", normalized)
@@ -373,6 +468,7 @@ def _mark_runtime_snapshot_non_query_probe(
         matched_terms = [term for term in probe_terms if _normalize_probe_text(term) and _normalize_probe_text(term) in normalized_text]
         verification_detail.update({
             "probe_mode": "html_text_scan",
+            "observation_scope": str(shared_meta.get("observation_scope") or "result_page_text").strip() or "result_page_text",
             "probe_terms": probe_terms,
             "matched_terms": matched_terms,
             "text_visible": bool(matched_terms),
@@ -388,6 +484,11 @@ def _mark_runtime_snapshot_non_query_probe(
             verification_detail["semantic_dependencies"] = list(semantic_dependencies)
             dependencies_enabled = all(bool(configured_filters.get(dep, False)) for dep in semantic_dependencies)
             verification_detail["dependencies_enabled"] = dependencies_enabled
+            verification_detail["semantic_verification_stage"] = (
+                "dependency_pair_enabled"
+                if dependencies_enabled
+                else "dependency_pair_incomplete"
+            )
             if (
                 current_meta.get("status") == "unapplied"
                 and matched_terms
@@ -395,12 +496,816 @@ def _mark_runtime_snapshot_non_query_probe(
             ):
                 current_meta["reason"] = "snapshot_only_until_semantics_confirmed"
                 current_meta["mapping_stage"] = "mixed"
+        if (
+            current_meta.get("mapping_type") == "special_panel_candidate"
+            and current_meta.get("status") == "unapplied"
+            and matched_terms
+        ):
+            verification_detail["entry_signal_detected"] = True
+            verification_detail["entry_signal_type"] = str(shared_meta.get("entry_signal_type") or "text_term").strip() or "text_term"
+            verification_detail["next_required_action"] = str(shared_meta.get("next_required_action") or "panel_open_and_toggle").strip() or "panel_open_and_toggle"
+            current_meta["reason"] = "special_panel_entry_detected_unmapped"
+            current_meta["mapping_stage"] = "mixed"
         current_meta["verification_detail"] = verification_detail
         filter_status_map[key] = current_meta
 
     return settings.normalize_channel_search_filter_snapshot({
         **runtime_snapshot,
         "filter_status_map": filter_status_map,
+    })
+
+
+def _mark_runtime_snapshot_semantic_dependency_combos(runtime_snapshot: dict) -> dict:
+    """Close semantic combo filters when their query dependencies have strong URL evidence."""
+    configured_enabled_filter_keys = list(runtime_snapshot.get("configured_enabled_filter_keys") or [])
+    if not configured_enabled_filter_keys:
+        return runtime_snapshot
+
+    filter_status_map = {
+        str(key): dict(value or {})
+        for key, value in dict(runtime_snapshot.get("filter_status_map") or {}).items()
+    }
+    changed = False
+    for key in configured_enabled_filter_keys:
+        current_meta = dict(filter_status_map.get(key) or {})
+        if str(current_meta.get("mapping_type") or "").strip() != "semantic_combo_candidate":
+            continue
+        shared_meta = get_ali1688_channel_search_filter_meta(key)
+        dependencies = [
+            str(item).strip()
+            for item in current_meta.get("semantic_dependencies") or shared_meta.get("semantic_dependencies") or []
+            if str(item).strip()
+        ]
+        if not dependencies:
+            continue
+
+        dependency_status_map: dict[str, dict] = {}
+        dependencies_strong = True
+        for dep in dependencies:
+            dep_meta = dict(filter_status_map.get(dep) or {})
+            dep_detail = dict(dep_meta.get("verification_detail") or {})
+            dep_strong = (
+                dep_meta.get("status") == "applied"
+                and dep_detail.get("verification_mode") == "post_navigation_url"
+                and bool(dep_detail.get("matched_values"))
+            )
+            dependency_status_map[dep] = {
+                "status": dep_meta.get("status") or "",
+                "mapping_stage": dep_meta.get("mapping_stage") or "",
+                "verification_mode": dep_detail.get("verification_mode") or "",
+                "matched_values": list(dep_detail.get("matched_values") or []),
+                "strong_url_evidence": dep_strong,
+            }
+            dependencies_strong = dependencies_strong and dep_strong
+        if not dependencies_strong:
+            continue
+
+        verification_detail = dict(current_meta.get("verification_detail") or {})
+        verification_detail.update({
+            "verification_mode": "semantic_dependency_pair",
+            "semantic_dependencies": dependencies,
+            "semantic_verification_stage": "dependency_pair_strong_verified",
+            "semantic_conclusion": "dependency_pair_strong_verified",
+            "dependency_status_map": dependency_status_map,
+        })
+        current_meta.update({
+            "status": "applied",
+            "reason": "",
+            "mapping_stage": "semantic_combo",
+            "verification_detail": verification_detail,
+        })
+        filter_status_map[key] = current_meta
+        changed = True
+
+    if not changed:
+        return runtime_snapshot
+
+    return settings.normalize_channel_search_filter_snapshot({
+        **runtime_snapshot,
+        "filter_status_map": filter_status_map,
+        "mapping_stage": "mixed",
+        "mapping_notes": "组合语义筛选项已通过其依赖 query 筛选项的真实 URL 强证据完成闭环。",
+    })
+
+
+async def _refresh_runtime_snapshot_on_current_page(
+    page,
+    runtime_snapshot: dict,
+    *,
+    observed_page_text: str | None,
+    result_url: str | None,
+    logger=None,
+) -> dict:
+    runtime_snapshot = _mark_runtime_snapshot_non_query_probe(
+        runtime_snapshot,
+        observed_page_text=observed_page_text,
+        result_url=result_url,
+    )
+    runtime_snapshot = _mark_runtime_snapshot_semantic_dependency_combos(runtime_snapshot)
+    runtime_snapshot = await _apply_visible_filter_toggle_runtime(
+        page,
+        runtime_snapshot,
+        logger=logger,
+    )
+    runtime_snapshot = _mark_runtime_snapshot_semantic_dependency_combos(runtime_snapshot)
+    runtime_snapshot = await _apply_special_panel_candidate_runtime(
+        page,
+        runtime_snapshot,
+        logger=logger,
+    )
+    return _mark_runtime_snapshot_semantic_dependency_combos(runtime_snapshot)
+
+
+async def _locator_is_actionable(locator) -> bool:
+    try:
+        return await locator.count() > 0 and await locator.is_visible()
+    except Exception:
+        return False
+
+
+async def _find_first_visible_text_locator(root, text_candidates: list[str]) -> tuple[Any | None, str]:
+    for text in text_candidates:
+        normalized = str(text or "").strip()
+        if not normalized:
+            continue
+        try:
+            locator = root.get_by_text(normalized, exact=False).first
+            if await _locator_is_actionable(locator):
+                return locator, normalized
+        except Exception:
+            continue
+    return None, ""
+
+
+async def _detect_ali1688_filter_layout(page) -> str:
+    layout_selectors = [
+        ("image_result_filter_bar", "[class*='configFilter--'], [class*='filterBottomOptions--'], [class*='bottomFilterOption--']"),
+        ("standard_search_filter_bar", ".search-filt-item, .sn-row, .sn-select-wrap"),
+    ]
+    for layout_name, selector in layout_selectors:
+        try:
+            locator = page.locator(selector).first
+            if await _locator_is_actionable(locator):
+                return layout_name
+        except Exception:
+            continue
+    return "unknown"
+
+
+async def _find_filter_entry_locator(page, term: str, *, layout_name: str = "") -> tuple[Any | None, str, dict[str, Any]]:
+    normalized_term = str(term or "").strip()
+    if not normalized_term:
+        return None, "", {
+            "selector_candidates_tried": [],
+            "text_fallback_considered": False,
+            "resolution_mode": "empty_term",
+        }
+
+    selector_candidates: list[tuple[str, str]] = []
+    if layout_name == "image_result_filter_bar":
+        selector_candidates = [
+            ("image_config_filter", f"[class*='configFilter--']:has-text('{normalized_term}')"),
+            ("image_config_label", f"[class*='configLabel--']:has-text('{normalized_term}')"),
+            ("image_bottom_filter_option", f"[class*='bottomFilterOption--']:has-text('{normalized_term}')"),
+            ("image_bottom_option_label", f"[class*='optionLabel--']:has-text('{normalized_term}')"),
+        ]
+    elif layout_name == "standard_search_filter_bar":
+        selector_candidates = [
+            ("standard_search_filter_item", f".search-filt-item:has-text('{normalized_term}')"),
+            ("standard_select_item", f".select-item:has-text('{normalized_term}')"),
+            ("standard_col_item", f".sn-col-item:has-text('{normalized_term}')"),
+        ]
+
+    selector_candidates_tried: list[dict[str, Any]] = []
+    for strategy, selector in selector_candidates:
+        try:
+            locator = page.locator(selector).first
+            actionable = await _locator_is_actionable(locator)
+            selector_candidates_tried.append(
+                {
+                    "strategy": strategy,
+                    "selector": selector,
+                    "actionable": bool(actionable),
+                }
+            )
+            if actionable:
+                return locator, strategy, {
+                    "selector_candidates_tried": selector_candidates_tried,
+                    "text_fallback_considered": False,
+                    "resolution_mode": "selector_candidate",
+                }
+        except Exception:
+            selector_candidates_tried.append(
+                {
+                    "strategy": strategy,
+                    "selector": selector,
+                    "actionable": False,
+                    "error": "locator_probe_failed",
+                }
+            )
+            continue
+
+    text_locator, _ = await _find_first_visible_text_locator(page, [normalized_term])
+    if text_locator is not None:
+        return text_locator, "text_fallback", {
+            "selector_candidates_tried": selector_candidates_tried,
+            "text_fallback_considered": True,
+            "resolution_mode": "text_fallback",
+        }
+    return None, "", {
+        "selector_candidates_tried": selector_candidates_tried,
+        "text_fallback_considered": True,
+        "resolution_mode": "not_found",
+    }
+
+
+async def _click_locator_best_effort(locator) -> bool:
+    try:
+        await locator.click(timeout=2000)
+        return True
+    except Exception:
+        pass
+    try:
+        await locator.click(timeout=2000, force=True)
+        return True
+    except Exception:
+        pass
+    try:
+        handle = await locator.element_handle()
+        if handle is None:
+            return False
+        await handle.evaluate(
+            """
+            (node) => {
+              try {
+                node.scrollIntoView({block: 'center', inline: 'center'});
+              } catch (e) {}
+              try {
+                node.click();
+              } catch (e) {
+                const evt = new MouseEvent('click', {bubbles: true, cancelable: true});
+                node.dispatchEvent(evt);
+              }
+            }
+            """
+        )
+        return True
+    except Exception:
+        return False
+
+
+async def _read_special_panel_term_state(page, term: str) -> dict[str, Any]:
+    script = """
+    ({ term }) => {
+      const normalize = (value) =>
+        String(value || '')
+          .replace(/\\u00a0/g, ' ')
+          .replace(/\\s+/g, ' ')
+          .trim();
+
+      const textIncludes = (node) => normalize(node?.innerText || node?.textContent || '').includes(term);
+      const activeConditionTextIncludes = (node) => {
+        const text = normalize(node?.innerText || node?.textContent || '');
+        return text.includes(`${term}：`) || text.includes(`${term}:`);
+      };
+      const isVisible = (node) => {
+        if (!node || !(node instanceof Element)) return false;
+        const style = window.getComputedStyle(node);
+        const rect = node.getBoundingClientRect();
+        return style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && style.opacity !== '0'
+          && rect.width > 0
+          && rect.height > 0;
+      };
+
+      const activeConditionElements = Array.from(document.querySelectorAll('label, span, div, button, a, li, p')).filter((node) => {
+        if (!activeConditionTextIncludes(node)) return false;
+        if (!isVisible(node)) return false;
+        const children = Array.from(node.children || []);
+        return !children.some((child) => activeConditionTextIncludes(child) && isVisible(child));
+      });
+
+      const elements = Array.from(document.querySelectorAll('label, span, div, button, a, li, p')).filter((node) => {
+        if (!textIncludes(node)) return false;
+        if (!isVisible(node)) return false;
+        const children = Array.from(node.children || []);
+        return !children.some((child) => textIncludes(child) && isVisible(child));
+      });
+
+      const inspectSelected = (start) => {
+        let current = start;
+        for (let depth = 0; current && depth < 6; depth += 1, current = current.parentElement) {
+          const ariaChecked = current.getAttribute?.('aria-checked');
+          if (ariaChecked === 'true') return true;
+          const dataChecked = current.getAttribute?.('data-checked');
+          if (dataChecked === 'true') return true;
+          const className = String(current.className || '');
+          if (/checked|selected|active|is-checked|is-selected/i.test(className)) return true;
+          const input = current.querySelector?.('input[type="checkbox"], input[type="radio"]');
+          if (input && input.checked) return true;
+        }
+        return false;
+      };
+
+      const describe = (node) => {
+        let clickable = node;
+        for (let depth = 0; clickable && depth < 6; depth += 1, clickable = clickable.parentElement) {
+          const tag = (clickable.tagName || '').toLowerCase();
+          const role = clickable.getAttribute?.('role') || '';
+          if (['button', 'label', 'input', 'a'].includes(tag)) {
+            return { selected: inspectSelected(node), selected_via: '', tag, role, text: normalize(node.innerText || node.textContent || '') };
+          }
+          if (role === 'button' || role === 'checkbox' || role === 'radio') {
+            return { selected: inspectSelected(node), selected_via: '', tag, role, text: normalize(node.innerText || node.textContent || '') };
+          }
+        }
+        return {
+          selected: inspectSelected(node),
+          tag: (node.tagName || '').toLowerCase(),
+          role: node.getAttribute?.('role') || '',
+          selected_via: '',
+          text: normalize(node.innerText || node.textContent || ''),
+        };
+      };
+
+      if (activeConditionElements.length) {
+        return {
+          visible: true,
+          selected: true,
+          selected_via: 'active_condition_text',
+          tag: (activeConditionElements[0].tagName || '').toLowerCase(),
+          role: activeConditionElements[0].getAttribute?.('role') || '',
+          text: normalize(activeConditionElements[0].innerText || activeConditionElements[0].textContent || ''),
+        };
+      }
+      if (!elements.length) {
+        return { visible: false, selected: false, selected_via: '', text: '', tag: '', role: '' };
+      }
+      return {
+        visible: true,
+        ...describe(elements[0]),
+      };
+    }
+    """
+    try:
+        result = await page.evaluate(script, {"term": str(term or "").strip()})
+    except Exception:
+        result = {}
+    if not isinstance(result, dict):
+        result = {}
+    return {
+        "visible": bool(result.get("visible")),
+        "selected": bool(result.get("selected")),
+        "selected_via": str(result.get("selected_via") or "").strip(),
+        "text": str(result.get("text") or "").strip(),
+        "tag": str(result.get("tag") or "").strip(),
+        "role": str(result.get("role") or "").strip(),
+    }
+
+
+async def _capture_result_signature(page) -> dict[str, Any]:
+    script = """
+    () => {
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const seen = new Set();
+      const entries = [];
+
+      const candidateNodes = Array.from(
+        document.querySelectorAll(
+          [
+            '[data-offerid]',
+            '[data-item-id]',
+            '[data-id]',
+            '[data-article-id]',
+            'a[href*="/offer/"]',
+            'a[href*="detail.1688.com/offer/"]',
+            '[class*="offerItem"]',
+            '[class*="offer-item"]',
+            '[class*="result-item"]',
+            '[class*="list-item"]',
+            '[data-result-item]'
+          ].join(',')
+        )
+      );
+
+      const buildEntry = (node) => {
+        if (!(node instanceof Element)) return null;
+        const offerId =
+          node.getAttribute('data-offerid')
+          || node.getAttribute('data-item-id')
+          || node.getAttribute('data-id')
+          || node.getAttribute('data-article-id')
+          || '';
+        const href = node.getAttribute('href') || node.querySelector?.('a[href]')?.getAttribute('href') || '';
+        const hrefOfferMatch = String(href).match(/offer\\/(\\d+)\\.html/i);
+        const title =
+          normalize(node.getAttribute('title'))
+          || normalize(node.querySelector?.('[title]')?.getAttribute('title'))
+          || normalize(node.querySelector?.('img[alt]')?.getAttribute('alt'))
+          || normalize(node.querySelector?.('a')?.innerText)
+          || normalize(node.innerText).slice(0, 120);
+        const key = normalize(offerId || (hrefOfferMatch ? hrefOfferMatch[1] : '') || title);
+        if (!key) return null;
+        return {
+          key,
+          title,
+          offerId: normalize(offerId || (hrefOfferMatch ? hrefOfferMatch[1] : '')),
+          href: normalize(href),
+        };
+      };
+
+      candidateNodes.forEach((node) => {
+        const entry = buildEntry(node);
+        if (!entry) return;
+        if (seen.has(entry.key)) return;
+        seen.add(entry.key);
+        entries.push(entry);
+      });
+
+      const topEntries = entries.slice(0, 5);
+      return {
+        result_url: location.href,
+        item_count: entries.length,
+        top_keys: topEntries.map((item) => item.key),
+        top_titles: topEntries.map((item) => item.title).filter(Boolean),
+        signature: topEntries.map((item) => item.key).join('|'),
+      };
+    }
+    """
+    try:
+        result = await page.evaluate(script)
+    except Exception:
+        result = {}
+    if not isinstance(result, dict):
+        result = {}
+    return {
+        "result_url": str(result.get("result_url") or "").strip(),
+        "item_count": int(result.get("item_count") or 0),
+        "top_keys": [
+            str(item).strip()
+            for item in list(result.get("top_keys") or [])
+            if str(item).strip()
+        ],
+        "top_titles": [
+            str(item).strip()
+            for item in list(result.get("top_titles") or [])
+            if str(item).strip()
+        ],
+        "signature": str(result.get("signature") or "").strip(),
+    }
+
+
+def _result_url_changed(pre_signature: dict[str, Any], post_signature: dict[str, Any]) -> bool:
+    pre_url = str(dict(pre_signature or {}).get("result_url") or "").strip()
+    post_url = str(dict(post_signature or {}).get("result_url") or "").strip()
+    return bool(pre_url and post_url and pre_url != post_url)
+
+
+async def _open_special_filter_panel(page, filter_term: str, *, layout_name: str = "") -> dict[str, Any]:
+    trigger_texts = ["配置筛选", "高级筛选", "更多筛选", "筛选"]
+    if layout_name == "image_result_filter_bar":
+        trigger_texts = ["更多", "筛选", *trigger_texts]
+    trigger_locator, trigger_text = await _find_first_visible_text_locator(page, trigger_texts)
+    result: dict[str, Any] = {
+        "trigger_candidates": list(trigger_texts),
+        "trigger_found": bool(trigger_locator),
+        "trigger_text": trigger_text,
+        "trigger_clicked": False,
+        "panel_visible": False,
+        "panel_visible_via": "",
+    }
+    if trigger_locator is None:
+        return result
+
+    result["trigger_clicked"] = await _click_locator_best_effort(trigger_locator)
+    if not result["trigger_clicked"]:
+        return result
+
+    panel_selectors = [
+        "[role='dialog']",
+        ".ant-modal",
+        ".ant-drawer",
+        ".ant-popover",
+        ".next-dialog",
+        ".next-overlay-wrapper",
+        "[class*='drawer']",
+        "[class*='dialog']",
+        "[class*='popover']",
+    ]
+    for _ in range(10):
+        state = await _read_special_panel_term_state(page, filter_term)
+        if state.get("visible"):
+            result["panel_visible"] = True
+            result["panel_visible_via"] = "term_visible"
+            return result
+        for selector in panel_selectors:
+            try:
+                locator = page.locator(selector).first
+                if await _locator_is_actionable(locator):
+                    result["panel_visible"] = True
+                    result["panel_visible_via"] = selector
+                    return result
+            except Exception:
+                continue
+        await asyncio.sleep(0.2)
+    return result
+
+
+async def _apply_visible_filter_toggle_runtime(
+    page,
+    runtime_snapshot: dict,
+    *,
+    logger=None,
+) -> dict:
+    configured_enabled_filter_keys = list(runtime_snapshot.get("configured_enabled_filter_keys") or [])
+    if not configured_enabled_filter_keys:
+        return runtime_snapshot
+
+    filter_status_map = {
+        str(key): dict(value or {})
+        for key, value in dict(runtime_snapshot.get("filter_status_map") or {}).items()
+    }
+    changed = False
+    top_level_mapping_stage = str(runtime_snapshot.get("mapping_stage") or "").strip() or "snapshot_only"
+    layout_name = await _detect_ali1688_filter_layout(page)
+
+    for key in configured_enabled_filter_keys:
+        current_meta = dict(filter_status_map.get(key) or {})
+        mapping_type = str(current_meta.get("mapping_type") or "").strip()
+        if mapping_type not in {"ui_checkbox_candidate", "semantic_combo_candidate"}:
+            continue
+
+        shared_meta = get_ali1688_channel_search_filter_meta(key)
+        probe_terms = [
+            str(item).strip()
+            for item in shared_meta.get("probe_terms") or []
+            if str(item).strip()
+        ]
+        if not probe_terms:
+            continue
+
+        term = probe_terms[0]
+        verification_detail = dict(current_meta.get("verification_detail") or {})
+        verification_detail["probe_mode"] = str(verification_detail.get("probe_mode") or "dom_toggle_action")
+        verification_detail["observation_scope"] = str(
+            shared_meta.get("observation_scope")
+            or verification_detail.get("observation_scope")
+            or "result_page_text"
+        ).strip() or "result_page_text"
+        verification_detail["page_filter_layout"] = layout_name
+        pre_state = await _read_special_panel_term_state(page, term)
+        pre_signature = await _capture_result_signature(page)
+        if mapping_type == "semantic_combo_candidate":
+            verification_detail["independent_ui_entry_observed"] = bool(pre_state.get("visible"))
+        verification_detail["panel_term_visible_before_action"] = bool(pre_state.get("visible"))
+        verification_detail["panel_term_selected_before_action"] = bool(pre_state.get("selected"))
+        if pre_state.get("selected_via"):
+            verification_detail["panel_term_selected_via_before_action"] = pre_state.get("selected_via")
+        verification_detail["result_signature_before_action"] = pre_signature
+
+        if not pre_state.get("visible"):
+            current_meta["verification_detail"] = verification_detail
+            filter_status_map[key] = current_meta
+            continue
+
+        click_attempted = False
+        click_succeeded = False
+        entry_locator, entry_selector_strategy, locator_resolution = await _find_filter_entry_locator(page, term, layout_name=layout_name)
+        verification_detail["selector_candidates_tried"] = list(locator_resolution.get("selector_candidates_tried") or [])
+        verification_detail["selector_resolution_mode"] = str(locator_resolution.get("resolution_mode") or "").strip()
+        verification_detail["text_fallback_considered"] = bool(locator_resolution.get("text_fallback_considered"))
+        if entry_locator is not None and not pre_state.get("selected"):
+            click_attempted = True
+            click_succeeded = await _click_locator_best_effort(entry_locator)
+            verification_detail["entry_click_attempted"] = True
+            verification_detail["entry_click_succeeded"] = bool(click_succeeded)
+            verification_detail["entry_selector_strategy"] = entry_selector_strategy
+            if click_succeeded:
+                await asyncio.sleep(0.3)
+
+        post_state = await _read_special_panel_term_state(page, term)
+        post_signature = await _capture_result_signature(page)
+        verification_detail["panel_term_visible_after_action"] = bool(post_state.get("visible"))
+        verification_detail["panel_term_selected_after_action"] = bool(post_state.get("selected"))
+        if post_state.get("selected_via"):
+            verification_detail["panel_term_selected_via_after_action"] = post_state.get("selected_via")
+        verification_detail["result_signature_after_action"] = post_signature
+        verification_detail["result_signature_changed"] = bool(
+            pre_signature.get("signature")
+            and post_signature.get("signature")
+            and pre_signature.get("signature") != post_signature.get("signature")
+        ) or (
+            int(pre_signature.get("item_count") or 0) != int(post_signature.get("item_count") or 0)
+        )
+        verification_detail["result_url_changed"] = _result_url_changed(pre_signature, post_signature)
+        result_effect_observed = bool(
+            verification_detail["result_signature_changed"]
+            or verification_detail["result_url_changed"]
+        )
+        if mapping_type == "semantic_combo_candidate":
+            verification_detail["semantic_verification_stage"] = (
+                "direct_entry_result_shift_observed"
+                if result_effect_observed
+                else "direct_entry_result_shift_not_observed"
+            )
+
+        if post_state.get("selected") or (click_succeeded and result_effect_observed):
+            current_meta["status"] = "applied"
+            current_meta["reason"] = ""
+            current_meta["mapping_stage"] = "ui_automation"
+            verification_detail["verification_mode"] = "dom_toggle_action"
+            top_level_mapping_stage = "mixed" if top_level_mapping_stage in {"mixed", "query_mapped", "query_candidate"} else "ui_automation"
+            changed = True
+        elif click_attempted:
+            current_meta["status"] = "unapplied"
+            current_meta["reason"] = "ui_apply_not_observed"
+            current_meta["mapping_stage"] = "mixed"
+            verification_detail["verification_mode"] = "dom_toggle_action"
+            top_level_mapping_stage = "mixed"
+            changed = True
+
+        current_meta["verification_detail"] = verification_detail
+        filter_status_map[key] = current_meta
+        if logger and click_attempted:
+            logger.info(
+                "[Search] Visible filter toggle action result: %s",
+                {
+                    "filter_key": key,
+                    "mapping_type": mapping_type,
+                    "layout_name": layout_name,
+                    "selected_before": bool(pre_state.get("selected")),
+                    "selected_after": bool(post_state.get("selected")),
+                    "entry_selector_strategy": entry_selector_strategy,
+                    "entry_click_succeeded": bool(click_succeeded),
+                    "final_reason": current_meta.get("reason") or "",
+                },
+            )
+
+    if not changed:
+        return settings.normalize_channel_search_filter_snapshot({
+            **runtime_snapshot,
+            "filter_status_map": filter_status_map,
+        })
+
+    return settings.normalize_channel_search_filter_snapshot({
+        **runtime_snapshot,
+        "filter_status_map": filter_status_map,
+        "mapping_stage": top_level_mapping_stage,
+        "mapping_notes": "已对结果页可见筛选项执行点击/选中态探测，并按实际结果回写状态。",
+    })
+
+
+async def _apply_special_panel_candidate_runtime(
+    page,
+    runtime_snapshot: dict,
+    *,
+    logger=None,
+) -> dict:
+    configured_enabled_filter_keys = list(runtime_snapshot.get("configured_enabled_filter_keys") or [])
+    if not configured_enabled_filter_keys:
+        return runtime_snapshot
+
+    filter_status_map = {
+        str(key): dict(value or {})
+        for key, value in dict(runtime_snapshot.get("filter_status_map") or {}).items()
+    }
+    changed = False
+    top_level_mapping_stage = str(runtime_snapshot.get("mapping_stage") or "").strip() or "snapshot_only"
+    layout_name = await _detect_ali1688_filter_layout(page)
+
+    for key in configured_enabled_filter_keys:
+        current_meta = dict(filter_status_map.get(key) or {})
+        if current_meta.get("mapping_type") != "special_panel_candidate":
+            continue
+        shared_meta = get_ali1688_channel_search_filter_meta(key)
+        probe_terms = [
+            str(item).strip()
+            for item in shared_meta.get("probe_terms") or []
+            if str(item).strip()
+        ]
+        if not probe_terms:
+            continue
+
+        term = probe_terms[0]
+        verification_detail = dict(current_meta.get("verification_detail") or {})
+        verification_detail["probe_mode"] = str(verification_detail.get("probe_mode") or "dom_panel_action")
+        verification_detail["observation_scope"] = str(shared_meta.get("observation_scope") or verification_detail.get("observation_scope") or "result_page_text").strip() or "result_page_text"
+        verification_detail["page_filter_layout"] = layout_name
+
+        pre_state = await _read_special_panel_term_state(page, term)
+        pre_signature = await _capture_result_signature(page)
+        verification_detail["panel_term_visible_before_action"] = bool(pre_state.get("visible"))
+        verification_detail["panel_term_selected_before_action"] = bool(pre_state.get("selected"))
+        if pre_state.get("selected_via"):
+            verification_detail["panel_term_selected_via_before_action"] = pre_state.get("selected_via")
+        verification_detail["result_signature_before_action"] = pre_signature
+        if pre_state.get("tag"):
+            verification_detail["panel_term_tag"] = pre_state.get("tag")
+        if pre_state.get("role"):
+            verification_detail["panel_term_role"] = pre_state.get("role")
+
+        opened_panel = {
+            "trigger_found": False,
+            "trigger_text": "",
+            "trigger_clicked": False,
+            "panel_visible": False,
+        }
+        click_attempted = False
+        click_succeeded = False
+
+        if not pre_state.get("selected"):
+            if not pre_state.get("visible"):
+                opened_panel = await _open_special_filter_panel(page, term, layout_name=layout_name)
+                verification_detail["panel_trigger_candidates"] = list(opened_panel.get("trigger_candidates") or [])
+                verification_detail["panel_trigger_found"] = bool(opened_panel.get("trigger_found"))
+                verification_detail["panel_trigger_text"] = str(opened_panel.get("trigger_text") or "").strip()
+                verification_detail["panel_trigger_clicked"] = bool(opened_panel.get("trigger_clicked"))
+                verification_detail["panel_opened"] = bool(opened_panel.get("panel_visible"))
+                verification_detail["panel_visible_via"] = str(opened_panel.get("panel_visible_via") or "").strip()
+
+            term_locator, entry_selector_strategy, locator_resolution = await _find_filter_entry_locator(page, term, layout_name=layout_name)
+            verification_detail["selector_candidates_tried"] = list(locator_resolution.get("selector_candidates_tried") or [])
+            verification_detail["selector_resolution_mode"] = str(locator_resolution.get("resolution_mode") or "").strip()
+            verification_detail["text_fallback_considered"] = bool(locator_resolution.get("text_fallback_considered"))
+            if term_locator is not None:
+                click_attempted = True
+                click_succeeded = await _click_locator_best_effort(term_locator)
+                verification_detail["entry_click_attempted"] = True
+                verification_detail["entry_click_succeeded"] = bool(click_succeeded)
+                verification_detail["entry_selector_strategy"] = entry_selector_strategy
+                if click_succeeded:
+                    await asyncio.sleep(0.3)
+
+        post_state = await _read_special_panel_term_state(page, term)
+        post_signature = await _capture_result_signature(page)
+        verification_detail["panel_term_visible_after_action"] = bool(post_state.get("visible"))
+        verification_detail["panel_term_selected_after_action"] = bool(post_state.get("selected"))
+        if post_state.get("selected_via"):
+            verification_detail["panel_term_selected_via_after_action"] = post_state.get("selected_via")
+        verification_detail["result_signature_after_action"] = post_signature
+        verification_detail["result_signature_changed"] = bool(
+            pre_signature.get("signature")
+            and post_signature.get("signature")
+            and pre_signature.get("signature") != post_signature.get("signature")
+        ) or (
+            int(pre_signature.get("item_count") or 0) != int(post_signature.get("item_count") or 0)
+        )
+        verification_detail["result_url_changed"] = _result_url_changed(pre_signature, post_signature)
+        result_effect_observed = bool(
+            verification_detail["result_signature_changed"]
+            or verification_detail["result_url_changed"]
+        )
+
+        if post_state.get("selected") or (click_succeeded and result_effect_observed):
+            current_meta["status"] = "applied"
+            current_meta["reason"] = ""
+            current_meta["mapping_stage"] = "ui_automation"
+            verification_detail["verification_mode"] = "dom_panel_action"
+            verification_detail["entry_signal_detected"] = True
+            verification_detail["entry_signal_type"] = str(shared_meta.get("entry_signal_type") or "text_term").strip() or "text_term"
+            verification_detail["next_required_action"] = ""
+            top_level_mapping_stage = "mixed" if top_level_mapping_stage in {"mixed", "query_mapped", "query_candidate"} else "ui_automation"
+            changed = True
+        elif click_attempted or opened_panel.get("trigger_clicked"):
+            current_meta["status"] = "unapplied"
+            current_meta["reason"] = "special_panel_open_failed"
+            current_meta["mapping_stage"] = "mixed"
+            verification_detail["verification_mode"] = "dom_panel_action"
+            verification_detail["entry_signal_detected"] = bool(
+                pre_state.get("visible")
+                or post_state.get("visible")
+                or opened_panel.get("trigger_found")
+            )
+            verification_detail["entry_signal_type"] = str(shared_meta.get("entry_signal_type") or "text_term").strip() or "text_term"
+            verification_detail["next_required_action"] = str(shared_meta.get("next_required_action") or "panel_open_and_toggle").strip() or "panel_open_and_toggle"
+            top_level_mapping_stage = "mixed"
+            changed = True
+
+        current_meta["verification_detail"] = verification_detail
+        filter_status_map[key] = current_meta
+        if logger and (click_attempted or opened_panel.get("trigger_clicked")):
+            logger.info(
+                "[Search] Special panel candidate action result: %s",
+                {
+                    "filter_key": key,
+                    "selected_before": bool(pre_state.get("selected")),
+                    "selected_after": bool(post_state.get("selected")),
+                    "trigger_text": str(opened_panel.get("trigger_text") or "").strip(),
+                    "trigger_clicked": bool(opened_panel.get("trigger_clicked")),
+                    "entry_click_succeeded": bool(click_succeeded),
+                    "final_reason": current_meta.get("reason") or "",
+                },
+            )
+
+    if not changed:
+        return runtime_snapshot
+
+    return settings.normalize_channel_search_filter_snapshot({
+        **runtime_snapshot,
+        "filter_status_map": filter_status_map,
+        "mapping_stage": top_level_mapping_stage,
+        "mapping_notes": "已对特殊入口候选项执行面板打开/勾选探测，并按实际结果回写状态。",
     })
 
 
@@ -621,18 +1526,42 @@ def _extract_metric_text(text: str, patterns: list[str]) -> str:
     return ""
 
 
+def _format_percent_metric(prefix: str, raw_value: str) -> str:
+    if not raw_value:
+        return ""
+    try:
+        number = float(str(raw_value).replace("%", "").strip())
+        value = str(int(number)) if number.is_integer() else str(number).rstrip("0").rstrip(".")
+        return f"{prefix}{value}%"
+    except Exception:
+        return f"{prefix}{str(raw_value).strip()}"
+
+
 def _extract_dispatch_metrics_from_text(text: str) -> dict:
     normalized = _normalize_metric_text(text)
     seven_day = 0
     month = 0
     listing_count = 0
     distributor_count = 0
-    pickup_48h_text = _extract_metric_text(normalized, [r"(48H揽收\s*\d+%)"])
-    pickup_24h_text = _extract_metric_text(normalized, [r"(24H揽收\s*\d+%)"])
-    month_dispatch_text = _extract_metric_text(normalized, [r"((?:月代发|月成交|月代发量|月\s*代发)\s*[\d\.]+(?:万|k|K|\+|内)?)"])
-    seven_day_dispatch_text = _extract_metric_text(normalized, [r"((?:7天|近7天)代发\s*[\d\.]+(?:万|k|K|\+|内)?)"])
-    listing_count_text = _extract_metric_text(normalized, [r"(铺货数\s*[\d\.]+(?:万|k|K|\+|内)?)"])
-    distributor_count_text = _extract_metric_text(normalized, [r"(分销商数\s*[\d\.]+(?:万|k|K|\+|内)?)"])
+    pickup_48h_text = _extract_metric_text(normalized, [r"(48\s*h\s*揽收(?:率)?\s*[\d\.]+%)"])
+    pickup_24h_text = _extract_metric_text(normalized, [r"(24\s*h\s*揽收(?:率)?\s*[\d\.]+%)"])
+    pickup_48h_detail = re.search(r"48\s*h\s*揽收(?:率)?\s*([\d\.]+%)", normalized, re.IGNORECASE)
+    if pickup_48h_detail:
+        pickup_48h_text = _format_percent_metric("48H揽收", pickup_48h_detail.group(1))
+    pickup_24h_detail = re.search(r"24\s*h\s*揽收(?:率)?\s*([\d\.]+%)", normalized, re.IGNORECASE)
+    if pickup_24h_detail:
+        pickup_24h_text = _format_percent_metric("24H揽收", pickup_24h_detail.group(1))
+    count_value_pattern = r"[\d\.]+(?:万|k|K)?(?:\+|以内|内)?"
+    month_dispatch_text = _extract_metric_text(normalized, [rf"((?:月代发|月成交|月代发量|月\s*代发|近30天代发数量)\s*{count_value_pattern})"])
+    if month_dispatch_text.startswith("近30天代发数量"):
+        month_dispatch_text = "月代发" + month_dispatch_text.replace("近30天代发数量", "", 1)
+    seven_day_dispatch_text = _extract_metric_text(normalized, [rf"((?:7天|近7天)代发(?:数量)?\s*{count_value_pattern})"])
+    if seven_day_dispatch_text.startswith("近7天代发数量"):
+        seven_day_dispatch_text = "7天代发" + seven_day_dispatch_text.replace("近7天代发数量", "", 1)
+    listing_count_text = _extract_metric_text(normalized, [rf"(铺货数\s*{count_value_pattern})"])
+    distributor_count_text = _extract_metric_text(normalized, [rf"((?:分销商数|铺货分销商数)\s*{count_value_pattern})"])
+    if distributor_count_text.startswith("铺货分销商数"):
+        distributor_count_text = "分销商数" + distributor_count_text.replace("铺货分销商数", "", 1)
     waybill_support_text = _extract_metric_text(normalized, [r"(面单支持|不支持面单)"])
     settled_years_text = _extract_metric_text(normalized, [r"(入驻\s*\d+\s*年)"])
     company_name = ""
@@ -645,16 +1574,16 @@ def _extract_dispatch_metrics_from_text(text: str) -> dict:
         if company_match:
             company_name = company_match.group(1).strip()
 
-        match_7 = re.search(r'(?:7天|近7天)代发\s*([\d\.]+(?:万|k|K)?(?:\+|内)?)', normalized)
+        match_7 = re.search(r'(?:7天|近7天)代发(?:数量)?\s*([\d\.]+(?:万|k|K)?(?:\+|以内|内)?)', normalized)
         if match_7:
             seven_day = _parse_dispatch_count(match_7.group(1))
-        match_m = re.search(r'(?:月代发|月成交|月代发量|月\s*代发)\s*([\d\.]+(?:万|k|K)?(?:\+|内)?)', normalized)
+        match_m = re.search(r'(?:月代发|月成交|月代发量|月\s*代发|近30天代发数量)\s*([\d\.]+(?:万|k|K)?(?:\+|以内|内)?)', normalized)
         if match_m:
             month = _parse_dispatch_count(match_m.group(1))
-        match_listing = re.search(r'铺货数\s*([\d\.]+(?:万|k|K)?(?:\+|内)?)', normalized)
+        match_listing = re.search(r'铺货数\s*([\d\.]+(?:万|k|K)?(?:\+|以内|内)?)', normalized)
         if match_listing:
             listing_count = _parse_dispatch_count(match_listing.group(1))
-        match_distributor = re.search(r'分销商数\s*([\d\.]+(?:万|k|K)?(?:\+|内)?)', normalized)
+        match_distributor = re.search(r'(?:分销商数|铺货分销商数)\s*([\d\.]+(?:万|k|K)?(?:\+|以内|内)?)', normalized)
         if match_distributor:
             distributor_count = _parse_dispatch_count(match_distributor.group(1))
     return {
@@ -1244,7 +2173,7 @@ async def _wait_for_search_or_slider(page, timeout_seconds: float = 8.0) -> str:
 
 
 async def _clear_home_slider(page, stage: str = "home", logger=None) -> bool:
-    for attempt in range(1, 4):
+    for attempt in range(1, 2):
         try:
             frames = list(page.frames)
         except Exception:
@@ -1340,7 +2269,35 @@ async def _clear_slider_if_present(page, stage: str, logger=None) -> bool:
     return passed
 
 
-async def _ensure_page_navigated_safe(page, url: str, logger, timeout: int = 30000) -> bool:
+async def _wait_for_manual_verification(page, logger, *, timeout_seconds: int) -> bool:
+    deadline = asyncio.get_running_loop().time() + max(0, int(timeout_seconds))
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            cur_url = page.url
+            cur_title = await page.title() or ""
+        except Exception as page_state_err:
+            error_text = str(page_state_err)
+            if "Execution context was destroyed" in error_text:
+                await asyncio.sleep(2)
+                continue
+            logger.error(f"    [Session] Page unavailable while waiting for manual verification: {page_state_err}")
+            return False
+        if not _looks_like_captcha_page(cur_url, cur_title):
+            logger.info("    [Session] Manual verification completed.")
+            return True
+        await asyncio.sleep(2)
+    logger.error("    [Session] Timeout waiting for manual verification.")
+    return False
+
+
+async def _ensure_page_navigated_safe(
+    page,
+    url: str,
+    logger,
+    timeout: int = 30000,
+    *,
+    manual_verification_wait_seconds: int = 0,
+) -> bool:
     logger.info(f"    [Session] Navigating to: {url}")
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=timeout)
@@ -1348,9 +2305,13 @@ async def _ensure_page_navigated_safe(page, url: str, logger, timeout: int = 300
     except Exception as e:
         logger.warning(f"    [Session] Initial navigation warning: {e}")
 
-    for attempt in range(45):  # 最多等待 90 秒
-        cur_url = page.url
-        cur_title = await page.title() or ""
+    for attempt in range(1):  # 一次自动验证窗口，避免验证码循环长期占用资源
+        try:
+            cur_url = page.url
+            cur_title = await page.title() or ""
+        except Exception as page_state_err:
+            logger.error(f"    [Session] Page unavailable while checking navigation state: {page_state_err}")
+            return False
         
         is_blocked = _looks_like_captcha_page(cur_url, cur_title)
         
@@ -1358,6 +2319,16 @@ async def _ensure_page_navigated_safe(page, url: str, logger, timeout: int = 300
             return True
             
         logger.warning(f"    [Session] [Blocked] Captcha or login redirect detected! URL: {cur_url}, Title: {cur_title}")
+
+        if manual_verification_wait_seconds > 0:
+            logger.warning(
+                "    [Action Required] Please complete captcha/login in the visible browser window."
+            )
+            return await _wait_for_manual_verification(
+                page,
+                logger,
+                timeout_seconds=manual_verification_wait_seconds,
+            )
         
         # 先清理采购助手欢迎页/新手引导弹窗，它们可能遮住验证码滑块
         try:
@@ -1392,7 +2363,15 @@ async def _ensure_page_navigated_safe(page, url: str, logger, timeout: int = 300
 
 
 
-async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, index: int, logger):
+async def _export_sku_from_detail_page(
+    context,
+    item: dict,
+    output_dir: Path,
+    index: int,
+    logger,
+    *,
+    manual_verification_wait_seconds: int = 0,
+):
     safe_title = _sanitize_filename(item.get("title") or "item")
     offer_id = item.get("offer_id")
     
@@ -1414,7 +2393,13 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
         url = f"https://detail.1688.com/offer/{offer_id}.html"
         logger.info(f"    [Step 2/4] Navigating to detail page: {url}")
             
-        success = await _ensure_page_navigated_safe(page, url, logger, timeout=60000)
+        success = await _ensure_page_navigated_safe(
+            page,
+            url,
+            logger,
+            timeout=60000,
+            manual_verification_wait_seconds=manual_verification_wait_seconds,
+        )
         if not success:
             logger.error(f"    [Session] Detail page navigation failed Rank {index}")
             return {"status": "failed", "images": []}
@@ -1440,6 +2425,7 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
 
         parsed_html = Ali1688SourceAdapter.extract_detail_sku_and_images(html_content)
         logger.info(f"    [HTML] Scrapling parsed: {len(parsed_html['sku_details'])} SKU entries, {len(parsed_html['images'])} images")
+        detail_metrics = _extract_dispatch_metrics_from_text(html_content)
 
         # ── 补充：从 JS 运行时直接读取 SKU（比 HTML 正则更可靠）──
         js_sku: list = []
@@ -1592,7 +2578,7 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
 
         if sku_details or clean_final:
             logger.info(f"    [Step 4/4] Success! Extracted SKUs: {len(sku_details)}, Images: {len(clean_final)}")
-            return {"status": "success", "images": clean_final, "sku_details": sku_details}
+            return {"status": "success", "images": clean_final, "sku_details": sku_details, **detail_metrics}
             
     except Exception as e:
         logger.error(f"    [Browser Error] Rank {index}: {e}")
@@ -1603,6 +2589,10 @@ async def _export_sku_from_detail_page(context, item: dict, output_dir: Path, in
 
 
 async def _run(args):
+    manual_verification_wait_seconds = max(
+        0,
+        int(getattr(args, "manual_verification_wait_seconds", 0) or 0),
+    )
     configured_filter_snapshot = _load_channel_filter_snapshot(
         getattr(args, "channel_filter_snapshot_file", None)
     )
@@ -1610,6 +2600,12 @@ async def _run(args):
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     logger = get_unified_logger("1688Worker", log_file=args.log_file)
+    runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+        output_dir,
+        runtime_filter_snapshot,
+        stage="initialized",
+        logger=logger,
+    )
     
     input_state = args.state_file
     managed_state = DEFAULT_ALI1688_STATE_FILE
@@ -1625,15 +2621,18 @@ async def _run(args):
         options = default_desktop_context_options()
         options["user_agent"] = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-        # 已去掉浏览器扩展依赖（SKU 改用 JS 运行时提取），直接 headless 启动
+        # 已去掉浏览器扩展依赖（SKU 改用 JS 运行时提取），默认 headless；需要人工验证码时可用 --headed。
         headless_args = [
             *default_launch_args(),
             "--disable-blink-features=AutomationControlled",
             "--no-sandbox",
         ]
-        logger.info("[Browser] Launching headless Chromium (no extension required)")
+        logger.info(
+            "[Browser] Launching %s Chromium (no extension required)",
+            "headed" if getattr(args, "headed", False) else "headless",
+        )
         browser = await pw.chromium.launch(
-            headless=True,
+            headless=not bool(getattr(args, "headed", False)),
             args=headless_args,
         )
         context = await browser.new_context(**options)
@@ -1705,24 +2704,65 @@ async def _run(args):
             logger.info(f"[Search] Remote image successfully downloaded to {temp_img_path}")
         except Exception as dl_err:
             logger.error(f"[Search] Image download failed: {dl_err}")
+            runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+                output_dir,
+                runtime_filter_snapshot,
+                stage="image_download_failed",
+                logger=logger,
+                extra={"error": str(dl_err)},
+            )
             await context.close()
             return
 
         # 2. 导航至 1688 主页进行全域安全会话激活
         logger.info("[Search] Pre-warming browser context by visiting 1688 homepage...")
         page = await context.new_page()
-        success = await _ensure_page_navigated_safe(page, "https://www.1688.com", logger, timeout=60000)
+        success = await _ensure_page_navigated_safe(
+            page,
+            "https://www.1688.com",
+            logger,
+            timeout=60000,
+            manual_verification_wait_seconds=manual_verification_wait_seconds,
+        )
         if not success:
             logger.error("[Search] Failed to pre-warm on 1688 homepage.")
+            runtime_filter_snapshot = _mark_runtime_filter_snapshot_navigation_blocked(
+                runtime_filter_snapshot,
+                stage="prewarm_failed",
+                url=page.url,
+            )
+            runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+                output_dir,
+                runtime_filter_snapshot,
+                stage="prewarm_failed",
+                logger=logger,
+            )
             await context.close()
             return
         await asyncio.sleep(4)
 
         # 3. 导航至以图搜主页（空参数，有 Referer 且已同步 cookie，安全）
         search_home_url = "https://s.1688.com/youyuan/index.htm"
-        success = await _ensure_page_navigated_safe(page, search_home_url, logger, timeout=60000)
+        success = await _ensure_page_navigated_safe(
+            page,
+            search_home_url,
+            logger,
+            timeout=60000,
+            manual_verification_wait_seconds=manual_verification_wait_seconds,
+        )
         if not success:
             logger.error("[Search] Failed to open image search home page.")
+            runtime_filter_snapshot = _mark_runtime_filter_snapshot_navigation_blocked(
+                runtime_filter_snapshot,
+                stage="image_search_home_failed",
+                url=page.url,
+            )
+            runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+                output_dir,
+                runtime_filter_snapshot,
+                stage="image_search_home_failed",
+                logger=logger,
+            )
             await context.close()
             return
         await asyncio.sleep(3)
@@ -1745,15 +2785,46 @@ async def _run(args):
                 logger.warning("[Search] No upload input element found on the home page.")
         except Exception as upload_err:
             logger.error(f"[Search] Physical upload failed or redirection timeout: {upload_err}")
+            if "Target page, context or browser has been closed" in str(upload_err):
+                runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+                    output_dir,
+                    runtime_filter_snapshot,
+                    stage="image_upload_page_closed",
+                    logger=logger,
+                    extra={"error": str(upload_err)},
+                )
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                return
 
         # 4. 兜底方案：如果物理上传失败，则直连以图搜 URL
         if not upload_success:
             from urllib.parse import quote
             search_url = f"https://s.1688.com/youyuan/index.htm?tab=imageSearch&imageAddress={quote(args.image_url)}"
             logger.warning(f"[Search] Falling back to direct URL visit: {search_url}")
-            success = await _ensure_page_navigated_safe(page, search_url, logger, timeout=60000)
+            success = await _ensure_page_navigated_safe(
+                page,
+                search_url,
+                logger,
+                timeout=60000,
+                manual_verification_wait_seconds=manual_verification_wait_seconds,
+            )
             if not success:
                 logger.error("[Search] Direct URL fallback failed. Captcha unsolved.")
+                runtime_filter_snapshot = _mark_runtime_filter_snapshot_navigation_blocked(
+                    runtime_filter_snapshot,
+                    stage="direct_url_fallback_failed",
+                    url=page.url,
+                )
+                runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+                    output_dir,
+                    runtime_filter_snapshot,
+                    stage="direct_url_fallback_failed",
+                    logger=logger,
+                    extra={"attempted_url": search_url},
+                )
                 await context.close()
                 return
             await asyncio.sleep(8)
@@ -1777,6 +2848,7 @@ async def _run(args):
                     filtered_result_url,
                     logger,
                     timeout=45000,
+                    manual_verification_wait_seconds=manual_verification_wait_seconds,
                 )
                 if filter_nav_success:
                     await asyncio.sleep(5)
@@ -1788,6 +2860,13 @@ async def _run(args):
                         logger=logger,
                         verification_mode="post_navigation_url",
                     )
+                    runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+                        output_dir,
+                        runtime_filter_snapshot,
+                        stage="query_filter_post_navigation_verified",
+                        logger=logger,
+                        extra={"result_url": page.url},
+                    )
                 else:
                     logger.warning(
                         "[Search] Failed to navigate to filtered result URL; marking attempted query filters as unapplied."
@@ -1797,6 +2876,13 @@ async def _run(args):
                         attempted_filter_keys=query_applied_filter_keys,
                         attempted_query_params=applied_query_params,
                         attempted_result_url=filtered_result_url,
+                    )
+                    runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+                        output_dir,
+                        runtime_filter_snapshot,
+                        stage="query_filter_navigation_failed",
+                        logger=logger,
+                        extra={"attempted_result_url": filtered_result_url},
                     )
             else:
                 logger.info(
@@ -1814,6 +2900,43 @@ async def _run(args):
                     logger=logger,
                     verification_mode="in_place_url",
                 )
+                runtime_filter_snapshot = _mark_runtime_snapshot_semantic_dependency_combos(runtime_filter_snapshot)
+                runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+                    output_dir,
+                    runtime_filter_snapshot,
+                    stage="query_filter_in_place_verified",
+                    logger=logger,
+                    extra={"result_url": page.url},
+                )
+
+        runtime_filter_snapshot = _mark_runtime_snapshot_semantic_dependency_combos(runtime_filter_snapshot)
+        runtime_filter_snapshot = await _apply_visible_filter_toggle_runtime(
+            page,
+            runtime_filter_snapshot,
+            logger=logger,
+        )
+        runtime_filter_snapshot = _mark_runtime_snapshot_semantic_dependency_combos(runtime_filter_snapshot)
+        runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+            output_dir,
+            runtime_filter_snapshot,
+            stage="visible_filter_toggle_checked",
+            logger=logger,
+            extra={"result_url": page.url},
+        )
+
+        runtime_filter_snapshot = await _apply_special_panel_candidate_runtime(
+            page,
+            runtime_filter_snapshot,
+            logger=logger,
+        )
+        runtime_filter_snapshot = _mark_runtime_snapshot_semantic_dependency_combos(runtime_filter_snapshot)
+        runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+            output_dir,
+            runtime_filter_snapshot,
+            stage="special_panel_candidate_checked",
+            logger=logger,
+            extra={"result_url": page.url},
+        )
 
         from xianyu_tools.source_adapter.ali1688 import Ali1688CaptchaError, Ali1688PayloadError
         adapter = Ali1688SourceAdapter()
@@ -1822,11 +2945,21 @@ async def _run(args):
         
         for attempt in range(1, 4):  # 最多尝试 3 次
             html_content = await page.content()
-            runtime_filter_snapshot = _mark_runtime_snapshot_non_query_probe(
+            runtime_filter_snapshot = await _refresh_runtime_snapshot_on_current_page(
+                page,
                 runtime_filter_snapshot,
                 observed_page_text=html_content,
                 result_url=page.url,
+                logger=logger,
             )
+            runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+                output_dir,
+                runtime_filter_snapshot,
+                stage=f"html_text_probe_attempt_{attempt}",
+                logger=logger,
+                extra={"result_url": page.url},
+            )
+            html_content = await page.content()
             try:
                 # 判断是否是验证码页面或惩罚页面
                 if adapter._is_captcha_page(html_content) or "哎呦喂" in html_content or "空空如也" in html_content:
@@ -1847,6 +2980,13 @@ async def _run(args):
                         logger.error(f"[Search] Dumped failed page to {err_file}")
                     except Exception as dump_err:
                         logger.error(f"[Search] Failed to dump: {dump_err}")
+                    runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+                        output_dir,
+                        runtime_filter_snapshot,
+                        stage="parse_failed_final",
+                        logger=logger,
+                        extra={"error": str(e), "result_url": page.url},
+                    )
                     raise e
                 
                 logger.warning("[Search] Possible bot detection. Attempting recovery and safety pre-warm...")
@@ -1925,14 +3065,45 @@ async def _run(args):
                 "source_filter_snapshot": runtime_filter_snapshot,
             }
 
-            res = await _export_sku_from_detail_page(context, item_data, output_dir, i, logger)
+            res = await _export_sku_from_detail_page(
+                context,
+                item_data,
+                output_dir,
+                i,
+                logger,
+                manual_verification_wait_seconds=manual_verification_wait_seconds,
+            )
             item_data["status"] = res["status"]
             item_data["images"] = res.get("images", [])
             item_data["sku_items"] = res.get("sku_details", [])
             item_data["sku_count"] = len(res.get("sku_details", []))
+            for metric_key in (
+                "pickup_48h_text",
+                "pickup_24h_text",
+                "month_dispatch_text",
+                "seven_day_dispatch_text",
+                "listing_count_text",
+                "distributor_count_text",
+                "waybill_support_text",
+                "settled_years_text",
+                "company_name",
+                "seven_day_dispatch_count",
+                "month_dispatch_count",
+                "listing_count",
+                "distributor_count",
+            ):
+                if not item_data.get(metric_key) and res.get(metric_key):
+                    item_data[metric_key] = res.get(metric_key)
             sku_results.append(item_data)
             
         (output_dir / "summary.json").write_text(json.dumps(sku_results, ensure_ascii=False, indent=2))
+        runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+            output_dir,
+            runtime_filter_snapshot,
+            stage="summary_written",
+            logger=logger,
+            extra={"source_count": len(sku_results)},
+        )
         
         if state_file_to_save:
             await _export_context_state(context, state_file_to_save)
@@ -1951,6 +3122,8 @@ def main():
     parser.add_argument("--target-keyword", required=False)
     parser.add_argument("--log-file", required=False)
     parser.add_argument("--channel-filter-snapshot-file", required=False)
+    parser.add_argument("--headed", action="store_true")
+    parser.add_argument("--manual-verification-wait-seconds", type=int, default=0)
     args = parser.parse_args()
     asyncio.run(_run(args))
 

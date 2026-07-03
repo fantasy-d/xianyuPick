@@ -1,9 +1,72 @@
 # 任务计划：1688 搜索能力筛选项按渠道配置
 
 > 计划 ID：`2026-06-26-channel-search-capability-config`
-> 更新时间：2026-06-27
-> 当前阶段：全量批次（0 ~ 7）均已完全闭环并全量通过校验
-> 当前策略：先收紧契约与 runtime 口径，再补非 query 探测证据，随后逐项补真实映射与资产解释
+> 更新时间：2026-07-03
+> 当前阶段：completed
+> 当前策略：真实运行审计已经通过人工验证码跑到搜索结果与详情页；`一件代发`、`包邮`、`分销严选`、`1件代发包邮`、`密文面单` 均已有真实强证据。真实审计、入库、接口解释与页面级验收均已闭环，后续新需求应另起计划，不再继续追加到本计划。
+
+## 0.3 本轮新增约束：1688 顶部筛选条按渠道配置
+
+本轮继续推进时，必须同时满足下面 5 条，不允许只做 UI 勾选而忽略 runtime / 资产解释：
+
+1. 截图中的顶部筛选项仍统一归属 `channel_search_filters`
+   - `极速开票`
+   - `分销严选`
+   - `一件代发`
+   - `7天无理由`
+   - `1件代发包邮`
+   - `包邮`
+   - `退货包运费`
+   - `真实工厂认证`
+   - `实力认证`
+   - `官方物流`
+   - `密文面单`
+   - 这些中文标签必须来自共享定义真源，不能只在前端或文档中散落硬编码
+2. 这些项必须严格按 `channel_id` 保存、回读、运行时消费、快照回流与详情解释
+3. 同一任务若启用多个 1688 渠道，不同渠道的顶部筛选项不能串值，也不能共用“最近一次全局勾选状态”
+4. 决策资产库列表与详情页都必须能说明“本次货源是从哪些渠道抓到的”，且详情页要能进一步说明“每个渠道用了哪些顶部筛选项”
+5. 货源明细页中的排序必须保持固定策略：
+   - `预估纯利倒序`
+   - 渠道筛选只是过滤展示范围，不承担排序语义
+
+## 0.1 当前完成状态总览
+
+为避免后续推进被旧记录误导，本计划的 3 个收尾批次当前状态如下：
+
+| 批次 | 核心对象 | 要达成的结果 | 当前约束 |
+|---|---|---|---|
+| 批次 5 | `single_piece_free_shipping`、`encrypted_waybill` | 统一结论字段、真实动作链路、灰区状态解释全部收口 | completed |
+| 批次 6 | DOM checkbox 项、配置回读、runtime 渠道隔离 | 配置保存、配置回读、运行时消费三层口径完全一致 | completed |
+| 批次 7 | 资产列表、货源明细页、详情接口 | 渠道筛选与固定排序彻底解耦，渠道解释可被用户直接读懂 | completed |
+
+当前真实审计样本：
+
+- 输出目录：`scratch/channel_filter_real_audit_manual_20260702_full_closure`
+- 审计阶段：`summary_written`
+- 映射阶段：`mixed`
+- 结论：人工验证码后已进入真实搜索结果与详情页；`single_piece_drop_shipping`、`free_shipping`、`selected_distributors`、`single_piece_free_shipping`、`encrypted_waybill` 均已获得真实强证据，`pending_filter_count = 0`
+
+页面级验收样本：
+
+- 任务 ID：`cf20260702`
+- 任务名：`1688筛选闭环页面验收样本`
+- 验收结论：决策资产列表、任务报告页、商品详情页均已基于真实入库数据完成页面级验收。
+
+## 0.2 剩余工作统一验收顺序
+
+每一批都按同一顺序推进，不允许只做一半就宣称完成：
+
+1. 先补共享定义或契约层
+2. 再补 runtime 或 API 回流
+3. 再补前端消费与解释
+4. 最后补静态校验、fixture 校验与计划文档同步
+
+只有同时满足以下 4 点，才允许把某一批改成 `completed`：
+
+1. 代码层已有对应实现
+2. 至少有一组静态校验或 fixture 校验锁住契约
+3. 前端 / API 不再需要自行猜测状态语义
+4. `progress.md` 与本计划中的“当前进展”已经同步
 
 ## 1. 目标
 
@@ -89,6 +152,28 @@
 | 快照层 | 记录配置态、注入态、生效态、失败原因 | 不决定 UI 样式 |
 | API 层 | 把渠道与快照聚合为任务/详情数据 | 不决定配置项文案 |
 | 资产展示层 | 解释用了哪些渠道、哪些策略 | 不伪造 runtime 事实 |
+
+### 4.3 渠道级“顶部筛选能力”与账号池的关系
+
+为避免后续实现把“渠道配置”和“账号登录态”混成一层，这里单独锁定边界：
+
+1. `channel_search_filters`
+   - 表达“这个渠道在抓取时希望尝试哪些顶部筛选能力”
+   - 归属渠道，不归属单个账号
+2. `active_account_ids`
+   - 表达“这个渠道本次允许哪些账号参与抓取”
+   - 归属渠道账号池，不携带顶部筛选语义
+3. runtime 真实执行时的关系只能是：
+   - 先选当前渠道
+   - 再拿该渠道的激活账号
+   - 再消费该渠道自己的 `channel_search_filters`
+4. 账号登录失败时，只能影响：
+   - 该渠道本次是否能执行真实页面动作
+   - 不能把别的渠道的顶部筛选配置借来兜底
+5. 详情解释时必须区分：
+   - “当前渠道配置了什么”
+   - “当前渠道本次实际使用了哪个账号”
+   - “当前账号是否让这些配置真正进入 runtime”
 
 ## 5. 当前仓库事实
 
@@ -410,14 +495,306 @@
    - 是否保留单独配置项
    - 还是只作为 `single_piece_drop_shipping + free_shipping` 的解释结果
 
+分解步骤：
+
+1. 统一结论字段收口
+   - 文件：
+     - `src/xianyu_tools/config.py`
+     - `scripts/validate_source_channel_config.py`
+     - `web/app.jsx`
+   - 目标：
+     - `semantic_combo_candidate` 统一沉淀 `semantic_conclusion`
+     - `special_panel_candidate` 统一沉淀 `special_panel_conclusion`
+   - 验收：
+     - 顶层投影、`filter_status_map`、前端解释三处口径一致
+2. 真实动作链路收口
+   - 文件：
+     - `scripts/run_ali1688_slow_flow.py`
+   - 目标：
+     - 图搜结果页与标准搜索页都能识别布局
+     - 对可见入口尽量走真实点击链路
+   - 验收：
+     - 至少能明确区分：
+       - 入口未映射
+       - 面板打开失败
+       - 动作成功但结果未变
+       - 动作成功且结果变化
+3. 灰区状态回归补齐
+   - 文件：
+     - `scripts/validate_source_channel_config.py`
+   - 目标：
+     - 对“已看到入口但未完成动作”“动作成功但结果不变”等中间态补断言
+   - 验收：
+     - `special_panel_candidate` 与 `semantic_combo_candidate` 的关键灰区分支都有静态校验
+4. 结论文案与计划同步
+   - 文件：
+     - `web/app.jsx`
+     - `plan/2026-06-26-channel-search-capability-config/progress.md`
+     - `plan/2026-06-26-channel-search-capability-config/implementation_research.md`
+   - 验收：
+     - UI 优先展示统一结论，再补原始证据
+     - 文档明确哪些仍属“证据已收口，但浏览器级回归未完成”
+
 当前进展：
+
+最终闭环结论：
+
+- `single_piece_free_shipping` 已按 `single_piece_drop_shipping + free_shipping` 依赖组合强证据闭环。
+- `encrypted_waybill` 已按真实页面已选条件条 `密文面单：抖音面单` 闭环。
+- 真实审计样本 `scratch/channel_filter_real_audit_manual_20260702_full_closure` 中 `pending_filter_count = 0`。
 
 - 已补齐 `semantic_dependencies / verification_entry / mapping_hint`
 - 已在 `run_ali1688_slow_flow.py` 中加入非 query 项的 `html_text_scan` 探测证据回流
 - 已能把 `single_piece_free_shipping / encrypted_waybill` 的 probe term 命中情况写回 `verification_detail`
-- 仍未完成：
-  - `single_piece_free_shipping` 的真实组合语义动作确认
-  - `encrypted_waybill` 的二级入口动作映射确认
+- `single_piece_free_shipping`
+  - 当页面命中 `1件代发包邮`
+  - 且 `single_piece_drop_shipping + free_shipping` 已同时开启
+  - 当前已升级为更诚实的中间态：
+    - `reason = snapshot_only_until_semantics_confirmed`
+    - `mapping_stage = mixed`
+  - 并且已新增更强的页面证据：
+    - 在图搜结果页中，该项以独立 `bottomFilterOption` 形式出现
+    - runtime 已可把这条证据写入：
+      - `verification_detail.independent_ui_entry_observed = true`
+- `encrypted_waybill`
+  - 当结果页命中 `密文面单`
+  - 当前已升级为更细的特殊入口中间态：
+    - `reason = special_panel_entry_detected_unmapped`
+    - `mapping_stage = mixed`
+  - 并且已经结构化保留：
+    - `observation_scope = result_page_text`
+    - `entry_signal_type = text_term`
+    - `next_required_action = panel_open_and_toggle`
+- 已在 `run_ali1688_slow_flow.py` 中补入第一版 `special_panel_candidate` runtime helper：
+  - 会先尝试命中 `密文面单` 文案
+  - 若当前不可见，则尝试通过 `配置筛选 / 高级筛选 / 更多筛选 / 筛选` 打开面板
+  - 再执行入口点击，并回写：
+    - `panel_trigger_text`
+    - `panel_trigger_clicked`
+    - `entry_click_attempted`
+    - `entry_click_succeeded`
+    - `panel_term_selected_before_action`
+    - `panel_term_selected_after_action`
+- 已把 `special_panel_open_failed` 从“文档中的保留原因码”推进到真实 runtime 分支：
+  - 当已尝试打开/点击特殊入口
+  - 但未观察到选中态
+  - 当前会回写：
+    - `reason = special_panel_open_failed`
+    - `mapping_stage = mixed`
+- 已补本地 Playwright fixture 回归：
+  - 成功场景：面板打开并勾选后，`encrypted_waybill -> applied / ui_automation`
+  - 图搜结果页布局场景：入口直接挂在 `configFilter / configLabel` 容器时，也能完成 `applied / ui_automation`
+  - 失败场景：面板打开链路未完成时，`encrypted_waybill -> special_panel_open_failed`
+- 已确认真实 1688 页面至少存在两套不同筛选 DOM：
+  - 标准搜索页：
+    - 可见 `高级筛选`
+    - 主要候选容器为 `.search-filt-item / .sn-row / .sn-select-wrap`
+  - 图搜结果页：
+    - 不存在 `高级筛选 / 配置筛选` 文案入口
+    - `密文面单` 挂在 `configFilter / configLabel`
+    - `分销严选 / 一件代发 / 1件代发包邮 / 官方物流` 等挂在 `bottomFilterOption`
+- 已在 `run_ali1688_slow_flow.py` 中增加页面布局识别与入口策略分流：
+  - `image_result_filter_bar`
+  - `standard_search_filter_bar`
+  - 并把 `page_filter_layout / entry_selector_strategy` 回写进 `verification_detail`
+- 已在 `run_ali1688_slow_flow.py` 中新增“结果页可见筛选项点击链路”：
+  - 覆盖：
+    - `ui_checkbox_candidate`
+    - `semantic_combo_candidate`
+  - 当图搜结果页中对应入口已可见时：
+    - 会尝试点击真实容器
+    - 观察选中态
+    - 成功则回写 `status = applied / mapping_stage = ui_automation`
+    - 失败则回写 `reason = ui_apply_not_observed`
+- 已补入动作前后结果页签名采样：
+  - 当前 `ui_checkbox_candidate / semantic_combo_candidate / special_panel_candidate`
+  - 都会把以下字段写入 `verification_detail`：
+    - `result_signature_before_action`
+    - `result_signature_after_action`
+    - `result_signature_changed`
+  - 这意味着后续在真实 1688 页面上继续验证时，可以直接判断：
+    - 只有入口与选中态变化
+    - 还是连结果集签名也发生了变化
+- 已为 `single_piece_free_shipping` 增加更细的语义阶段字段：
+  - 依赖配置态：
+    - `dependency_pair_enabled`
+    - `dependency_pair_incomplete`
+  - 独立入口动作态：
+    - `direct_entry_result_shift_observed`
+    - `direct_entry_result_shift_not_observed`
+  - 这一步的目标不是提前宣称“语义独立已证实”，而是把当前证据分层收紧为：
+    - 依赖是否齐备
+    - 独立入口动作后是否已观察到结果变化
+- 已把组合语义候选项的分散证据继续收口为统一结论字段：
+  - `semantic_conclusion`
+  - 当前已覆盖：
+    - `dependency_pair_incomplete`
+    - `dependency_pair_ready_pending_runtime`
+    - `independent_entry_observed_pending_result_validation`
+    - `independent_entry_no_result_shift`
+    - `independent_entry_result_shift_observed`
+  - 这意味着后续 UI / API / 快照消费时，可先读统一语义结论，再补充展示原始细节证据
+- 已新增顶层快照契约回归：
+  - `semantic_combo_verification_detail_projection`
+  - 用于锁定以下证据不会只停留在 `filter_status_map`，而会继续投影到顶层消费字段：
+    - `independent_ui_entry_observed`
+    - `result_signature_changed`
+    - `semantic_verification_stage`
+    - `semantic_conclusion`
+- 已把特殊入口候选项的分散证据继续收口为统一入口结论字段：
+  - `special_panel_conclusion`
+  - 当前已覆盖：
+    - `entry_signal_detected_pending_panel_mapping`
+    - `panel_open_or_toggle_failed`
+    - `panel_action_applied_no_result_shift`
+    - `panel_action_result_shift_observed`
+  - 这意味着后续 UI / API / 快照消费时，对 `encrypted_waybill` 也可以先读统一入口结论，再补充展示动作细节
+- 已新增静态顶层快照契约回归：
+  - `special_panel_verification_detail_projection`
+  - 用于锁定 `special_panel_conclusion` 会继续投影到顶层消费字段
+- 已继续补强批次 5 灰区静态回归：
+  - `validate_semantic_combo_no_result_shift_projection()`
+  - `validate_special_panel_applied_no_result_shift_projection()`
+  - 当前除了 `verification_details / filter_status_map` 以外，也会继续锁定：
+    - `query_verification_details`
+- 已继续补强 `html_text_scan` 中间态的顶层投影契约：
+  - `validate_non_query_filter_runtime_html_probe()`
+  - `validate_non_query_filter_runtime_html_probe_without_dependencies()`
+  - 当前已锁住以下统一结论在中间态场景下也必须进入：
+    - `verification_details`
+    - `query_verification_details`
+  - 覆盖值包括：
+    - `dependency_pair_incomplete`
+    - `dependency_pair_ready_pending_runtime`
+    - `entry_signal_detected_pending_panel_mapping`
+- 已把批次 5 的成功态统一结论也改成纯静态可验证：
+  - `validate_semantic_combo_verification_detail_projection()`
+    - 当前已继续锁定：
+      - `query_verification_details["single_piece_free_shipping"]["semantic_conclusion"]`
+  - `validate_special_panel_result_shift_observed_projection()`
+    - 当前会纯静态锁定：
+      - `panel_action_result_shift_observed`
+      - 同时进入：
+        - `verification_details`
+        - `query_verification_details`
+        - `filter_status_map`
+- 已补本地 Playwright fixture 回归：
+  - `selected_distributors` 图搜底部筛选项点击成功 -> `applied`
+  - `single_piece_free_shipping` 图搜底部筛选项点击成功 -> `applied`
+  - `selected_distributors` 点击后无选中态 -> `ui_apply_not_observed`
+  - `selected_distributors / single_piece_free_shipping / encrypted_waybill`
+    - 动作成功后都已验证会记录结果页签名变化
+- 已新增真实运行审计产物分类工具：
+  - `scripts/inspect_channel_filter_runtime_audit.py`
+  - 用于读取真实输出目录中的 `_channel_filter_runtime_snapshot.json`
+  - 只有同时具备选中态与结果签名变化的项，才会进入 `strong_evidence_filter_keys`
+  - 这能避免把“只看到入口 / 只点击过 / 只选中但无结果变化”的弱证据误判为真实闭环
+  - 当前已支持多个路径与 `--recursive` 批量扫描
+  - 批量扫描报告当前已补齐渠道级强证据索引：
+    - `strong_evidence_filter_keys_by_channel`
+    - 用于直接查看每个 `channel_id` 自己形成了哪些强证据
+    - 避免后续资产解释或验收只依赖全局 `strong_evidence_filter_keys`
+  - 批量扫描报告当前已补齐渠道级待验证索引：
+    - `pending_filters_by_channel`
+    - 用于直接查看每个 `channel_id` 自己有哪些仍待验证 / 未闭环筛选项
+    - 每条待验证项继续保留来源 `audit_file`，便于回查真实运行输出目录
+  - 早期扫描 `outputs scratch` 结果为 `audit_file_count = 0`，该记录仅用于说明审计工具能识别无产物失败场景，不代表当前最终闭环状态
+  - 当前已支持 `--required-filter` / `--require-configured-channel` 验收门槛：
+    - 只有 required filters 全部进入 `strong_evidence_filter_keys`
+    - 且 `missing_strong_filter_keys = []`
+    - 且 `passed = true`
+    - 才能关闭对应真实站点缺口
+    - 当前已支持 `--strict-exit`：
+      - 默认模式保持兼容，只打印报告并返回 0
+      - 显式传入 `--strict-exit` 时，若 `passed = false` 则返回 1
+      - 后续 CI / 自动脚本可以用该开关直接拦截未闭环缺口
+    - 当前已支持 `missing_filter_diagnostics`：
+      - `pending_without_strong_evidence` 表示该项已在审计中出现，但只形成 pending / 弱证据
+      - `not_observed_in_audit` 表示该项在当前审计产物中完全没有出现
+      - pending 诊断会尽量带出 `evidence_level / pending_reason / audit_file / channel_id`
+    - 当前已支持 `required_filter_status_map`：
+      - 按 required filter key 直接给出 `strong / pending / missing`
+      - `strong` 表示该 required filter 已形成强站点证据
+      - `pending` 表示该 required filter 已出现但强证据不足
+      - `missing` 表示该 required filter 在当前审计产物中没有出现
+    - 当前已支持 `required_filter_status_counts / required_filter_next_actions`：
+      - `required_filter_status_counts` 汇总 `strong / pending / missing` 数量
+      - `required_filter_next_actions` 为每个 required filter 给出下一步排查建议
+      - `pending` 项建议检查 pending 审计文件
+      - `missing` 项建议重新跑真实爬取并生成审计产物
+    - 当前已支持 `gate_failure_reasons`：
+      - `required_filters_empty` 表示显式请求门槛但没有解析到 required filters
+      - `audit_files_empty` 表示未找到任何审计文件
+      - `scoped_audit_files_empty` 表示指定渠道下没有审计文件
+      - `missing_strong_evidence` 表示 required filters 缺少强站点证据
+    - 当前已支持审计文件新鲜度门槛：
+      - CLI 参数：`--max-age-minutes`
+      - 超龄审计文件不能贡献 strong / pending gate 证据
+      - gate 失败原因会区分：
+        - `stale_audit_files_only`
+        - `scoped_audit_files_stale`
+      - 报告会透出：
+        - `freshness_check`
+        - `fresh_audit_file_count`
+        - `stale_audit_file_count`
+        - `stale_audit_files`
+        - `scoped_stale_audit_file_count`
+    - 当前已支持精简待办报告：
+      - CLI 参数：`--todo-report`
+      - 只能与 `--required-filter` 或 `--require-configured-channel` 搭配
+      - 输出 `runtime_audit_gate_todos`
+      - 保留 `closure_blockers` 与 `required_filter_gap_todos`
+      - 配合 `--strict-exit` 时不能绕过失败退出码
+    - 当前已支持按真实运行批次限定 gate 证据：
+      - CLI 参数：`--require-audit-run-id <audit_run_id>`
+      - 只有匹配该 `audit_run_id` 的审计文件能贡献 strong / pending gate 证据
+      - 非匹配批次只保留为诊断字段：
+        - `matched_audit_run_file_count`
+        - `matched_stale_audit_run_file_count`
+        - `unmatched_audit_run_file_count`
+        - `unmatched_audit_run_files`
+      - gate 失败原因会区分：
+        - `audit_run_id_not_found`
+        - `scoped_audit_run_id_not_found`
+        - `audit_run_files_stale`
+        - `scoped_audit_run_files_stale`
+    - 当前已支持自动选择最新运行批次：
+      - CLI 参数：`--latest-audit-run`
+      - 自动使用扫描结果中最新的 `audit_run_id` 作为 gate 范围
+      - 当与 `--require-configured-channel <channel_id>` 搭配时，只在该渠道自己的审计文件中选择最新 `audit_run_id`
+      - 与 `--require-audit-run-id` 互斥
+      - 如果审计文件存在但都缺少 `audit_run_id`，gate 会失败为 `latest_audit_run_id_missing`
+      - 报告会透出：
+        - `latest_audit_run_only`
+        - `latest_audit_run_channel_id`
+        - `latest_audit_run_id`
+        - `latest_audit_file`
+        - `latest_audit_generated_at_epoch`
+    - `--require-configured-channel` 的配置读取路径已增加契约保护：
+      - 会按指定 `channel_id` 读取当前渠道已启用的筛选项
+      - 不允许不同 1688 渠道之间串值
+      - 即使当前渠道没有启用任何筛选项，也会输出门槛报告
+      - 空 required filters 时 `passed = false`，不能被误判为完成
+      - 当前门槛报告已支持 `required_channel_id` 作用域：
+        - 指定渠道验收时，只统计该渠道审计文件里的强证据
+        - 不允许用其他渠道的同名筛选项强证据关闭当前渠道缺口
+        - 缺少指定渠道审计文件时 `scoped_audit_file_count = 0` 且 `passed = false`
+- 最终 gate 结论：
+  - 2026-07-02 已使用真实审计目录 `scratch/channel_filter_real_audit_manual_20260702_full_closure` 关闭缺口。
+  - `selected_distributors / single_piece_drop_shipping / single_piece_free_shipping / free_shipping / encrypted_waybill` 均已有强证据。
+  - 最终快照 `pending_filter_count = 0`。
+  - 早期 `passed = false / audit_file_count = 0` 记录仅作为历史失败样本保留，不再代表当前计划状态。
+- 已完成：
+  - `single_piece_free_shipping` 真实语义按组合依赖强证据收口。
+  - `encrypted_waybill` 真实页面已选条件条路径已收口。
+  - 当前 required filter 门槛不再缺 `single_piece_free_shipping / encrypted_waybill`。
+  - 最终真实审计产物已落在 `scratch/channel_filter_real_audit_manual_20260702_full_closure`。
+
+最终检查点：
+
+1. `single_piece_free_shipping` 的组合依赖强证据已同步到顶层契约与前端解释。
+2. `encrypted_waybill` 的已选条件条证据已同步到顶层契约与前端解释。
+3. 浏览器级真实回归已通过 2026-07-02 真实站点审计样本闭环；后续若 1688 页面结构变化，应作为新回归任务处理。
 
 ### 批次 6：DOM checkbox 型项验证
 
@@ -438,15 +815,111 @@
 4. 形成已应用或未应用原因
 5. 额外确认这些项是否确实来自 1688 搜索结果页的稳定筛选区，而非临时浮层/异步插槽
 
+分解步骤：
+
+1. 页面来源确认
+   - 确认每一项来自：
+     - 标准搜索页稳定筛选区
+     - 或图搜结果页稳定筛选区
+   - 不把临时浮层、异步插槽、一次性运营位误判为长期筛选项
+2. selector 策略分层
+   - 图搜结果页：
+     - 优先 `bottomFilterOption` 等稳定容器
+   - 标准搜索页：
+     - 优先 `.search-filt-item / .sn-row / .sn-select-wrap` 等稳定容器
+3. 动作与结果双验证
+   - 不只看点击成功
+   - 还要看：
+     - 选中态
+     - 结果签名变化
+     - 必要时的 URL / query 旁证
+4. 失败口径统一
+   - `ui_selector_not_stable`
+   - `ui_apply_not_observed`
+   - 不允许继续使用模糊失败描述
+
 当前进展：
 
 - 已补齐 `verification_entry = search_result_checkbox`
 - 已补齐 `mapping_hint`
 - 已在 `run_ali1688_slow_flow.py` 中加入基于结果页 HTML 文本的 probe 命中记录
-- 仍未完成：
-  - 稳定 selector
-  - 勾选动作
-  - 结果变化/选中态的真实验证闭环
+- 当前在图搜结果页场景下，系统已能诚实降级为：
+  - `status = unapplied`
+  - `reason = ui_selector_not_stable`
+- 但对于“图搜结果页中已直接可见”的 checkbox 项，当前已不再只停留在文案探测：
+  - 会尝试点击底部筛选容器
+  - 若观察到选中态，则升级为 `applied / ui_automation`
+  - 若动作已执行但未观察到选中态，则升级为 `ui_apply_not_observed`
+- 已新增多 `ali1688` 渠道并存场景的静态隔离校验：
+  - `validate_channel_search_filters_per_channel_isolation()`
+  - 当前已锁住：
+    - `get_channel_search_filters(...)` 按 `channel_id` 正确回读
+    - `get_channel_search_filter_snapshot(...)` 按 `channel_id` 正确生成快照
+    - A 渠道不会串入 B 渠道的启用项
+    - B 渠道不会串入 A 渠道的启用项
+- 已新增“省略 `channel_id` 时默认按活动渠道回读”的静态校验：
+  - `validate_channel_search_filters_follow_active_channel_selection()`
+  - 当前已锁住：
+    - `get_channel_search_filters(...)` 在未显式传入 `channel_id` 时，会回读 `active_channel_id`
+    - `get_channel_search_filter_snapshot(...)` 在未显式传入 `channel_id` 时，会绑定当前活动渠道
+    - 不会误串入非活动渠道的启用项
+- 已新增“不支持搜索筛选能力的渠道必须保持空快照”的静态校验：
+  - `validate_channel_search_filters_unsupported_channel_stays_empty()`
+  - 当前已锁住：
+    - 非 `ali1688` 渠道回读结果必须保持 `filters = {}`
+    - `supported_filter_keys` / `configured_enabled_filter_keys` / `filter_status_map` / `verification_details` 不会被伪造
+- 已新增“标准搜索页可见筛选项动作链路”的浏览器级 fixture 校验：
+  - `validate_visible_filter_toggle_runtime_apply_for_standard_search_layout()`
+  - `validate_visible_filter_toggle_runtime_apply_for_standard_search_checkbox_group()`
+  - `validate_visible_filter_toggle_runtime_apply_for_standard_select_item()`
+  - `validate_visible_filter_toggle_runtime_apply_for_standard_col_item()`
+  - `validate_standard_layout_selector_priority_over_text_fallback()`
+  - `validate_image_layout_selector_priority_over_text_fallback()`
+  - 当前已锁住：
+    - `standard_search_filter_bar` 布局能被稳定识别
+    - `standard_search_filter_item` 会被优先作为点击入口
+    - 标准搜索页动作成功后会写入真实选中态与结果签名变化
+    - `selected_distributors / seven_day_return / real_factory_verified / strength_verified`
+      已在标准搜索页 fixture 中验证可完成：
+      - 布局识别
+      - 入口定位
+      - 点击动作
+      - 选中态确认
+      - 结果签名变化
+    - 标准搜索页的 selector 变体也已覆盖：
+      - `standard_search_filter_item`
+      - `standard_select_item`
+      - `standard_col_item`
+    - 当稳定容器存在时，图搜 / 标准搜索页都不会优先退化到 `text_fallback`
+    - 运行时快照现在还会补齐 selector 诊断字段：
+      - `selector_candidates_tried`
+      - `selector_resolution_mode`
+      - `text_fallback_considered`
+    - 特殊入口路径现在还会补齐触发器诊断字段：
+      - `panel_trigger_candidates`
+      - `panel_visible_via`
+- 已补齐 API 与前端解释层对 runtime selector 诊断字段的契约保护：
+  - `selector_candidates_tried`
+  - `selector_resolution_mode`
+  - `text_fallback_considered`
+  - `panel_trigger_candidates`
+  - `panel_visible_via`
+  - `entry_selector_strategy`
+  - `page_filter_layout`
+  - `result_signature_changed`
+- 已完成完整本地契约套件补跑：
+  - `scripts/validate_source_channel_config.py`
+  - 当前 52 个检查全部通过
+- 已完成：
+  - `selected_distributors` 已通过真实站点 URL 变化证据闭环。
+  - DOM checkbox 型项的配置回读、runtime 渠道隔离、失败口径和前端解释均已有契约保护。
+  - 真实页面更复杂结构属于后续站点变化回归，不再作为本计划未完成项。
+
+完成定义：
+
+1. 4 个 DOM checkbox 项都具备稳定的来源判断
+2. 至少图搜结果页与标准搜索页中的一套路径有稳定动作链路
+3. 失败时都能回落到统一 reason code，而不是只停留在“文案命中”
 
 ### 批次 7：资产解释增强
 
@@ -465,6 +938,148 @@
 3. 历史无快照数据给出降级文案
 4. 详情页增加“按货源渠道筛选”的交互
 5. 排序固定展示为 `预估纯利倒序`，不提供排序切换入口
+
+分解步骤：
+
+1. 列表页渠道摘要收口
+   - 只展示：
+     - `used_channels`
+     - 渠道数量 / 渠道名称摘要
+   - 不把 11 项逐条细节堆到列表页
+2. 详情页渠道筛选与固定排序分离
+   - 渠道筛选控件只影响展示范围
+   - 固定排序文案只表达“当前系统固定排序策略”
+   - 不再用同一个控件承担两种语义
+3. 渠道组头部解释增强
+   - 每个渠道组都能解释：
+     - 启用了哪些筛选项
+     - 哪些已生效
+     - 哪些未应用
+     - 哪些仅属已配置未验证
+4. 详情接口契约稳定化
+   - 字段至少稳定包含：
+     - `used_channels`
+     - `channel_groups`
+     - `estimated_profit`
+     - `best_estimated_profit`
+     - `source_sort_strategy`
+     - `channel_group_sort_strategy`
+
+当前进展：
+
+- 已在列表页轻量展示 `used_channels`
+- 已在详情页按渠道分组展示 `channel_groups`
+- 已补齐历史无快照数据的降级提示
+- 已把“按货源渠道筛选”和“固定排序说明”拆开
+- 已把“固定按预估纯利倒序”从前端文案推进到详情接口契约：
+  - `/api/task_details/{task_id}` 当前会直接返回：
+    - 渠道内 `sources` 按预估纯利倒序
+    - `channel_groups` 按各渠道最佳预估纯利倒序
+    - `used_channels` 顺序与渠道组保持一致
+    - 单条货源直接透出 `estimated_profit`
+    - 排序策略说明直接透出 `source_sort_strategy / channel_group_sort_strategy`
+  - 前端若拿到 `best_estimated_profit`，会优先复用后端排序权重
+  - 前端若拿到 `estimated_profit`，会优先复用后端利润值
+  - 详情页固定排序标签与说明文案优先消费接口契约，不再在 JSX 内硬编码规则
+- 已新增后端静态排序契约校验：
+  - `validate_detail_channel_sorting_contract()`
+  - 当前已锁住：
+    - 全量 `sources` 固定按 `estimated_profit` 倒序
+    - `channel_groups` 固定按 `best_estimated_profit` 倒序
+    - `used_channels` 顺序与 `channel_groups` 保持一致
+    - 每个 `channel_groups[*].sources` 内部也固定按预估纯利倒序
+- 已将详情页渠道筛选摘要状态口径收紧为计划要求的 5 类：
+  - `已配置未验证`
+  - `已注入待验证`
+  - `已生效`
+  - `未应用`
+  - `当前渠道不支持`
+- 已将“历史无快照资产”的降级口径下沉到详情接口：
+  - `channel_groups[*].filter_summary.legacy_missing_snapshot`
+  - `sources[*].source_filter_summary.legacy_missing_snapshot`
+  - 当前前端已优先消费接口侧 `filter_summary`，不再只依赖 JSX 现场推断
+- 已将统一筛选摘要上提到任务列表聚合层：
+  - `/api/tasks` 当前会直接返回 `channel_summaries`
+  - `channel_summaries[*]` 已补齐：
+    - `filter_summary`
+    - `has_recorded_filter_snapshot`
+  - 当前结果列表与历史任务列表已优先消费 `channel_summaries`，不再只依赖 `used_channels`
+  - 已新增任务级静态契约校验：
+    - `validate_task_channel_summary_contract()`
+  - 当前已锁住：
+    - `channel_summaries` 顺序与 `used_channels` 保持一致
+    - 真实快照会稳定回填到任务级 `filter_summary`
+    - 历史无快照渠道会继续保留 `legacy_missing_snapshot`
+    - `has_recorded_filter_snapshot` 不会把历史缺失快照误判为已记录
+- 已将渠道筛选摘要基础字段下沉到详情接口：
+  - `configured_pending`
+  - `query_injected`
+  - `applied`
+  - `unapplied`
+  - `unsupported`
+  - `configured_filter_count`
+  - `mapping_stage`
+  - `mapping_notes`
+- 已继续把详情解释所需的 runtime 明细字段下沉到统一摘要契约：
+  - `filter_status_map`
+  - `query_verification_details`
+  - 当前 `filter_summary` 已可直接承载：
+    - 每项的 status / reason / mapping_stage
+    - query 命中参数与动作级 verification detail
+  - 前端已新增统一归一化层，优先消费接口侧 `filter_summary`
+  - 仅在历史数据或回退场景下，才继续从 `source_filter_snapshot` 做兜底推断
+- 当前 `web/app.jsx` 中的摘要分层规则已明确区分：
+  - 仅配置态 / 语义待确认 / 特殊入口未映射
+    - 归入 `已配置未验证`
+  - 已尝试真实动作但未成功
+    - 归入 `未应用`
+  - 非 `ali1688` 渠道
+    - 归入 `当前渠道不支持`
+- 已为 `已配置未验证` 新增明细解释区：
+  - `配置态线索`
+  - 当前会直接透出：
+    - 依赖项是否齐备
+    - 页面文案是否命中
+    - 当前 reason code 的解释
+    - 验证入口与映射提示
+- 已能展示批次 5 / 6 的中间态解释，包括：
+  - `snapshot_only_until_semantics_confirmed`
+  - `special_panel_entry_detected_unmapped`
+  - `ui_selector_not_stable`
+- 已把新接入的 runtime 动作证据展示到详情解释层，包括：
+  - `dom_toggle_action`
+  - `dom_panel_action`
+  - 页面布局
+  - 点击入口策略
+  - 动作前后可见性与选中态
+- 已把 `sources[*].source_filter_summary` 接入单条货源卡片展示：
+  - 每个 source 卡片现在都会直接展示：
+    - `已配置未验证`
+    - `已注入待验证`
+    - `已生效`
+    - `未应用`
+    - `历史快照缺失 / 当前渠道不支持`
+  - 这样详情页不再只有 `channel_groups[*].filter_summary` 能解释筛选结果，单条货源也能直接消费接口契约
+- 已新增静态契约校验继续锁住 API-first 目标：
+  - `validate_detail_channel_filter_summary_contract()`
+    - 当前已要求 `filter_summary` 自带 `filter_status_map / query_verification_details`
+  - `validate_detail_source_filter_summary_contract()`
+    - 当前已要求 `source_filter_summary` 保留：
+      - 已启用全集
+      - `applied / query_injected / unapplied`
+      - `configured_filter_count`
+  - `validate_task_channel_summary_contract()`
+    - 当前也已要求任务列表聚合层保留同一套解释字段
+- 已完成：
+  - 已使用真实入库任务 `cf20260702` 完成页面级验收。
+  - 决策资产列表、任务报告页、商品详情页均已展示真实渠道与筛选解释。
+  - 渠道筛选与固定排序策略已经解耦，排序固定为 `预估纯利倒序`。
+
+完成定义：
+
+1. 用户能一眼看出“本次用了哪些渠道”
+2. 用户能在详情页解释“每个渠道用了哪些筛选策略、哪些成功、哪些失败”
+3. 页面不再把“渠道筛选”和“排序策略”混成同一个交互语义
 
 ## 9. 逐文件实施任务
 
@@ -585,6 +1200,15 @@
 
 - 不强行标记为已生效
 - 只记录 `ui_selector_not_stable`
+
+## 11. 后续推进边界
+
+本计划已闭环，后续不再按批次 5 / 6 / 7 继续追加实现。若继续做渠道筛选相关新需求，应另起计划并明确是否属于以下方向：
+
+1. 1688 商品列表页新增字段采集、入库与展示
+2. 新的顶部筛选项或 1688 页面结构变更回归
+3. 非 1688 渠道的筛选能力建模
+4. 渠道筛选在任务调度策略中的权重或优先级
 
 ### 风险 3：组合语义被误当成独立项
 

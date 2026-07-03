@@ -4,6 +4,7 @@ from pathlib import Path
 
 # --- 核心：导入统一日志工具 ---
 BASE_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(BASE_DIR))
 sys.path.insert(0, str(BASE_DIR / "src"))
 from xianyu_tools.logging_util import get_unified_logger
 
@@ -17,6 +18,44 @@ async def run_command(cmd, logger):
 def sanitize_dir_name(name: str) -> str:
     clean = re.sub(r'\s+', '', str(name))
     return re.sub(r'[\\/:*?"<>|]', '_', clean).strip()[:60]
+
+
+def load_runtime_filter_audit_snapshot(item_dir: Path, fallback_snapshot: dict | None = None) -> dict:
+    fallback_snapshot = fallback_snapshot if isinstance(fallback_snapshot, dict) else {}
+    audit_path = item_dir / "_channel_filter_runtime_snapshot.json"
+    if not audit_path.exists():
+        return fallback_snapshot
+    try:
+        payload = json.loads(audit_path.read_text(encoding="utf-8"))
+    except Exception:
+        return fallback_snapshot
+    if not isinstance(payload, dict):
+        return fallback_snapshot
+
+    snapshot = payload.get("snapshot")
+    if not isinstance(snapshot, dict):
+        snapshot = payload
+    try:
+        from xianyu_tools.config import settings
+        return settings.normalize_channel_search_filter_snapshot(snapshot)
+    except Exception:
+        return snapshot if isinstance(snapshot, dict) else fallback_snapshot
+
+
+def select_source_filter_snapshot_for_db(
+    *,
+    audit_exists: bool,
+    audit_snapshot: dict | None,
+    summary_snapshot: dict | None,
+    fallback_snapshot: dict | None,
+) -> dict:
+    if audit_exists and isinstance(audit_snapshot, dict) and audit_snapshot:
+        return audit_snapshot
+    if isinstance(summary_snapshot, dict) and summary_snapshot:
+        return summary_snapshot
+    if isinstance(fallback_snapshot, dict) and fallback_snapshot:
+        return fallback_snapshot
+    return {}
 
 
 def get_effective_ali1688_runtime_context(rotation_index: int = 0) -> dict:
@@ -334,6 +373,30 @@ async def main():
             f"--log-file {shlex.quote(str(log_file_path))}"
         )
         await run_command(cmd_1688, logger)
+        runtime_filter_audit_snapshot = load_runtime_filter_audit_snapshot(
+            item_dir,
+            runtime_context.get("source_filter_snapshot") or {},
+        )
+        runtime_filter_audit_path = item_dir / "_channel_filter_runtime_snapshot.json"
+        runtime_filter_audit_exists = runtime_filter_audit_path.exists()
+        runtime_filter_audit_stage = ""
+        if runtime_filter_audit_exists:
+            try:
+                runtime_filter_audit_payload = json.loads(runtime_filter_audit_path.read_text(encoding="utf-8"))
+                if isinstance(runtime_filter_audit_payload, dict):
+                    runtime_filter_audit_stage = str(runtime_filter_audit_payload.get("stage") or "")
+            except Exception:
+                runtime_filter_audit_stage = ""
+            logger.info(
+                "[Phase 2] Loaded channel filter runtime audit snapshot: %s",
+                {
+                    "rank": i,
+                    "stage": runtime_filter_audit_stage,
+                    "path": str(runtime_filter_audit_path),
+                    "applied_filter_keys": runtime_filter_audit_snapshot.get("applied_filter_keys") or [],
+                    "unapplied_filter_keys": runtime_filter_audit_snapshot.get("unapplied_filter_keys") or [],
+                },
+            )
         
         # --- 资产入库 (全方位日志埋点版) ---
         if task_id and i in db_item_ids:
@@ -433,7 +496,15 @@ async def main():
                             res.get("waybill_support_text", ""),
                             res.get("settled_years_text", ""),
                             res.get("company_name", ""),
-                            json.dumps(res.get("source_filter_snapshot") or {}, ensure_ascii=False),
+                            json.dumps(
+                                select_source_filter_snapshot_for_db(
+                                    audit_exists=runtime_filter_audit_exists,
+                                    audit_snapshot=runtime_filter_audit_snapshot,
+                                    summary_snapshot=res.get("source_filter_snapshot"),
+                                    fallback_snapshot=runtime_context.get("source_filter_snapshot"),
+                                ),
+                                ensure_ascii=False,
+                            ),
                             int(res.get("month_dispatch_count") or 0),
                             int(res.get("seven_day_dispatch_count") or 0),
                             int(res.get("listing_count") or 0),
@@ -470,7 +541,11 @@ async def main():
                     if total_task_tokens > 0 and task_id:
                         logger.info(f"[Sync-DB] AI relevance checks ran for this sync. Total AI tokens: {total_task_tokens} (already synced inside llm_util)")
                 else:
-                    logger.warning(f"[Sync-DB] summary.json NOT FOUND in {item_dir}!")
+                    logger.warning(
+                        "[Sync-DB] summary.json NOT FOUND in %s; latest channel filter audit stage=%s",
+                        item_dir,
+                        runtime_filter_audit_stage or "unknown",
+                    )
                 
                 # 更新进度
                 _cursor.execute("UPDATE tasks SET checkpoint = %s WHERE id = %s", (json.dumps({"phase": 2, "processed_rank": i}), task_id))

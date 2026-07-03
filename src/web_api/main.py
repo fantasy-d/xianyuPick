@@ -42,10 +42,297 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 WEB_DIR = BASE_DIR / "web"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 
+SOURCE_ESTIMATED_PROFIT_OFFSET = 20.0
+
 # --- 辅助函数 ---
 DB_CONFIG = settings.get_database_config()
 DB_CONFIG["cursorclass"] = pymysql.cursors.DictCursor
 def get_db_conn(): return pymysql.connect(**DB_CONFIG)
+
+
+def _to_float(value, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return default
+
+
+def _compute_source_estimated_profit(source_row: dict, listing_price: float) -> float:
+    source = source_row or {}
+    existing_profit = source.get("estimated_profit")
+    if existing_profit not in (None, ""):
+        try:
+            return float(existing_profit)
+        except Exception:
+            pass
+    return _to_float(listing_price) - _to_float(source.get("min_price")) - SOURCE_ESTIMATED_PROFIT_OFFSET
+
+
+def _ordered_unique_string_list(values) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        text = str(value or "").strip()
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        result.append(text)
+    return result
+
+
+def _summarize_channel_filter_snapshot(
+    snapshot: dict | None,
+    *,
+    channel_type: str | None = None,
+    has_recorded_snapshot: bool = True,
+) -> dict:
+    normalized_snapshot = settings.normalize_channel_search_filter_snapshot(
+        snapshot if isinstance(snapshot, dict) else {},
+        channel_type=str(channel_type or "").strip(),
+    )
+    filter_status_map = (
+        normalized_snapshot.get("filter_status_map")
+        if isinstance(normalized_snapshot.get("filter_status_map"), dict)
+        else {}
+    )
+    configured = _ordered_unique_string_list(
+        normalized_snapshot.get("configured_enabled_filter_keys")
+        or normalized_snapshot.get("configured_filter_keys")
+        or normalized_snapshot.get("enabled_filter_keys")
+    )
+    query_injected = [
+        key for key, meta in filter_status_map.items()
+        if isinstance(meta, dict) and meta.get("status") == "query_injected_pending_verification"
+    ]
+    applied = [
+        key for key, meta in filter_status_map.items()
+        if isinstance(meta, dict) and meta.get("status") == "applied"
+    ]
+    unapplied = [
+        key for key, meta in filter_status_map.items()
+        if isinstance(meta, dict) and meta.get("status") == "unapplied"
+    ]
+    resolved_channel_type = str(
+        normalized_snapshot.get("channel_type") or channel_type or ""
+    ).strip().lower()
+    unsupported = bool(resolved_channel_type) and resolved_channel_type != "ali1688"
+    configured_pending_reason_set = {
+        "runtime_mapping_not_implemented_yet",
+        "query_candidate_not_validated",
+        "semantic_combo_not_confirmed",
+        "snapshot_only_until_semantics_confirmed",
+        "special_panel_unmapped",
+        "special_panel_entry_detected_unmapped",
+    }
+    configured_pending = []
+    for filter_key in configured:
+        filter_meta = filter_status_map.get(filter_key)
+        if not isinstance(filter_meta, dict):
+            configured_pending.append(filter_key)
+            continue
+        if filter_meta.get("status") != "unapplied":
+            continue
+        mapping_stage = str(filter_meta.get("mapping_stage") or "").strip()
+        reason = str(filter_meta.get("reason") or "").strip()
+        if mapping_stage == "snapshot_only" or reason in configured_pending_reason_set:
+            configured_pending.append(filter_key)
+
+    applied_set = set(applied)
+    query_injected_set = set(query_injected)
+    configured_pending_set = set(configured_pending)
+    unapplied_strict = [
+        filter_key for filter_key in unapplied
+        if filter_key not in applied_set
+        and filter_key not in query_injected_set
+        and filter_key not in configured_pending_set
+    ]
+    top_level_query_verification_details = (
+        normalized_snapshot.get("query_verification_details")
+        if isinstance(normalized_snapshot.get("query_verification_details"), dict)
+        else normalized_snapshot.get("verification_details")
+        if isinstance(normalized_snapshot.get("verification_details"), dict)
+        else {}
+    )
+    status_map_verification_details = {}
+    for filter_key, meta in filter_status_map.items():
+        if not isinstance(meta, dict):
+            continue
+        verification_detail = meta.get("verification_detail")
+        if isinstance(verification_detail, dict):
+            status_map_verification_details[filter_key] = verification_detail
+
+    has_signal = _channel_filter_snapshot_has_signal(normalized_snapshot)
+    return {
+        "configured": configured,
+        "configured_pending": configured_pending,
+        "query_injected": query_injected,
+        "applied": applied,
+        "unapplied": unapplied_strict,
+        "unsupported": unsupported,
+        "configured_filter_count": len(configured),
+        "filter_status_map": filter_status_map,
+        "query_verification_details": {
+            **status_map_verification_details,
+            **top_level_query_verification_details,
+        },
+        "mapping_stage": str(normalized_snapshot.get("mapping_stage") or "").strip(),
+        "mapping_notes": str(normalized_snapshot.get("mapping_notes") or "").strip(),
+        "runtime_audit_stage": str(normalized_snapshot.get("runtime_audit_stage") or "").strip(),
+        "runtime_audit_source": str(normalized_snapshot.get("runtime_audit_source") or "").strip(),
+        "legacy_missing_snapshot": (not unsupported and not has_recorded_snapshot and not has_signal),
+        "has_runtime_signal": has_signal,
+    }
+
+
+def _sort_detail_sources_and_groups(
+    *,
+    source_rows: list[dict],
+    channel_groups_map: dict[str, dict],
+    used_channels_map: dict[str, dict],
+    listing_price: float,
+) -> tuple[list[dict], list[dict], list[dict]]:
+    sorted_sources = sorted(
+        list(source_rows or []),
+        key=lambda source: (
+            -_compute_source_estimated_profit(source, listing_price),
+            _to_float(source.get("min_price")),
+            str(source.get("title") or ""),
+            int(source.get("db_id") or 0),
+        ),
+    )
+
+    decorated_groups: list[dict] = []
+    for group in list(channel_groups_map.values()):
+        sorted_group_sources = sorted(
+            list(group.get("sources") or []),
+            key=lambda source: (
+                -_compute_source_estimated_profit(source, listing_price),
+                _to_float(source.get("min_price")),
+                str(source.get("title") or ""),
+                int(source.get("db_id") or 0),
+            ),
+        )
+        best_estimated_profit = (
+            max(_compute_source_estimated_profit(source, listing_price) for source in sorted_group_sources)
+            if sorted_group_sources
+            else float("-inf")
+        )
+        decorated_groups.append(
+            {
+                **group,
+                "sources": sorted_group_sources,
+                "source_count": len(sorted_group_sources),
+                "best_estimated_profit": best_estimated_profit,
+            }
+        )
+
+    sorted_groups = sorted(
+        decorated_groups,
+        key=lambda group: (
+            -_to_float(group.get("best_estimated_profit"), float("-inf")),
+            str(group.get("channel_label") or group.get("channel_id") or ""),
+        ),
+    )
+
+    sorted_used_channels = sorted(
+        list(used_channels_map.values()),
+        key=lambda channel: (
+            next(
+                (
+                    index
+                    for index, group in enumerate(sorted_groups)
+                    if group.get("channel_id") == channel.get("channel_id")
+                ),
+                len(sorted_groups),
+            ),
+            str(channel.get("channel_label") or channel.get("channel_id") or ""),
+        ),
+    )
+    return sorted_sources, sorted_groups, sorted_used_channels
+
+
+def _build_detail_source_sort_strategy() -> dict:
+    return {
+        "field": "estimated_profit",
+        "order": "desc",
+        "formula": "listing_price - min_price - 20",
+        "label": "预估纯利倒序",
+        "description": "当前结果固定按预估纯利从高到低排序，渠道筛选仅影响当前展示范围。",
+    }
+
+
+def _build_detail_channel_group_sort_strategy() -> dict:
+    return {
+        "field": "best_estimated_profit",
+        "order": "desc",
+        "label": "渠道最佳预估纯利倒序",
+        "description": "当前渠道分组固定按各渠道最佳预估纯利从高到低排序。",
+    }
+
+
+def _build_task_channel_summary_map(
+    *,
+    task_channel_map: dict[str, list[dict]],
+    snapshot_rows: list[dict],
+) -> dict[str, list[dict]]:
+    task_channel_snapshot_groups: dict[str, dict[str, dict]] = {}
+    for snapshot_row in list(snapshot_rows or []):
+        task_id = str(snapshot_row.get("task_id") or "").strip()
+        channel_id = str(snapshot_row.get("channel_id") or "ali1688").strip() or "ali1688"
+        if not task_id:
+            continue
+        task_group = task_channel_snapshot_groups.setdefault(task_id, {})
+        if channel_id not in task_group:
+            task_group[channel_id] = {
+                "channel_id": channel_id,
+                "channel_type": snapshot_row.get("channel_type") or "ali1688",
+                "channel_label": snapshot_row.get("channel_label") or "1688 货源渠道",
+                "snapshot": {},
+                "has_recorded_snapshot": False,
+            }
+        channel_group = task_group[channel_id]
+        raw_snapshot_json = snapshot_row.get("source_filter_snapshot_json")
+        has_recorded_snapshot = bool(str(raw_snapshot_json or "").strip())
+        channel_group["has_recorded_snapshot"] = bool(
+            channel_group.get("has_recorded_snapshot") or has_recorded_snapshot
+        )
+        try:
+            parsed_snapshot = json.loads(raw_snapshot_json or "{}")
+            if not isinstance(parsed_snapshot, dict):
+                parsed_snapshot = {}
+        except Exception:
+            parsed_snapshot = {}
+        normalized_snapshot = settings.normalize_channel_search_filter_snapshot(
+            parsed_snapshot,
+            channel_id=channel_id,
+            channel_type=channel_group.get("channel_type"),
+        )
+        if (
+            _channel_filter_snapshot_has_signal(normalized_snapshot)
+            and not _channel_filter_snapshot_has_signal(channel_group.get("snapshot"))
+        ):
+            channel_group["snapshot"] = normalized_snapshot
+
+    task_channel_summary_map: dict[str, list[dict]] = {}
+    for task_id, channels in task_channel_map.items():
+        channel_groups = task_channel_snapshot_groups.get(task_id, {})
+        task_channel_summary_map[task_id] = []
+        for channel in channels:
+            group = channel_groups.get(channel.get("channel_id") or "")
+            task_channel_summary_map[task_id].append(
+                {
+                    **channel,
+                    "filter_summary": _summarize_channel_filter_snapshot(
+                        (group or {}).get("snapshot"),
+                        channel_type=(group or {}).get("channel_type") or channel.get("channel_type"),
+                        has_recorded_snapshot=bool((group or {}).get("has_recorded_snapshot")),
+                    ),
+                    "has_recorded_filter_snapshot": bool((group or {}).get("has_recorded_snapshot")),
+                }
+            )
+    return task_channel_summary_map
 
 def init_db_schema():
     try:
@@ -755,6 +1042,7 @@ def list_tasks():
         rows = cursor.fetchall()
         task_ids = [row["id"] for row in rows if row.get("id")]
         task_channel_map = {}
+        task_channel_summary_map = {}
         if task_ids:
             placeholders = ",".join(["%s"] * len(task_ids))
             cursor.execute(
@@ -791,10 +1079,33 @@ def list_tasks():
                         "source_count": int(channel_row.get("source_count") or 0),
                     }
                 )
+            cursor.execute(
+                f"""
+                SELECT
+                    xi.task_id AS task_id,
+                    COALESCE(NULLIF(src.source_channel_id, ''), 'ali1688') AS channel_id,
+                    COALESCE(NULLIF(src.source_channel_type, ''), 'ali1688') AS channel_type,
+                    COALESCE(NULLIF(src.source_channel_label, ''), '1688 货源渠道') AS channel_label,
+                    src.source_filter_snapshot_json AS source_filter_snapshot_json
+                FROM ali1688_sources src
+                INNER JOIN xianyu_items xi ON src.item_id = xi.id
+                WHERE xi.task_id IN ({placeholders})
+                ORDER BY
+                    xi.task_id ASC,
+                    COALESCE(NULLIF(src.source_channel_label, ''), '1688 货源渠道') ASC,
+                    src.id ASC
+                """,
+                tuple(task_ids),
+            )
+            task_channel_summary_map = _build_task_channel_summary_map(
+                task_channel_map=task_channel_map,
+                snapshot_rows=cursor.fetchall(),
+            )
         conn.close()
         for r in rows:
             if isinstance(r['created_at'], datetime): r['created_at'] = r['created_at'].strftime("%Y-%m-%d %H:%M")
             r["used_channels"] = task_channel_map.get(r["id"], [])
+            r["channel_summaries"] = task_channel_summary_map.get(r["id"], r["used_channels"])
         return rows
     except Exception as e:
         logger.error(f"Failed to list tasks: {e}")
@@ -916,6 +1227,7 @@ def get_task_details(task_id: str):
         details = []
         for item in db_items:
             item_db_id = item['id'] # 闲鱼商品的唯一主键
+            listing_price = _to_float(item.get('price'))
             # 2. 根据该主键去 1688 货源表里捞数据
             cursor.execute("""
                 SELECT * FROM ali1688_sources
@@ -960,8 +1272,10 @@ def get_task_details(task_id: str):
                 # 安全解析图片 JSON
                 try: imgs = json.loads(s['images']) if s['images'] else []
                 except: imgs = []
+                raw_filter_snapshot_json = s.get('source_filter_snapshot_json')
+                has_recorded_filter_snapshot = bool(str(raw_filter_snapshot_json or "").strip())
                 try:
-                    filter_snapshot = json.loads(s.get('source_filter_snapshot_json') or "{}")
+                    filter_snapshot = json.loads(raw_filter_snapshot_json or "{}")
                     if not isinstance(filter_snapshot, dict):
                         filter_snapshot = {}
                 except Exception:
@@ -1010,9 +1324,17 @@ def get_task_details(task_id: str):
                     "listing_count": int(s.get('listing_count') or 0),
                     "distributor_count": int(s.get('distributor_count') or 0),
                     "source_filter_snapshot": filter_snapshot,
+                    "source_filter_summary": _summarize_channel_filter_snapshot(
+                        filter_snapshot,
+                        channel_type=channel_type,
+                        has_recorded_snapshot=has_recorded_filter_snapshot,
+                    ),
+                    "has_recorded_filter_snapshot": has_recorded_filter_snapshot,
                     "publish_status": latest_status.get("publish_status", "none"),
-                    "published_url": latest_status.get("published_url", "")
+                    "published_url": latest_status.get("published_url", ""),
+                    "estimated_profit": 0.0,
                 }
+                source_row["estimated_profit"] = _compute_source_estimated_profit(source_row, listing_price)
                 sources_data.append(source_row)
 
                 if channel_id not in channel_groups_map:
@@ -1028,11 +1350,20 @@ def get_task_details(task_id: str):
                             channel_id=channel_id,
                             channel_type=channel_type,
                         ),
+                        "filter_summary": _summarize_channel_filter_snapshot(
+                            {},
+                            channel_type=channel_type,
+                            has_recorded_snapshot=False,
+                        ),
+                        "has_recorded_filter_snapshot": False,
                         "sources": [],
                     }
                 group = channel_groups_map[channel_id]
                 group["sources"].append(source_row)
                 group["source_count"] += 1
+                group["has_recorded_filter_snapshot"] = bool(
+                    group.get("has_recorded_filter_snapshot") or has_recorded_filter_snapshot
+                )
                 if (
                     _channel_filter_snapshot_has_signal(filter_snapshot)
                     and not _channel_filter_snapshot_has_signal(group.get("source_filter_snapshot"))
@@ -1049,6 +1380,19 @@ def get_task_details(task_id: str):
                         "channel_type": channel_type,
                         "channel_label": channel_label,
                     }
+
+            sorted_sources, sorted_channel_groups, sorted_used_channels = _sort_detail_sources_and_groups(
+                source_rows=sources_data,
+                channel_groups_map=channel_groups_map,
+                used_channels_map=used_channels_map,
+                listing_price=listing_price,
+            )
+            for group in sorted_channel_groups:
+                group["filter_summary"] = _summarize_channel_filter_snapshot(
+                    group.get("source_filter_snapshot"),
+                    channel_type=group.get("channel_type"),
+                    has_recorded_snapshot=bool(group.get("has_recorded_filter_snapshot")),
+                )
             
             details.append({
                 "rank": item['rank_index'],
@@ -1060,9 +1404,11 @@ def get_task_details(task_id: str):
                     "want_count": item['want_count'],
                     "item_url": item['item_url']
                 },
-                "sources": sources_data,
-                "used_channels": list(used_channels_map.values()),
-                "channel_groups": list(channel_groups_map.values()),
+                "source_sort_strategy": _build_detail_source_sort_strategy(),
+                "channel_group_sort_strategy": _build_detail_channel_group_sort_strategy(),
+                "sources": sorted_sources,
+                "used_channels": sorted_used_channels,
+                "channel_groups": sorted_channel_groups,
             })
             
         conn.close()
