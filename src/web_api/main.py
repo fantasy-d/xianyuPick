@@ -57,6 +57,19 @@ def _to_float(value, default: float = 0.0) -> float:
         return default
 
 
+def _extract_xianyu_item_id(item_url: str | None) -> str | None:
+    text = str(item_url or "").strip()
+    if not text:
+        return None
+    query_match = re.search(r"(?:[?&]id=)([^&#]+)", text)
+    if query_match:
+        return unquote(query_match.group(1)).strip() or None
+    path_match = re.search(r"/item/(\d+)", text)
+    if path_match:
+        return path_match.group(1)
+    return None
+
+
 def _compute_source_estimated_profit(source_row: dict, listing_price: float) -> float:
     source = source_row or {}
     existing_profit = source.get("estimated_profit")
@@ -193,31 +206,35 @@ def _sort_detail_sources_and_groups(
     used_channels_map: dict[str, dict],
     listing_price: float,
 ) -> tuple[list[dict], list[dict], list[dict]]:
+    def source_page_order(source: dict) -> tuple[int, int]:
+        page_index = int(source.get("page_original_index") or 0)
+        normalized_index = page_index if page_index > 0 else 1_000_000_000
+        return normalized_index, int(source.get("db_id") or 0)
+
+    def source_profit_order(source: dict) -> tuple[float, int, int]:
+        page_index, db_id = source_page_order(source)
+        return -_compute_source_estimated_profit(source, listing_price), page_index, db_id
+
     sorted_sources = sorted(
         list(source_rows or []),
-        key=lambda source: (
-            -_compute_source_estimated_profit(source, listing_price),
-            _to_float(source.get("min_price")),
-            str(source.get("title") or ""),
-            int(source.get("db_id") or 0),
-        ),
+        key=source_profit_order,
     )
 
     decorated_groups: list[dict] = []
     for group in list(channel_groups_map.values()):
         sorted_group_sources = sorted(
             list(group.get("sources") or []),
-            key=lambda source: (
-                -_compute_source_estimated_profit(source, listing_price),
-                _to_float(source.get("min_price")),
-                str(source.get("title") or ""),
-                int(source.get("db_id") or 0),
-            ),
+            key=source_profit_order,
         )
         best_estimated_profit = (
             max(_compute_source_estimated_profit(source, listing_price) for source in sorted_group_sources)
             if sorted_group_sources
             else float("-inf")
+        )
+        first_page_original_index = (
+            source_page_order(sorted_group_sources[0])[0]
+            if sorted_group_sources
+            else 1_000_000_000
         )
         decorated_groups.append(
             {
@@ -225,13 +242,15 @@ def _sort_detail_sources_and_groups(
                 "sources": sorted_group_sources,
                 "source_count": len(sorted_group_sources),
                 "best_estimated_profit": best_estimated_profit,
+                "first_page_original_index": first_page_original_index,
             }
         )
 
     sorted_groups = sorted(
         decorated_groups,
         key=lambda group: (
-            -_to_float(group.get("best_estimated_profit"), float("-inf")),
+            -float(group.get("best_estimated_profit") or 0),
+            int(group.get("first_page_original_index") or 1_000_000_000),
             str(group.get("channel_label") or group.get("channel_id") or ""),
         ),
     )
@@ -257,9 +276,8 @@ def _build_detail_source_sort_strategy() -> dict:
     return {
         "field": "estimated_profit",
         "order": "desc",
-        "formula": "listing_price - min_price - 20",
         "label": "预估纯利倒序",
-        "description": "当前结果固定按预估纯利从高到低排序，渠道筛选仅影响当前展示范围。",
+        "description": "当前结果按预估纯利从高到低固定排序，渠道筛选仅影响当前展示范围。",
     }
 
 
@@ -267,8 +285,8 @@ def _build_detail_channel_group_sort_strategy() -> dict:
     return {
         "field": "best_estimated_profit",
         "order": "desc",
-        "label": "渠道最佳预估纯利倒序",
-        "description": "当前渠道分组固定按各渠道最佳预估纯利从高到低排序。",
+        "label": "渠道最高预估纯利倒序",
+        "description": "当前渠道分组按各渠道最高预估纯利从高到低固定排序。",
     }
 
 
@@ -407,6 +425,7 @@ def init_db_schema():
             ("settled_years_text", "ALTER TABLE ali1688_sources ADD COLUMN settled_years_text VARCHAR(64) DEFAULT '';"),
             ("company_name", "ALTER TABLE ali1688_sources ADD COLUMN company_name VARCHAR(255) DEFAULT '';"),
             ("source_filter_snapshot_json", "ALTER TABLE ali1688_sources ADD COLUMN source_filter_snapshot_json TEXT DEFAULT NULL;"),
+            ("page_original_index", "ALTER TABLE ali1688_sources ADD COLUMN page_original_index INT DEFAULT 0;"),
             ("month_dispatch_count", "ALTER TABLE ali1688_sources ADD COLUMN month_dispatch_count INT DEFAULT 0;"),
             ("seven_day_dispatch_count", "ALTER TABLE ali1688_sources ADD COLUMN seven_day_dispatch_count INT DEFAULT 0;"),
             ("listing_count", "ALTER TABLE ali1688_sources ADD COLUMN listing_count INT DEFAULT 0;"),
@@ -417,9 +436,9 @@ def init_db_schema():
             except Exception:
                 pass
             
-        # 4. 自愈修改 publish_status 的 ENUM 增加 'depublished' 和 'deleted' 值以支持下架/删除状态记录
+        # 4. 自愈修改 publish_status 的 ENUM 增加本地选品/下架/删除状态
         try:
-            cursor.execute("ALTER TABLE xianyu_published_items MODIFY COLUMN publish_status ENUM('pending','success','failed','depublished','deleted') DEFAULT 'pending';")
+            cursor.execute("ALTER TABLE xianyu_published_items MODIFY COLUMN publish_status ENUM('selected','pending','success','failed','depublished','deleted') DEFAULT 'pending';")
         except Exception as alter_err:
             logger.warning(f"[DB] Failed to modify publish_status enum: {alter_err}")
             
@@ -1319,6 +1338,7 @@ def get_task_details(task_id: str):
                     "waybill_support_text": s.get('waybill_support_text') or '',
                     "settled_years_text": s.get('settled_years_text') or '',
                     "company_name": s.get('company_name') or '',
+                    "page_original_index": int(s.get('page_original_index') or 0),
                     "month_dispatch_count": int(s.get('month_dispatch_count') or 0),
                     "seven_day_dispatch_count": int(s.get('seven_day_dispatch_count') or 0),
                     "listing_count": int(s.get('listing_count') or 0),
@@ -1332,7 +1352,6 @@ def get_task_details(task_id: str):
                     "has_recorded_filter_snapshot": has_recorded_filter_snapshot,
                     "publish_status": latest_status.get("publish_status", "none"),
                     "published_url": latest_status.get("published_url", ""),
-                    "estimated_profit": 0.0,
                 }
                 source_row["estimated_profit"] = _compute_source_estimated_profit(source_row, listing_price)
                 sources_data.append(source_row)
@@ -1526,6 +1545,65 @@ def get_source_skus(source_id: int):
     logger.info(f"Fetching SKU list for source_id: {source_id}")
     skus = load_source_skus_from_db(source_id)
     return {"skus": skus}
+
+
+@app.post("/api/selection/batch")
+async def batch_add_to_selection(req: dict = {}):
+    logger.info(f"Selection batch add request: {req}")
+    source_ids = req.get("source_ids", [])
+    if not source_ids:
+        return {"success": [], "failed": [{"source_id": 0, "msg": "未选中任何货源"}]}
+
+    conn = get_db_conn(); cursor = conn.cursor()
+    success_list = []
+    failed_list = []
+
+    for sid in source_ids:
+        cursor.execute("""
+            SELECT s.id, s.task_id, xi.item_url
+            FROM ali1688_sources s
+            LEFT JOIN xianyu_items xi ON s.item_id = xi.id
+            WHERE s.id = %s
+        """, (sid,))
+        source = cursor.fetchone()
+        if not source:
+            failed_list.append({"source_id": sid, "msg": "货源数据在数据库中不存在"})
+            continue
+        ref_xianyu_item_id = _extract_xianyu_item_id(source.get("item_url"))
+
+        cursor.execute("""
+            SELECT id, publish_status, xianyu_item_id
+            FROM xianyu_published_items
+            WHERE source_db_id = %s
+            ORDER BY created_at DESC LIMIT 1
+        """, (sid,))
+        latest = cursor.fetchone()
+        latest_status = (latest or {}).get("publish_status")
+
+        if latest_status in ("selected", "success"):
+            latest_xianyu_item_id = (latest or {}).get("xianyu_item_id")
+            if latest_status == "selected" and not latest_xianyu_item_id and ref_xianyu_item_id:
+                cursor.execute(
+                    "UPDATE xianyu_published_items SET xianyu_item_id = %s WHERE id = %s",
+                    (ref_xianyu_item_id, latest["id"]),
+                )
+                latest_xianyu_item_id = ref_xianyu_item_id
+            success_list.append({
+                "source_id": sid,
+                "status": latest_status,
+                "xianyu_item_id": latest_xianyu_item_id,
+            })
+            continue
+
+        cursor.execute("""
+            INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (source["task_id"], sid, ref_xianyu_item_id, "selected", "已加入选品", None))
+        success_list.append({"source_id": sid, "status": "selected", "xianyu_item_id": ref_xianyu_item_id})
+
+    conn.commit()
+    conn.close()
+    return {"success": success_list, "failed": failed_list}
 
 
 @app.post("/api/publish/batch")
@@ -1853,11 +1931,11 @@ async def batch_delete_from_xianyu(req: dict = {}):
         xianyu_item_id = row['xianyu_item_id']
         task_id = row['task_id']
 
-        if status == 'failed':
+        if status in ('failed', 'selected'):
             cursor.execute("""
                 INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
                 VALUES (%s, %s, %s, %s, %s, %s)
-            """, (task_id, sid, xianyu_item_id, 'deleted', '已清理失败发布记录', None))
+            """, (task_id, sid, xianyu_item_id, 'deleted', '已清理本地选品记录' if status == 'selected' else '已清理失败发布记录', None))
             success_list.append({"source_id": sid, "mode": "local_cleanup"})
             continue
 
@@ -1911,14 +1989,14 @@ async def delete_from_xianyu(source_id: int, req: dict = {}):
     xianyu_item_id = row['xianyu_item_id']
     task_id = row['task_id']
 
-    if status == 'failed':
+    if status in ('failed', 'selected'):
         cursor.execute("""
             INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
             VALUES (%s, %s, %s, %s, %s, %s)
-        """, (task_id, source_id, xianyu_item_id, 'deleted', '已清理失败发布记录', None))
+        """, (task_id, source_id, xianyu_item_id, 'deleted', '已清理本地选品记录' if status == 'selected' else '已清理失败发布记录', None))
         conn.commit()
         conn.close()
-        return {"status": "success", "msg": "已清理失败发布记录", "mode": "local_cleanup"}
+        return {"status": "success", "msg": "已清理本地选品记录" if status == 'selected' else "已清理失败发布记录", "mode": "local_cleanup"}
 
     if status != 'depublished':
         conn.close()
@@ -1974,7 +2052,7 @@ def get_xianyu_products(
         ) latest ON p.source_db_id = latest.source_db_id AND p.created_at = latest.max_time
         INNER JOIN ali1688_sources s ON p.source_db_id = s.id
         LEFT JOIN xianyu_items xi ON s.item_id = xi.id
-        WHERE p.publish_status IN ('success', 'depublished', 'pending', 'failed')
+        WHERE p.publish_status IN ('selected', 'success', 'depublished', 'pending', 'failed')
     """
 
     params = []

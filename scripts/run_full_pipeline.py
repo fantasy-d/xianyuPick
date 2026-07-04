@@ -164,6 +164,7 @@ def init_db_schema():
             "ALTER TABLE ali1688_sources ADD COLUMN waybill_support_text VARCHAR(64) DEFAULT '';",
             "ALTER TABLE ali1688_sources ADD COLUMN settled_years_text VARCHAR(64) DEFAULT '';",
             "ALTER TABLE ali1688_sources ADD COLUMN company_name VARCHAR(255) DEFAULT '';",
+            "ALTER TABLE ali1688_sources ADD COLUMN page_original_index INT DEFAULT 0;",
             "ALTER TABLE ali1688_sources ADD COLUMN month_dispatch_count INT DEFAULT 0;",
             "ALTER TABLE ali1688_sources ADD COLUMN seven_day_dispatch_count INT DEFAULT 0;",
             "ALTER TABLE ali1688_sources ADD COLUMN listing_count INT DEFAULT 0;",
@@ -467,10 +468,10 @@ async def main():
                                 drop_reason, html_path, source_channel_id, source_channel_type, source_channel_label, source_account_id, source_account_label,
                                 pickup_48h_text, pickup_24h_text, month_dispatch_text, seven_day_dispatch_text,
                                 listing_count_text, distributor_count_text, waybill_support_text, settled_years_text, company_name,
-                                source_filter_snapshot_json,
+                                page_original_index, source_filter_snapshot_json,
                                 month_dispatch_count, seven_day_dispatch_count, listing_count, distributor_count
                             )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """, (
                             item_db_id,
                             task_id,
@@ -496,6 +497,7 @@ async def main():
                             res.get("waybill_support_text", ""),
                             res.get("settled_years_text", ""),
                             res.get("company_name", ""),
+                            int(res.get("page_original_index") or 0),
                             json.dumps(
                                 select_source_filter_snapshot_for_db(
                                     audit_exists=runtime_filter_audit_exists,

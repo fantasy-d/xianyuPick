@@ -729,7 +729,7 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
                 <div className="px-6 py-4 border-b border-border-hairline flex justify-between items-center bg-surface-container-low">
                     <h2 className="font-sans text-base font-bold text-on-surface flex items-center gap-2">
                         <span className="material-symbols-outlined text-primary">inventory</span>
-                        闲鱼已发布商品档案
+                        选品商品档案
                     </h2>
                     <button className="w-8 h-8 rounded-full hover:bg-surface-container-high flex items-center justify-center text-secondary hover:text-on-surface transition-all" onClick={handleClose}>
                         <span className="material-symbols-outlined text-[20px]">close</span>
@@ -772,7 +772,7 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
                                         <span className="font-mono text-xs font-bold text-on-surface mt-0.5 block">{item.xianyu_item_id || '暂无云端ID'}</span>
                                     </div>
                                     <div>
-                                        <span className="text-[10px] text-secondary block">发布记录时间</span>
+                                        <span className="text-[10px] text-secondary block">加入/发布记录时间</span>
                                         <span className="text-xs font-semibold text-on-surface mt-0.5 block">{item.publish_time}</span>
                                     </div>
                                 </div>
@@ -977,7 +977,7 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
     );
 };
 
-// --- 闲鱼已上架商品管理组件 ---
+// --- 选品管理组件 ---
 const PublishedManager = ({ hideHeader = false }) => {
     const [items, setItems] = useState([]);
     const [total, setTotal] = useState(0);
@@ -992,7 +992,7 @@ const PublishedManager = ({ hideHeader = false }) => {
     const [isExpanded, setIsExpanded] = useState(false); // 控制高级筛选展开折叠
     const [loading, setLoading] = useState(false);
     const [refreshTrigger, setRefreshTrigger] = useState(0);
-    const [selectedProduct, setSelectedProduct] = useState(null); // 记录当前查看详情的已发布商品
+    const [selectedProduct, setSelectedProduct] = useState(null); // 记录当前查看详情的选品商品
     const [sortBy, setSortBy] = useState('publish_time');
     const [sortOrder, setSortOrder] = useState('desc');
     const [selectedIds, setSelectedIds] = useState([]);
@@ -1006,6 +1006,7 @@ const PublishedManager = ({ hideHeader = false }) => {
     const [batchResultMap, setBatchResultMap] = useState({});
 
     const normalizePublishedStatus = (rawStatus) => {
+        if (rawStatus === 'selected') return 'selected';
         if (rawStatus === 'success' || rawStatus === 'done') return 'done';
         if (rawStatus === 'depublished') return 'depublished';
         if (rawStatus === 'failed') return 'failed';
@@ -1018,13 +1019,13 @@ const PublishedManager = ({ hideHeader = false }) => {
     const getPublishedItemStatus = (item) => normalizePublishedStatus(batchStatusMap[item.source_db_id] || item.publish_status);
     const selectedItems = items.filter(item => selectedIds.includes(item.source_db_id));
     const publishableIds = selectedItems
-        .filter(item => ['idle', 'failed', 'depublished'].includes(getPublishedItemStatus(item)))
+        .filter(item => ['selected', 'idle', 'failed', 'depublished'].includes(getPublishedItemStatus(item)))
         .map(item => item.source_db_id);
     const depublishableIds = selectedItems
         .filter(item => getPublishedItemStatus(item) === 'done')
         .map(item => item.source_db_id);
     const deletableIds = selectedItems
-        .filter(item => ['depublished', 'failed'].includes(getPublishedItemStatus(item)))
+        .filter(item => ['selected', 'depublished', 'failed'].includes(getPublishedItemStatus(item)))
         .map(item => item.source_db_id);
 
     const fetchPublishedProducts = async () => {
@@ -1041,7 +1042,7 @@ const PublishedManager = ({ hideHeader = false }) => {
             setItems(res.items || []);
             setTotal(res.total || 0);
         } catch (e) {
-            console.error("加载已发布商品失败:", e);
+            console.error("加载选品商品失败:", e);
         } finally {
             setLoading(false);
         }
@@ -1250,7 +1251,7 @@ const PublishedManager = ({ hideHeader = false }) => {
             title: '确认批量删除',
             description: [
                 `即将批量删除 ${toDeleteIds.length} 个商品记录。`,
-                '已下架商品会执行云端删除；同步失败商品只会清理本地记录。此操作不可恢复。'
+                '已选品和同步失败商品只会清理本地记录；已下架商品会执行云端删除。此操作不可恢复。'
             ],
             confirmLabel: `确认删除 ${toDeleteIds.length} 项`,
             tone: 'danger',
@@ -1297,9 +1298,9 @@ const PublishedManager = ({ hideHeader = false }) => {
                 <header className="mb-6">
                     <h1 className="font-sans text-2xl font-bold text-on-surface flex items-center gap-2">
                         <span className="material-symbols-outlined text-primary text-[28px]">shopping_bag</span>
-                        闲鱼上架商品中枢
+                        选品管理
                     </h1>
-                    <p className="font-sans text-sm text-secondary mt-1">管理并监控已经在闲鱼铺货成功的商品，支持与 1688 源头采购价、物流信息实时联动。点击行项目可展开详情数据与下架控制。</p>
+                    <p className="font-sans text-sm text-secondary mt-1">管理从决策资产库加入的候选货源，支持后续上架、下架与删除处理。</p>
                 </header>
             )}
 
@@ -1313,7 +1314,7 @@ const PublishedManager = ({ hideHeader = false }) => {
                             className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-10 pr-4 py-2 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all placeholder-secondary/50"
                             value={keyword}
                             onChange={e => { setKeyword(e.target.value); setPage(1); }}
-                            placeholder="输入货源标题、闲鱼发布标题或者商品 ID 进行搜索..."
+                            placeholder="输入货源标题、参考爆款标题或者商品 ID 进行搜索..."
                         />
                     </div>
                     {/* 高级筛选控制 */}
@@ -1338,6 +1339,7 @@ const PublishedManager = ({ hideHeader = false }) => {
                                 className="w-full bg-surface-container-low border border-border-hairline text-on-surface text-sm rounded-lg pl-4 pr-10 py-2 focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all cursor-pointer appearance-none animate-none bg-none"
                             >
                                 <option value="">-- 系统同步状态 (全部) --</option>
+                                <option value="selected">已选品</option>
                                 <option value="success">已上架</option>
                                 <option value="depublished">已下架</option>
                                 <option value="pending">同步中</option>
@@ -1419,7 +1421,7 @@ const PublishedManager = ({ hideHeader = false }) => {
                 <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-24 text-center ambient-shadow">
                     <div className="inline-flex items-center gap-2 text-secondary text-sm">
                         <span className="material-symbols-outlined animate-spin text-primary text-[24px]">sync</span>
-                        正在同步已上架商品资产列表...
+                        正在加载选品商品资产列表...
                     </div>
                 </div>
             ) : items.length > 0 ? (
@@ -1507,6 +1509,10 @@ const PublishedManager = ({ hideHeader = false }) => {
                                         statusText = '已上架';
                                         statusClass = 'bg-success/10 text-success border-success/20';
                                         pulseColor = 'bg-success';
+                                    } else if (currentStatus === 'selected') {
+                                        statusText = '已选品';
+                                        statusClass = 'bg-primary/10 text-primary border-primary/20';
+                                        pulseColor = 'bg-primary';
                                     } else if (currentStatus === 'depublished') {
                                         statusText = '已下架';
                                         statusClass = 'bg-warning/10 text-warning border-warning/20';
@@ -1623,8 +1629,8 @@ const PublishedManager = ({ hideHeader = false }) => {
             ) : (
                 <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-24 text-center ambient-shadow">
                     <span className="material-symbols-outlined text-secondary text-[48px] opacity-40">package_2</span>
-                    <p className="text-secondary font-semibold mt-4 text-sm">📦 暂无已发布在闲鱼的商品记录。</p>
-                    <p className="text-xs text-secondary/60 mt-1">您可以先前往“决策资产”库中发布选中的匹配商品。</p>
+                    <p className="text-secondary font-semibold mt-4 text-sm">暂无选品记录。</p>
+                    <p className="text-xs text-secondary/60 mt-1">您可以先前往“决策资产库”中将匹配货源加入选品。</p>
                 </div>
             )}
 
@@ -1657,6 +1663,105 @@ const PublishedManager = ({ hideHeader = false }) => {
     );
 };
 
+// --- 加入选品按钮组件 ---
+const SelectionButton = ({ src, batchStatus, batchResult, onStatusLoaded }) => {
+    const normalizeSelectionStatus = (rawStatus) => {
+        if (rawStatus === 'selected' || rawStatus === 'success' || rawStatus === 'done') return 'selected';
+        if (rawStatus === 'selecting') return 'selecting';
+        if (rawStatus === 'failed') return 'failed';
+        return 'idle';
+    };
+    const [status, setStatus] = useState(() => normalizeSelectionStatus(src.publish_status));
+    const [result, setResult] = useState(null);
+
+    useEffect(() => {
+        if (batchStatus) {
+            setStatus(normalizeSelectionStatus(batchStatus));
+        }
+        if (batchResult) {
+            setResult(batchResult);
+        }
+    }, [batchStatus, batchResult]);
+
+    const addToSelection = async () => {
+        setStatus('selecting');
+        try {
+            const res = await fetch('/api/selection/batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_ids: [src.db_id] })
+            }).then(r => r.json());
+            const failed = (res.failed || []).find(item => item.source_id === src.db_id);
+            if (failed || res.error) {
+                const errResult = { msg: failed?.msg || res.error || '加入选品失败' };
+                setResult(errResult);
+                setStatus('failed');
+                if (onStatusLoaded) onStatusLoaded(src.db_id, 'failed', errResult);
+                return;
+            }
+            const success = (res.success || []).find(item => item.source_id === src.db_id);
+            const finalStatus = success?.status === 'success' ? 'done' : 'selected';
+            const okResult = { status: finalStatus, msg: '已加入选品' };
+            setResult(okResult);
+            setStatus('selected');
+            if (onStatusLoaded) onStatusLoaded(src.db_id, finalStatus, okResult);
+        } catch (e) {
+            const errResult = { msg: '网络错误，请稍后重试' };
+            setResult(errResult);
+            setStatus('failed');
+            if (onStatusLoaded) onStatusLoaded(src.db_id, 'failed', errResult);
+        }
+    };
+
+    if (status === 'selected') {
+        return (
+            <div className="flex justify-end mt-1">
+                <span className="px-3 py-1 bg-primary/10 text-primary rounded-lg font-sans text-xs font-semibold flex items-center gap-1">
+                    <span className="material-symbols-outlined text-[16px] icon-fill">done</span>
+                    已加入选品
+                </span>
+            </div>
+        );
+    }
+
+    if (status === 'selecting') {
+        return (
+            <div className="flex justify-end mt-1">
+                <span className="px-3 py-1 bg-processing/15 text-processing rounded-lg font-sans text-xs font-semibold flex items-center gap-1">
+                    <span className="material-symbols-outlined text-[16px] animate-spin">sync</span>
+                    加入中...
+                </span>
+            </div>
+        );
+    }
+
+    if (status === 'failed') {
+        return (
+            <div className="flex flex-col items-end gap-1 mt-1">
+                <span className="text-[10px] text-error font-medium truncate max-w-[150px]">{result?.msg || '加入失败'}</span>
+                <button
+                    className="px-3 py-1 bg-error/15 hover:bg-error/20 text-error rounded-lg font-sans text-xs font-semibold transition-colors"
+                    onClick={addToSelection}
+                >
+                    重新加入
+                </button>
+            </div>
+        );
+    }
+
+    return (
+        <div className="flex justify-end mt-1">
+            <button
+                className="px-4 py-1.5 bg-primary hover:bg-primary-container text-white rounded-lg font-sans text-xs font-bold shadow-sm transition-all scale-100 active:scale-95 flex items-center gap-1"
+                onClick={addToSelection}
+            >
+                <span className="material-symbols-outlined text-[16px]">playlist_add</span>
+                加入选品
+            </button>
+        </div>
+    );
+};
+
 // --- 发布至闲鱼按钮组件 ---
 const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoaded, initialStatus = null, initialResult = null, skipStatusFetch = false }) => {
     const [status, setStatus] = useState('idle'); // idle | publishing | done | failed | depublished | deleting
@@ -1683,6 +1788,9 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
                 setStatus('failed');
                 if (initialResult) setPubResult(initialResult);
                 if (onStatusLoaded) onStatusLoaded(src.db_id, 'failed', initialResult);
+            } else if (initialStatus === 'selected') {
+                setStatus('idle');
+                if (initialResult) setPubResult(initialResult);
             } else {
                 setStatus('idle');
                 if (initialResult) setPubResult(initialResult);
@@ -1706,6 +1814,9 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
                     setStatus('idle');
                     setPubResult(null);
                     if (onStatusLoaded) onStatusLoaded(src.db_id, 'idle', null);
+                } else if (res.publish_status === 'selected') {
+                    setStatus('idle');
+                    setPubResult(res);
                 } else {
                     if (onStatusLoaded) onStatusLoaded(src.db_id, 'idle', null);
                 }
@@ -1864,7 +1975,7 @@ const PublishButton = ({ src, xianyuPrice, batchStatus, batchResult, onStatusLoa
             title: '确认删除商品',
             description: [
                 '这会删除当前商品的发布记录。',
-                '如果商品已下架，会同时执行闲鱼云端删除；如果是同步失败商品，则只清理本地记录。此操作不可恢复。'
+                '如果商品已下架，会同时执行闲鱼云端删除；如果是已选品或同步失败商品，则只清理本地记录。此操作不可恢复。'
             ],
             confirmLabel: '确认删除',
             tone: 'danger',
@@ -2293,7 +2404,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     const currentSourceAccount = currentSourceAccounts.find(item => item.account_id === currentSourceAccountId) || currentSourceAccounts[0] || createSourceChannelAccount(currentSourceChannel?.channel_id || 'ali1688', 1);
     const currentSourceRealtimeName = currentSourceAccount?.session_report?.account_name || '';
     const currentSourceLabel = currentSourceAccount?.label || '';
-    const currentSourceDisplayName = currentSourceRealtimeName || currentSourceLabel || '';
+    const currentSourceDisplayName = currentSourceLabel || currentSourceAccount?.account_id || currentSourceRealtimeName || '';
     const currentSourceNameSource = currentSourceAccount?.session_report?.account_name_source || currentSourceAccount?.session_report?.source || '';
     const isSourceNameFallback = !currentSourceRealtimeName && !!currentSourceLabel;
     const visibleActiveSourceAccountIds = activeSourceAccountIds.filter(id => loginReadySourceAccounts.some(account => account.account_id === id));
@@ -4222,7 +4333,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                                         </span>
                                                     </div>
                                                     <div className="font-sans text-xs text-secondary">
-                                                        真实账号名：{currentSourceRealtimeName || '未识别'}
+                                                        页面识别名：{currentSourceRealtimeName || '未识别'}
                                                     </div>
                                                     {currentSourceLabel && (
                                                         <div className="font-sans text-[11px] text-secondary">
@@ -4487,7 +4598,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                                                     <div className="min-w-0 flex-1">
                                                                         <div className="flex items-center gap-2 flex-wrap">
                                                                             <span className="font-sans text-xs font-semibold text-on-surface">
-                                                                                {account.session_report?.account_name || account.label || account.account_id}
+                                                                                {account.label || account.account_id}
                                                                             </span>
                                                                             <span className="inline-flex items-center gap-1 text-[10px] text-success">
                                                                                 <span className="w-1.5 h-1.5 rounded-full bg-success"></span>
@@ -4677,14 +4788,15 @@ const App = () => {
     const selectableSources = (selectedItem?.sources || []).filter(src => !src.drop_reason);
     const selectedSources = selectableSources.filter(src => selectedIds.includes(src.db_id));
     const normalizeSourceActionStatus = (rawStatus) => {
+        if (rawStatus === 'selected') return 'selected';
         if (rawStatus === 'success' || rawStatus === 'done') return 'done';
         if (rawStatus === 'depublished') return 'depublished';
-        if (rawStatus === 'publishing' || rawStatus === 'depublishing' || rawStatus === 'deleting' || rawStatus === 'failed') return rawStatus;
+        if (rawStatus === 'selecting' || rawStatus === 'publishing' || rawStatus === 'depublishing' || rawStatus === 'deleting' || rawStatus === 'failed') return rawStatus;
         if (rawStatus === 'deleted' || rawStatus === 'none' || rawStatus === 'idle' || !rawStatus) return 'idle';
         return 'idle';
     };
     const getSourceActionStatus = (src) => normalizeSourceActionStatus(batchStatusMap[src.db_id] || src.publish_status || 'idle');
-    const publishableIds = selectedSources
+    const addableIds = selectedSources
         .filter(src => ['idle', 'failed', 'depublished'].includes(getSourceActionStatus(src)))
         .map(src => src.db_id);
     const depublishableIds = selectedSources
@@ -4739,36 +4851,37 @@ const App = () => {
         });
     };
     
-    const doBatchPublish = async () => {
+    const doBatchAddToSelection = async () => {
         if (selectedIds.length === 0) {
-            alert("请先选择要批量发布的货源");
+            alert("请先选择要加入选品的货源");
             return;
         }
         setBatchPublishing(true);
         
-        const toPublishIds = [...publishableIds];
-        if (toPublishIds.length === 0) {
+        const toAddIds = [...addableIds];
+        if (toAddIds.length === 0) {
             setBatchPublishing(false);
-            alert("当前勾选商品里，没有可执行批量发布的货源。");
+            alert("当前勾选商品里，没有可加入选品的货源。");
             return;
         }
         
-        toPublishIds.forEach(dbId => {
-            setBatchStatusMap(prev => ({ ...prev, [dbId]: 'publishing' }));
+        toAddIds.forEach(dbId => {
+            setBatchStatusMap(prev => ({ ...prev, [dbId]: 'selecting' }));
         });
 
         try {
-            const resBatch = await fetch('/api/publish/batch', {
+            const resBatch = await fetch('/api/selection/batch', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ source_ids: toPublishIds })
+                body: JSON.stringify({ source_ids: toAddIds })
             }).then(r => r.json());
 
             if (resBatch.success) {
                 resBatch.success.forEach(item => {
                     const dbId = item.source_id;
-                    setBatchStatusMap(prev => ({ ...prev, [dbId]: 'done' }));
-                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'success', xianyu_item_id: item.product_id, published_url: item.published_url } }));
+                    const finalStatus = item.status === 'success' ? 'done' : 'selected';
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: finalStatus }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: finalStatus, msg: '已加入选品' } }));
                 });
             }
             if (resBatch.failed) {
@@ -4779,14 +4892,14 @@ const App = () => {
                 });
             }
             if (resBatch.error) {
-                toPublishIds.forEach(dbId => {
+                toAddIds.forEach(dbId => {
                     setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
                     setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: resBatch.error } }));
                 });
             }
         } catch (e) {
-            console.error("批量发布失败:", e);
-            toPublishIds.forEach(dbId => {
+            console.error("批量加入选品失败:", e);
+            toAddIds.forEach(dbId => {
                 setBatchStatusMap(prev => ({ ...prev, [dbId]: 'failed' }));
                 setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: '网络或连接出错' } }));
             });
@@ -4923,14 +5036,14 @@ const App = () => {
         }
         const toDeleteIds = [...deletableIds];
         if (toDeleteIds.length === 0) {
-            alert("当前勾选商品里，没有可删除的已下架或同步失败货源。");
+            alert("当前勾选商品里，没有可删除的已选品、已下架或同步失败货源。");
             return;
         }
         setConfirmDialog({
             title: '确认批量删除',
             description: [
                 `即将批量删除 ${toDeleteIds.length} 个货源记录。`,
-                '已下架商品会执行云端删除；同步失败商品只会清理本地记录。此操作不可恢复。'
+                '已选品和同步失败商品只会清理本地记录；已下架商品会执行云端删除。此操作不可恢复。'
             ],
             confirmLabel: `确认删除 ${toDeleteIds.length} 项`,
             tone: 'danger',
@@ -4939,10 +5052,22 @@ const App = () => {
     };
 
     const getItemUsedChannels = (group) => {
-        if (Array.isArray(group?.used_channels) && group.used_channels.length > 0) {
-            return group.used_channels;
-        }
         const usedMap = {};
+        const hasSources = Array.isArray(group?.sources) && group.sources.length > 0;
+        if (Array.isArray(group?.used_channels)) {
+            group.used_channels.forEach(channel => {
+                const channelId = channel?.channel_id || 'ali1688';
+                if (!usedMap[channelId]) {
+                    usedMap[channelId] = {
+                        ...channel,
+                        channel_id: channelId,
+                        channel_type: channel?.channel_type || 'ali1688',
+                        channel_label: channel?.channel_label || '1688 货源渠道',
+                        source_count: hasSources ? 0 : Number(channel?.source_count || 0),
+                    };
+                }
+            });
+        }
         (group?.sources || []).forEach(source => {
             const channelId = source?.source_channel_id || 'ali1688';
             if (!usedMap[channelId]) {
@@ -4950,10 +5075,28 @@ const App = () => {
                     channel_id: channelId,
                     channel_type: source?.source_channel_type || 'ali1688',
                     channel_label: source?.source_channel_label || '1688 货源渠道',
+                    source_count: 0,
                 };
             }
+            usedMap[channelId].source_count = Number(usedMap[channelId].source_count || 0) + 1;
         });
         return Object.values(usedMap);
+    };
+
+    const formatChannelCountLabel = (channel) => {
+        const count = Number(channel?.source_count || 0);
+        return `${channel?.channel_label || channel?.channel_id || '货源渠道'}（${count}）`;
+    };
+
+    const getItemCardChannels = (group, task) => {
+        const itemChannels = getItemUsedChannels(group);
+        if (itemChannels.length > 0) {
+            return itemChannels;
+        }
+        return getTaskChannelSummaries(task).map(channel => ({
+            ...channel,
+            source_count: 0,
+        }));
     };
 
     const getTaskUsedChannels = (task) => {
@@ -4972,6 +5115,17 @@ const App = () => {
         }
         return getTaskUsedChannels(task).map((channel) => ({
             ...channel,
+            filter_summary: normalizeChannelFilterSummary(channel?.filter_summary),
+        }));
+    };
+
+    const getDetailFallbackFilterChannels = (item, task) => {
+        const itemChannels = getItemUsedChannels(item);
+        const isItemChannelSource = itemChannels.length > 0;
+        const sourceChannels = isItemChannelSource ? itemChannels : getTaskChannelSummaries(task);
+        return sourceChannels.map((channel) => ({
+            ...channel,
+            source_count: isItemChannelSource ? Number(channel?.source_count || 0) : 0,
             filter_summary: normalizeChannelFilterSummary(channel?.filter_summary),
         }));
     };
@@ -5539,6 +5693,23 @@ const App = () => {
         return listingPrice - costPrice - 20;
     };
 
+    const getSourcePageOrder = (source) => {
+        const pageIndex = Number(source?.page_original_index || 0);
+        const normalizedIndex = pageIndex > 0 ? pageIndex : Number.MAX_SAFE_INTEGER;
+        const dbId = Number(source?.db_id || 0);
+        return [normalizedIndex, dbId];
+    };
+
+    const sortSourcesByEstimatedProfit = (sources = [], listingPrice = 0) => [...sources].sort((left, right) => {
+        const profitDiff = getSourceEstimatedProfit(right, listingPrice) - getSourceEstimatedProfit(left, listingPrice);
+        if (profitDiff !== 0) {
+            return profitDiff;
+        }
+        const [leftIndex, leftId] = getSourcePageOrder(left);
+        const [rightIndex, rightId] = getSourcePageOrder(right);
+        return leftIndex - rightIndex || leftId - rightId;
+    });
+
     const formatTaskChannelSummaryText = (channel) => {
         const summary = normalizeChannelFilterSummary(channel?.filter_summary);
         if (summary.unsupported) {
@@ -5550,21 +5721,6 @@ const App = () => {
         const parts = [];
         if (summary.configured.length > 0) {
             parts.push(`已启用 ${summary.configured.length}`);
-        }
-        if (summary.applied.length > 0) {
-            parts.push(`已生效 ${summary.applied.length}`);
-        }
-        if (summary.queryInjected.length > 0) {
-            parts.push(`待验证 ${summary.queryInjected.length}`);
-        }
-        if (summary.configuredPending.length > 0) {
-            parts.push(`已配置未验证 ${summary.configuredPending.length}`);
-        }
-        if (summary.unapplied.length > 0) {
-            parts.push(`未应用 ${summary.unapplied.length}`);
-        }
-        if (summary.runtimeAuditStage) {
-            parts.push(formatRuntimeAuditStage(summary.runtimeAuditStage));
         }
         return parts.join(' · ');
     };
@@ -5655,12 +5811,13 @@ const App = () => {
         const decorateGroup = (group) => {
             const normalizedSources = hasApiProvidedChannelGroups
                 ? [...(group.sources || [])]
-                : [...(group.sources || [])].sort(
-                    (left, right) => getSourceEstimatedProfit(right, listingPrice) - getSourceEstimatedProfit(left, listingPrice)
-                );
+                : sortSourcesByEstimatedProfit(group.sources || [], listingPrice);
             const bestEstimatedProfit = normalizedSources.length > 0
                 ? Math.max(...normalizedSources.map(source => getSourceEstimatedProfit(source, listingPrice)))
                 : Number.NEGATIVE_INFINITY;
+            const [firstPageOriginalIndex] = normalizedSources.length > 0
+                ? getSourcePageOrder(normalizedSources[0])
+                : [Number.MAX_SAFE_INTEGER, 0];
             const normalizedFilterSummary = group.filter_summary && typeof group.filter_summary === 'object'
                 ? normalizeChannelFilterSummary(
                     group.filter_summary,
@@ -5674,6 +5831,9 @@ const App = () => {
                 best_estimated_profit: Number.isFinite(Number(group?.best_estimated_profit))
                     ? Number(group.best_estimated_profit)
                     : bestEstimatedProfit,
+                first_page_original_index: Number.isFinite(Number(group?.first_page_original_index))
+                    ? Number(group.first_page_original_index)
+                    : firstPageOriginalIndex,
                 filter_summary: normalizedFilterSummary,
             };
         };
@@ -5684,8 +5844,12 @@ const App = () => {
             return decoratedGroups;
         }
         return decoratedGroups.sort((left, right) => {
-            if (right.best_estimated_profit !== left.best_estimated_profit) {
-                return right.best_estimated_profit - left.best_estimated_profit;
+            const profitDiff = Number(right.best_estimated_profit || 0) - Number(left.best_estimated_profit || 0);
+            if (profitDiff !== 0) {
+                return profitDiff;
+            }
+            if (left.first_page_original_index !== right.first_page_original_index) {
+                return left.first_page_original_index - right.first_page_original_index;
             }
             return String(left.channel_label || left.channel_id || '').localeCompare(
                 String(right.channel_label || right.channel_id || ''),
@@ -5699,15 +5863,26 @@ const App = () => {
     ).trim() || '预估纯利倒序';
     const sourceSortStrategyDescription = String(
         selectedItem?.source_sort_strategy?.description
-        || '当前结果固定按预估纯利从高到低排序，渠道筛选仅影响当前展示范围。'
-    ).trim() || '当前结果固定按预估纯利从高到低排序，渠道筛选仅影响当前展示范围。';
+        || '当前结果按预估纯利从高到低固定排序，渠道筛选仅影响当前展示范围。'
+    ).trim() || '当前结果按预估纯利从高到低固定排序，渠道筛选仅影响当前展示范围。';
+    const detailFallbackFilterChannels = useMemo(() => {
+        if (!selectedItem || resolvedChannelGroups.length > 0) {
+            return [];
+        }
+        return getDetailFallbackFilterChannels(selectedItem, selectedTask)
+            .filter(channel => sourceChannelFilter === "all" || channel.channel_id === sourceChannelFilter)
+            .filter(channel => {
+                const summary = normalizeChannelFilterSummary(channel.filter_summary, channel.source_filter_snapshot, channel.channel_type);
+                return summary.configured.length > 0 || summary.legacyMissingSnapshot || summary.unsupported;
+            });
+    }, [selectedItem, selectedTask, resolvedChannelGroups, sourceChannelFilter]);
     const pageIntro = (() => {
         if (view === 'item_detail') return null;
         if (view === 'dashboard') return { icon: 'dashboard', title: '控制台中心', description: '全局扫描 Worker 统计面板及后台状态概览。' };
         if (view === 'tasks') return { icon: 'list_alt', title: '任务队列中心', description: '查看和管理各个品类的深度爬取状态。左侧显示活跃进行中队列，右侧显示归档历史。' };
         if (view === 'results' && selectedTask) return { icon: 'query_stats', title: `“${selectedTask.keyword}” 爆款深度对比报告`, description: '每个爆款商品均可以点入查看对应货源渠道的深度对比结果。' };
         if (view === 'results') return { icon: 'travel_explore', title: '选品决策资产库', description: '系统已完成的爆款数据中心。点击各个品类卡片，可直接穿透查看商品的多渠道货源采购价与深度分析。' };
-        if (view === 'published') return { icon: 'shopping_bag', title: '闲鱼上架商品中枢', description: '管理并监控已经在闲鱼铺货成功的商品，支持与 1688 源头采购价、物流信息实时联动。点击行项目可展开详情数据与下架控制。' };
+        if (view === 'published') return { icon: 'shopping_bag', title: '选品管理', description: '管理从决策资产库加入的候选货源，支持后续上架、下架与删除处理。' };
         if (view === 'logs') return { icon: 'analytics', title: '任务日志中心', description: '实时监控扫描 Worker 的后台标准输出日志。' };
         if (view === 'token_stats') return { icon: 'generating_tokens', title: 'AI Token 计量舱', description: '系统大模型调用统计、模型消耗占比及审计流水线。' };
         if (view === 'settings') return { icon: 'settings', title: '系统参数配置', description: '全局管理大模型服务密钥及闲鱼 OpenAPI 的各类配置。' };
@@ -5804,8 +5979,8 @@ const App = () => {
                     </li>
                     <li className={navItemClass("published")} onClick={() => setActiveView("published")}>
                         <span className="material-symbols-outlined text-[18px]">shopping_bag</span>
-                        <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>已发布管理</span>
-                        {sidebarCollapsed && <span className="sidebar-tooltip">已发布管理</span>}
+                        <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>选品管理</span>
+                        {sidebarCollapsed && <span className="sidebar-tooltip">选品管理</span>}
                     </li>
                     <li className={navItemClass("logs")} onClick={() => setActiveView("logs")}>
                         <span className="material-symbols-outlined text-[18px]">analytics</span>
@@ -6195,30 +6370,27 @@ const App = () => {
                                              <div className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded bg-primary/90 text-white font-mono text-[10px] font-black">
                                                  RANK #{group.rank}
                                              </div>
-                                             <div className="absolute top-2.5 right-2.5 px-2 py-0.5 rounded bg-success text-white font-sans text-[9px] font-bold shadow">
-                                                 98% Match
-                                             </div>
-                                         </div>
+	                                         </div>
                                          
                                          <div className="p-4">
                                              <h3 className="text-xs font-bold text-on-surface line-clamp-2 h-9 leading-relaxed">
                                                  {group.xianyu_item?.title}
                                              </h3>
                                              <div className="flex flex-wrap gap-1.5 mt-3 min-h-[24px]">
-                                                 {getItemUsedChannels(group).map(channel => (
+	                                                 {getItemCardChannels(group, selectedTask).map(channel => (
                                                      <span
                                                          key={`${group.rank}-${channel.channel_id}`}
                                                          className="px-2 py-0.5 rounded-full bg-surface-container text-secondary border border-border-hairline text-[10px] font-semibold"
                                                      >
-                                                         {channel.channel_label || channel.channel_id}
-                                                     </span>
-                                                 ))}
-                                             </div>
-                                             
-                                             <div className="flex justify-between items-center mt-4 border-t border-border-hairline/60 pt-3">
-                                                 <span className="text-base font-black text-primary">¥{group.xianyu_item?.price}</span>
-                                                 <span className="text-[10px] text-secondary font-semibold bg-surface-container px-2 py-0.5 rounded-full border border-border-hairline">
-                                                     {group.sources?.length || 0} 个比价货源
+                                                         {formatChannelCountLabel(channel)}
+	                                                     </span>
+	                                                 ))}
+	                                             </div>
+	                                             
+	                                             <div className="flex justify-between items-center gap-4 mt-4 border-t border-border-hairline/60 pt-3 pb-3">
+	                                                 <span className="text-base font-black text-primary">¥{group.xianyu_item?.price}</span>
+	                                                 <span className="text-[10px] text-secondary font-semibold bg-surface-container px-2 py-0.5 rounded-full border border-border-hairline">
+	                                                     {group.sources?.length || 0} 个比价货源
                                                  </span>
                                              </div>
                                          </div>
@@ -6389,13 +6561,13 @@ const App = () => {
                                                      <div className="w-px h-5 bg-border-hairline/60"></div>
                                                      
                                                      <div className="flex gap-2">
-                                                         {publishableIds.length > 0 && (
+                                                         {addableIds.length > 0 && (
                                                              <button 
                                                                  className="px-3.5 py-1.5 bg-primary hover:bg-primary-container text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40" 
                                                                  disabled={batchPublishing || batchDepublishing || batchDeleting} 
-                                                                 onClick={doBatchPublish}
+                                                                 onClick={doBatchAddToSelection}
                                                              >
-                                                                 {batchPublishing ? "云同步中..." : `🚀 批量发布 (${publishableIds.length})`}
+                                                                 {batchPublishing ? "加入中..." : `加入选品 (${addableIds.length})`}
                                                              </button>
                                                          )}
                                                          {depublishableIds.length > 0 && (
@@ -6431,6 +6603,57 @@ const App = () => {
 
                              {/* 货源列表卡片 */}
                              <div className="space-y-4">
+                                {detailFallbackFilterChannels.map(channel => {
+                                    const filterSummary = normalizeChannelFilterSummary(
+                                        channel.filter_summary,
+                                        channel.source_filter_snapshot,
+                                        channel.channel_type
+                                    );
+                                    return (
+                                        <div key={`fallback-channel-group-${channel.channel_id}`} className="space-y-3">
+                                            <div className="flex flex-wrap items-center gap-2 px-1">
+                                                <span className="font-sans text-xs font-bold text-on-surface">
+                                                    {channel.channel_label || channel.channel_id}
+                                                </span>
+                                                <span className="px-2 py-0.5 rounded-full bg-surface-container text-secondary border border-border-hairline text-[10px] font-semibold">
+                                                    {Number(channel.source_count || 0)} 条货源
+                                                </span>
+                                            </div>
+
+                                            <div className="px-1 flex flex-wrap items-center gap-2">
+                                                {filterSummary.configured.length > 0 && (
+                                                    <div className="flex flex-wrap items-center gap-1.5">
+                                                        <span className="text-[10px] font-semibold text-secondary">当前渠道货源筛选项</span>
+                                                        {filterSummary.configured.map(filterKey => (
+                                                            <span
+                                                                key={`${channel.channel_id}-fallback-configured-${filterKey}`}
+                                                                className="px-2 py-0.5 rounded-full bg-surface-container-low text-on-surface border border-border-hairline text-[10px]"
+                                                            >
+                                                                {getChannelFilterLabel(filterKey)}
+                                                            </span>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                                {filterSummary.unsupported && (
+                                                    <div className="flex flex-wrap items-center gap-1.5">
+                                                        <span className="text-[10px] font-semibold text-secondary">当前渠道不支持</span>
+                                                        <span className="px-2 py-0.5 rounded-full bg-surface-container-low text-secondary border border-border-hairline text-[10px]">
+                                                            当前渠道暂不支持 1688 搜索筛选项
+                                                        </span>
+                                                    </div>
+                                                )}
+                                                {filterSummary.legacyMissingSnapshot && (
+                                                    <div className="flex flex-wrap items-center gap-1.5">
+                                                        <span className="text-[10px] font-semibold text-secondary">历史快照缺失</span>
+                                                        <span className="px-2 py-0.5 rounded-full bg-surface-container-low text-secondary border border-border-hairline text-[10px]">
+                                                            该渠道资产生成时尚未记录筛选快照，当前无法回溯当时使用的搜索筛选策略
+                                                        </span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
                                 {resolvedChannelGroups.map(group => (
                                      <div key={`channel-group-${group.channel_id}`} className="space-y-3">
                                          <div className="flex flex-wrap items-center gap-2 px-1">
@@ -6440,19 +6663,6 @@ const App = () => {
                                              <span className="px-2 py-0.5 rounded-full bg-surface-container text-secondary border border-border-hairline text-[10px] font-semibold">
                                                  {group.source_count} 条货源
                                              </span>
-                                             {group.account_labels.map(accountLabel => (
-                                                 <span
-                                                     key={`${group.channel_id}-${accountLabel}`}
-                                                     className="px-2 py-0.5 rounded-full bg-surface-container-low text-secondary border border-border-hairline text-[10px]"
-                                                 >
-                                                     {accountLabel}
-                                                 </span>
-                                             ))}
-                                             {group.account_labels.length === 0 && (
-                                                 <span className="px-2 py-0.5 rounded-full bg-warning/8 text-warning border border-warning/20 text-[10px]">
-                                                     历史资产未记录账号快照
-                                                 </span>
-                                             )}
                                          </div>
 
                                          {(() => {
@@ -6462,10 +6672,7 @@ const App = () => {
                                                 group.channel_type
                                             );
                                             if (
-                                                filterSummary.configuredPending.length === 0 &&
-                                                filterSummary.applied.length === 0 &&
-                                                filterSummary.unapplied.length === 0 &&
-                                                filterSummary.queryInjected.length === 0 &&
+                                                filterSummary.configured.length === 0 &&
                                                 !filterSummary.legacyMissingSnapshot &&
                                                 !filterSummary.unsupported
                                             ) {
@@ -6502,196 +6709,12 @@ const App = () => {
                                                              </span>
                                                          </div>
                                                      )}
-                                                     {filterSummary.runtimeAuditStage && (
-                                                         <div className="flex flex-wrap items-center gap-1.5">
-                                                             <span className="text-[10px] font-semibold text-secondary">运行证据</span>
-                                                             <span
-                                                                 className="px-2 py-0.5 rounded-full bg-surface-container-low text-secondary border border-border-hairline text-[10px]"
-                                                                 title={filterSummary.runtimeAuditSource || ''}
-                                                             >
-                                                                 {formatRuntimeAuditStage(filterSummary.runtimeAuditStage)}
-                                                             </span>
-                                                         </div>
-                                                     )}
-                                                     {filterSummary.configuredPending.length > 0 && (
-                                                         <div className="flex flex-wrap items-center gap-1.5">
-                                                             <span className="text-[10px] font-semibold text-secondary">已配置未验证</span>
-                                                             {filterSummary.configuredPending.map(filterKey => (
-                                                                 <span
-                                                                     key={`${group.channel_id}-configured-pending-${filterKey}`}
-                                                                     className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px]"
-                                                                 >
-                                                                     {getChannelFilterLabel(filterKey)}
-                                                                 </span>
-                                                             ))}
-                                                         </div>
-                                                     )}
-                                                     {filterSummary.configuredPending.length > 0 && (
-                                                         <div className="w-full flex flex-wrap items-center gap-1.5">
-                                                             <span className="text-[10px] font-semibold text-secondary">配置态线索</span>
-                                                             {filterSummary.configuredPending.map((filterKey) => {
-                                                                 const filterMeta = filterSummary.filterStatusMap?.[filterKey];
-                                                                 const detailText = formatQueryVerificationDetail(
-                                                                     filterSummary.queryVerificationDetails?.[filterKey]
-                                                                 );
-                                                                 const reasonText = getFilterStatusReasonText(
-                                                                     filterMeta?.reason
-                                                                 );
-                                                                 const hintText = formatFilterMappingHint(filterMeta, filterKey);
-                                                                 if (!detailText && !reasonText && !hintText) {
-                                                                     return null;
-                                                                 }
-                                                                 return (
-                                                                     <span
-                                                                         key={`${group.channel_id}-configured-pending-detail-${filterKey}`}
-                                                                         className="px-2 py-0.5 rounded-full bg-primary/6 text-primary border border-primary/15 text-[10px]"
-                                                                     >
-                                                                         {getChannelFilterLabel(filterKey)}
-                                                                         {detailText ? `: ${detailText}` : ''}
-                                                                         {reasonText ? `${detailText ? ' · ' : ': '}${reasonText}` : ''}
-                                                                         {hintText ? ` · ${hintText}` : ''}
-                                                                     </span>
-                                                                 );
-                                                             })}
-                                                         </div>
-                                                     )}
-                                                     {filterSummary.queryInjected.length > 0 && (
-                                                         <div className="flex flex-wrap items-center gap-1.5">
-                                                             <span className="text-[10px] font-semibold text-secondary">已注入待验证</span>
-                                                             {filterSummary.queryInjected.map(filterKey => (
-                                                                 <span
-                                                                     key={`${group.channel_id}-query-injected-${filterKey}`}
-                                                                     className="px-2 py-0.5 rounded-full bg-secondary/10 text-secondary border border-border-hairline text-[10px]"
-                                                                 >
-                                                                     {getChannelFilterLabel(filterKey)}
-                                                                 </span>
-                                                             ))}
-                                                         </div>
-                                                     )}
-                                                     {filterSummary.applied.length > 0 && (
-                                                         <div className="flex flex-wrap items-center gap-1.5">
-                                                             <span className="text-[10px] font-semibold text-secondary">已生效</span>
-                                                             {filterSummary.applied.map(filterKey => (
-                                                                 <span
-                                                                     key={`${group.channel_id}-applied-${filterKey}`}
-                                                                     className="px-2 py-0.5 rounded-full bg-success/8 text-success border border-success/20 text-[10px]"
-                                                                 >
-                                                                     {getChannelFilterLabel(filterKey)}
-                                                                 </span>
-                                                             ))}
-                                                         </div>
-                                                     )}
-                                                     {filterSummary.unapplied.length > 0 && (
-                                                         <div className="flex flex-wrap items-center gap-1.5">
-                                                             <span className="text-[10px] font-semibold text-secondary">未应用</span>
-                                                             {filterSummary.unapplied.map(filterKey => (
-                                                                 <span
-                                                                     key={`${group.channel_id}-unapplied-${filterKey}`}
-                                                                     className="px-2 py-0.5 rounded-full bg-warning/8 text-warning border border-warning/20 text-[10px]"
-                                                                 >
-                                                                     {getChannelFilterLabel(filterKey)}
-                                                                 </span>
-                                                             ))}
-                                                         </div>
-                                                     )}
-                                                     {filterSummary.mappingStage === 'snapshot_only' && !filterSummary.mappingNotes && (
-                                                         <span className="text-[10px] text-secondary">
-                                                             当前仅完成配置快照透传，真实搜索参数映射仍在继续接入。
-                                                         </span>
-                                                     )}
-                                                     {filterSummary.mappingNotes && (
-                                                         <span className="text-[10px] text-secondary">
-                                                             {filterSummary.mappingNotes}
-                                                         </span>
-                                                     )}
-                                                     {filterSummary.applied.length > 0 && (
-                                                         <div className="w-full flex flex-wrap items-center gap-1.5">
-                                                             <span className="text-[10px] font-semibold text-secondary">命中参数</span>
-                                                             {filterSummary.applied.map((filterKey) => {
-                                                                 const detailText = formatQueryVerificationDetail(
-                                                                     filterSummary.queryVerificationDetails?.[filterKey]
-                                                                 );
-                                                                 if (!detailText) {
-                                                                     return null;
-                                                                 }
-                                                                 return (
-                                                                     <span
-                                                                         key={`${group.channel_id}-applied-detail-${filterKey}`}
-                                                                         className="px-2 py-0.5 rounded-full bg-success/6 text-success border border-success/15 text-[10px]"
-                                                                     >
-                                                                         {getChannelFilterLabel(filterKey)}: {detailText}
-                                                                     </span>
-                                                                 );
-                                                             })}
-                                                         </div>
-                                                     )}
-                                                     {filterSummary.queryInjected.length > 0 && (
-                                                         <div className="w-full flex flex-wrap items-center gap-1.5">
-                                                             <span className="text-[10px] font-semibold text-secondary">待验证线索</span>
-                                                             {filterSummary.queryInjected.map((filterKey) => {
-                                                                 const detailText = formatQueryVerificationDetail(
-                                                                     filterSummary.queryVerificationDetails?.[filterKey]
-                                                                 );
-                                                                 const reasonText = getFilterStatusReasonText(
-                                                                     filterSummary.filterStatusMap?.[filterKey]?.reason
-                                                                 );
-                                                                 if (!detailText) {
-                                                                     return (
-                                                                         <span
-                                                                             key={`${group.channel_id}-pending-detail-${filterKey}`}
-                                                                             className="px-2 py-0.5 rounded-full bg-secondary/8 text-secondary border border-border-hairline text-[10px]"
-                                                                         >
-                                                                             {getChannelFilterLabel(filterKey)}{reasonText ? `: ${reasonText}` : ''}
-                                                                         </span>
-                                                                     );
-                                                                 }
-                                                                 return (
-                                                                     <span
-                                                                         key={`${group.channel_id}-pending-detail-${filterKey}`}
-                                                                         className="px-2 py-0.5 rounded-full bg-secondary/8 text-secondary border border-border-hairline text-[10px]"
-                                                                     >
-                                                                         {getChannelFilterLabel(filterKey)}: {detailText}{reasonText ? ` · ${reasonText}` : ''}
-                                                                     </span>
-                                                                 );
-                                                             })}
-                                                         </div>
-                                                     )}
-                                                     {filterSummary.unapplied.length > 0 && (
-                                                         <div className="w-full flex flex-wrap items-center gap-1.5">
-                                                             <span className="text-[10px] font-semibold text-secondary">未应用原因</span>
-                                                             {filterSummary.unapplied.map((filterKey) => {
-                                                                 const filterMeta = filterSummary.filterStatusMap?.[filterKey];
-                                                                 const reasonText = getFilterStatusReasonText(
-                                                                     filterMeta?.reason
-                                                                 );
-                                                                 const detailText = formatQueryVerificationDetail(
-                                                                     filterSummary.queryVerificationDetails?.[filterKey]
-                                                                 );
-                                                                 const hintText = formatFilterMappingHint(filterMeta, filterKey);
-                                                                 return (
-                                                                     <span
-                                                                         key={`${group.channel_id}-unapplied-reason-${filterKey}`}
-                                                                         className="px-2 py-0.5 rounded-full bg-warning/6 text-warning border border-warning/15 text-[10px]"
-                                                                     >
-                                                                         {getChannelFilterLabel(filterKey)}
-                                                                         {detailText ? `: ${detailText}` : ''}
-                                                                         {reasonText ? `${detailText ? ' · ' : ': '}${reasonText}` : ''}
-                                                                         {hintText ? ` · ${hintText}` : ''}
-                                                                     </span>
-                                                                 );
-                                                             })}
-                                                         </div>
-                                                     )}
                                                  </div>
                                              );
                                          })()}
 
                                          {group.sources.map((src, i) => { 
-                                             const estimatedProfit = getSourceEstimatedProfit(
-                                                 src,
-                                                 selectedItem.xianyu_item?.price
-                                             );
-                                             const marginVal = estimatedProfit.toFixed(2);
+                                             const pageOriginalIndex = Number(src.page_original_index || 0);
                                              const isDropped = !!src.drop_reason;
                                              const isChecked = selectedIds.includes(src.db_id);
                                             const sourceMetrics = [
@@ -6704,11 +6727,6 @@ const App = () => {
                                                 src.waybill_support_text,
                                                 src.settled_years_text,
                                             ].filter(Boolean);
-                                            const sourceFilterSummary = normalizeChannelFilterSummary(
-                                                src.source_filter_summary,
-                                                src.source_filter_snapshot,
-                                                src.source_channel_type
-                                            );
                                             return (
                                                  <div 
                                                      className={`bg-surface-container-lowest border rounded-xl p-4 ambient-shadow flex justify-between items-center relative overflow-hidden group ${
@@ -6752,13 +6770,15 @@ const App = () => {
                                                              <div className="flex flex-wrap gap-3 items-center mt-2.5 text-xs text-secondary">
                                                                  <span>{src.sku_count > 0 ? `${src.sku_count} 个多属性 SKU 规格` : '一口价商品'}</span>
                                                                  <span className="w-1.5 h-1.5 rounded-full bg-border-hairline"></span>
+                                                                 <span className={`font-mono border px-2 py-0.5 rounded text-[10px] ${
+                                                                     pageOriginalIndex > 0
+                                                                         ? 'bg-primary/6 text-primary border-primary/15'
+                                                                         : 'bg-surface-container text-secondary border-border-hairline'
+                                                                 }`}>
+                                                                     页面原始 {pageOriginalIndex > 0 ? `#${pageOriginalIndex}` : '未记录'}
+                                                                 </span>
+                                                                 <span className="w-1.5 h-1.5 rounded-full bg-border-hairline"></span>
                                                                  <span className="font-mono bg-surface-container px-2 py-0.5 rounded text-[10px]">ID: {src.db_id}</span>
-                                                                 {src.source_account_label && (
-                                                                     <>
-                                                                         <span className="w-1.5 h-1.5 rounded-full bg-border-hairline"></span>
-                                                                         <span>{src.source_account_label}</span>
-                                                                     </>
-                                                                 )}
                                                                  {src.company_name && (
                                                                      <>
                                                                          <span className="w-1.5 h-1.5 rounded-full bg-border-hairline"></span>
@@ -6786,93 +6806,6 @@ const App = () => {
                                                                      })}
                                                                  </div>
                                                              )}
-                                                             {hasRenderableChannelFilterSummary(sourceFilterSummary) && (
-                                                                 <div className="flex flex-wrap gap-2 mt-2.5 items-center">
-                                                                     <span className="text-[10px] font-semibold text-secondary">本货源筛选摘要</span>
-                                                                     {sourceFilterSummary.legacyMissingSnapshot && (
-                                                                         <span className="px-2 py-0.5 rounded-full border text-[10px] bg-surface-container-low text-secondary border-border-hairline">
-                                                                             历史快照缺失
-                                                                         </span>
-                                                                     )}
-                                                                     {sourceFilterSummary.unsupported && (
-                                                                         <span className="px-2 py-0.5 rounded-full border text-[10px] bg-surface-container-low text-secondary border-border-hairline">
-                                                                             当前渠道不支持
-                                                                         </span>
-                                                                     )}
-                                                                     {sourceFilterSummary.runtimeAuditStage && (
-                                                                         <span
-                                                                             className="px-2 py-0.5 rounded-full border text-[10px] bg-surface-container-low text-secondary border-border-hairline"
-                                                                             title={sourceFilterSummary.runtimeAuditSource || ''}
-                                                                         >
-                                                                             {formatRuntimeAuditStage(sourceFilterSummary.runtimeAuditStage)}
-                                                                         </span>
-                                                                     )}
-                                                                     {sourceFilterSummary.configuredPending.length > 0 && (
-                                                                         <div className="flex flex-wrap gap-1.5 items-center">
-                                                                             <span className="px-2 py-0.5 rounded-full border text-[10px] bg-primary/8 text-primary border-primary/15">
-                                                                                 已配置未验证
-                                                                             </span>
-                                                                             {sourceFilterSummary.configuredPending.map((filterKey) => (
-                                                                                 <span
-                                                                                     key={`${src.db_id}-source-configured-pending-${filterKey}`}
-                                                                                     className="px-2 py-0.5 rounded-full border text-[10px] bg-primary/6 text-primary border-primary/10"
-                                                                                     title={formatSourceFilterSummaryChipTitle(sourceFilterSummary, filterKey)}
-                                                                                 >
-                                                                                     {getChannelFilterLabel(filterKey)}
-                                                                                 </span>
-                                                                             ))}
-                                                                         </div>
-                                                                     )}
-                                                                     {sourceFilterSummary.queryInjected.length > 0 && (
-                                                                         <div className="flex flex-wrap gap-1.5 items-center">
-                                                                             <span className="px-2 py-0.5 rounded-full border text-[10px] bg-secondary/10 text-secondary border-border-hairline">
-                                                                                 已注入待验证
-                                                                             </span>
-                                                                             {sourceFilterSummary.queryInjected.map((filterKey) => (
-                                                                                 <span
-                                                                                     key={`${src.db_id}-source-query-injected-${filterKey}`}
-                                                                                     className="px-2 py-0.5 rounded-full border text-[10px] bg-secondary/6 text-secondary border-border-hairline"
-                                                                                     title={formatSourceFilterSummaryChipTitle(sourceFilterSummary, filterKey)}
-                                                                                 >
-                                                                                     {getChannelFilterLabel(filterKey)}
-                                                                                 </span>
-                                                                             ))}
-                                                                         </div>
-                                                                     )}
-                                                                     {sourceFilterSummary.applied.length > 0 && (
-                                                                         <div className="flex flex-wrap gap-1.5 items-center">
-                                                                             <span className="px-2 py-0.5 rounded-full border text-[10px] bg-success/8 text-success border-success/20">
-                                                                                 已生效
-                                                                             </span>
-                                                                             {sourceFilterSummary.applied.map((filterKey) => (
-                                                                                 <span
-                                                                                     key={`${src.db_id}-source-applied-${filterKey}`}
-                                                                                     className="px-2 py-0.5 rounded-full border text-[10px] bg-success/6 text-success border-success/15"
-                                                                                     title={formatSourceFilterSummaryChipTitle(sourceFilterSummary, filterKey)}
-                                                                                 >
-                                                                                     {getChannelFilterLabel(filterKey)}
-                                                                                 </span>
-                                                                             ))}
-                                                                         </div>
-                                                                     )}
-                                                                     {sourceFilterSummary.unapplied.length > 0 && (
-                                                                         <div className="flex flex-wrap gap-1.5 items-center">
-                                                                             <span className="px-2 py-0.5 rounded-full border text-[10px] bg-warning/8 text-warning border-warning/20">
-                                                                                 未应用
-                                                                             </span>
-                                                                             {sourceFilterSummary.unapplied.map((filterKey) => (
-                                                                                 <span
-                                                                                     key={`${src.db_id}-source-unapplied-${filterKey}`}
-                                                                                     className="px-2 py-0.5 rounded-full border text-[10px] bg-warning/6 text-warning border-warning/15"
-                                                                                     title={formatSourceFilterSummaryChipTitle(sourceFilterSummary, filterKey)}
-                                                                                 >
-                                                                                     {getChannelFilterLabel(filterKey)}
-                                                                                 </span>
-                                                                             ))}
-                                                                         </div>
-                                                                     )}
-                                                                 </div>
-                                                             )}
                                                          </div>
                                                      </div>
 
@@ -6887,14 +6820,10 @@ const App = () => {
                                                              <>
                                                                  <div className="flex justify-end gap-3 items-baseline">
                                                                      <span className="font-mono text-lg font-black text-on-surface">¥{src.min_price}</span>
-                                                                     <span className={`text-xs font-bold ${estimatedProfit > 50 ? 'text-success' : 'text-error'}`}>
-                                                                         预估纯利: ¥{marginVal}
-                                                                     </span>
                                                                  </div>
                                                                  
-                                                                 <PublishButton 
+                                                                 <SelectionButton
                                                                      src={src} 
-                                                                     xianyuPrice={selectedItem.xianyu_item?.price} 
                                                                      onStatusLoaded={handleStatusLoaded} 
                                                                      batchStatus={batchStatusMap[src.db_id]}
                                                                      batchResult={batchResultMap[src.db_id]}

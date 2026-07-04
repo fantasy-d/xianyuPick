@@ -140,6 +140,10 @@ def looks_like_real_account_name(raw_value: Any) -> bool:
     return True
 
 
+def looks_like_company_identity_source(raw_value: Any) -> bool:
+    return "company" in str(raw_value or "").strip().lower()
+
+
 async def extract_ali1688_account_name(page, context) -> dict[str, Any]:
     runtime_cookies = {}
     try:
@@ -159,11 +163,9 @@ async def extract_ali1688_account_name(page, context) -> dict[str, Any]:
               '[class*="member"]',
               '[class*="user-name"]',
               '[class*="userName"]',
-              '[class*="company-name"]',
               'a[href*="work.1688.com"]',
               'a[href*="myalibaba"]',
               'a[href*="member.1688.com"]',
-              '.company-name',
               '.member-nick',
               '.account-name',
             ];
@@ -231,15 +233,21 @@ async def extract_ali1688_account_name(page, context) -> dict[str, Any]:
 
     candidates: list[tuple[str, str, float]] = []
     for hit in page_snapshot.get("selectorHits") or []:
+        selector = str(hit.get("selector") or "")
+        if looks_like_company_identity_source(selector):
+            continue
         text = normalize_account_name(hit.get("text"))
         if looks_like_real_account_name(text):
-            score = 0.98 if "nick" in (hit.get("selector") or "") or "account" in (hit.get("selector") or "") else 0.92
-            candidates.append((text, f"dom:{hit.get('selector')}", score))
+            score = 0.98 if "nick" in selector or "account" in selector else 0.92
+            candidates.append((text, f"dom:{selector}", score))
 
     for item in page_snapshot.get("runtimeCandidates") or []:
+        source = str(item.get("source") or "")
+        if looks_like_company_identity_source(source):
+            continue
         text = normalize_account_name(item.get("text"))
         if looks_like_real_account_name(text):
-            candidates.append((text, f"runtime:{item.get('source')}", 0.88))
+            candidates.append((text, f"runtime:{source}", 0.88))
 
     merged_cookie_map = dict(page_snapshot.get("runtimeCookies") or {})
     merged_cookie_map.update({k: v for k, v in runtime_cookies.items() if v})

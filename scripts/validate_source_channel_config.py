@@ -2539,6 +2539,7 @@ def validate_detail_channel_sorting_contract() -> None:
             "title": "A-1",
             "min_price": 12.5,
             "estimated_profit": 4.2,
+            "page_original_index": 1,
             "source_channel_id": "ali1688",
             "source_channel_label": "1688 货源渠道",
         },
@@ -2547,6 +2548,7 @@ def validate_detail_channel_sorting_contract() -> None:
             "title": "A-2",
             "min_price": 9.8,
             "estimated_profit": 8.5,
+            "page_original_index": 3,
             "source_channel_id": "ali1688",
             "source_channel_label": "1688 货源渠道",
         },
@@ -2555,6 +2557,7 @@ def validate_detail_channel_sorting_contract() -> None:
             "title": "B-1",
             "min_price": 11.3,
             "estimated_profit": 6.1,
+            "page_original_index": 2,
             "source_channel_id": "yiwu-market",
             "source_channel_label": "义乌渠道",
         },
@@ -2563,6 +2566,7 @@ def validate_detail_channel_sorting_contract() -> None:
             "title": "C-1",
             "min_price": 13.2,
             "estimated_profit": 2.0,
+            "page_original_index": 4,
             "source_channel_id": "guangzhou-market",
             "source_channel_label": "广州渠道",
         },
@@ -2614,11 +2618,11 @@ def validate_detail_channel_sorting_contract() -> None:
 
     _assert(
         [item["db_id"] for item in sorted_sources] == [1002, 2001, 1001, 3001],
-        "详情页全量 sources 应固定按预估纯利倒序排序",
+        "详情页全量 sources 应按预估纯利倒序排序",
     )
     _assert(
         [group["channel_id"] for group in sorted_groups] == ["ali1688", "yiwu-market", "guangzhou-market"],
-        "channel_groups 应按各渠道最佳预估纯利倒序排序",
+        "channel_groups 应按各渠道最高预估纯利倒序排序",
     )
     _assert(
         [channel["channel_id"] for channel in sorted_used_channels] == ["ali1688", "yiwu-market", "guangzhou-market"],
@@ -2642,9 +2646,8 @@ def validate_detail_sort_strategy_contract() -> None:
         source_sort_strategy == {
             "field": "estimated_profit",
             "order": "desc",
-            "formula": "listing_price - min_price - 20",
             "label": "预估纯利倒序",
-            "description": "当前结果固定按预估纯利从高到低排序，渠道筛选仅影响当前展示范围。",
+            "description": "当前结果按预估纯利从高到低固定排序，渠道筛选仅影响当前展示范围。",
         },
         "详情页 source_sort_strategy 应保持固定排序契约",
     )
@@ -2654,8 +2657,8 @@ def validate_detail_sort_strategy_contract() -> None:
         channel_group_sort_strategy == {
             "field": "best_estimated_profit",
             "order": "desc",
-            "label": "渠道最佳预估纯利倒序",
-            "description": "当前渠道分组固定按各渠道最佳预估纯利从高到低排序。",
+            "label": "渠道最高预估纯利倒序",
+            "description": "当前渠道分组按各渠道最高预估纯利从高到低固定排序。",
         },
         "详情页 channel_group_sort_strategy 应保持固定排序契约",
     )

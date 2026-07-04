@@ -8,7 +8,10 @@ from typing import Any
 BASE_DIR = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(BASE_DIR / "src"))
 from xianyu_tools.config import settings
-from xianyu_tools.channel_search_filters import get_ali1688_channel_search_filter_meta
+from xianyu_tools.channel_search_filters import (
+    get_ali1688_channel_search_filter_keys,
+    get_ali1688_channel_search_filter_meta,
+)
 from xianyu_tools.logging_util import get_unified_logger
 from xianyu_tools.source_adapter import Ali1688SourceAdapter
 from xianyu_tools.source_adapter.ali1688 import (
@@ -1617,12 +1620,385 @@ def _normalize_image_search_url(url: str) -> str | None:
 
 def _top_dispatch_candidates(rows: list, limit: int) -> list:
     valid_rows = [r for r in rows if r.get("item_url")]
-    
-    def sort_key(r):
-        return (r.get("seven_day_dispatch_count", 0) or 0, r.get("month_dispatch_count", 0) or 0)
-        
-    valid_rows.sort(key=sort_key, reverse=True)
+    valid_rows.sort(key=lambda r: (int(r.get("page_original_index") or 10**9), str(r.get("offer_id") or "")))
     return valid_rows[:limit]
+
+
+def _normalize_match_text(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "")).lower()
+
+
+def _build_visual_offer_order_map(candidates: list, visual_rows: list[dict]) -> dict[str, int]:
+    order_map: dict[str, int] = {}
+    candidate_titles = {
+        _normalize_match_text(getattr(candidate, "title", "")): str(getattr(candidate, "source_item_id", "") or "")
+        for candidate in candidates
+        if getattr(candidate, "title", "") and getattr(candidate, "source_item_id", "")
+    }
+
+    for index, row in enumerate(visual_rows or [], start=1):
+        offer_id = str((row or {}).get("offerId") or "")
+        if offer_id:
+            order_map.setdefault(offer_id, index)
+            continue
+
+        row_title = _normalize_match_text((row or {}).get("title") or "")
+        if not row_title:
+            continue
+        for candidate_title, candidate_offer_id in candidate_titles.items():
+            if row_title in candidate_title or candidate_title in row_title:
+                order_map.setdefault(candidate_offer_id, index)
+                break
+    return order_map
+
+
+async def _extract_visual_offer_rows(page, offer_ids: set[str], logger=None) -> list[dict]:
+    script = """
+    (expectedIds) => {
+      const expected = new Set((expectedIds || []).map(String));
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const isVisible = (el) => {
+        if (!el || !(el instanceof Element)) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) return false;
+        const rect = el.getBoundingClientRect();
+        return rect.width >= 80 && rect.height >= 80 && rect.bottom >= 0 && rect.right >= 0;
+      };
+      const offerIdFromText = (value) => {
+        const text = String(value || '');
+        const patterns = [
+          /\\/offer\\/(\\d+)\\.html/,
+          /offerId["']?\\s*[:=]\\s*["']?(\\d+)/,
+          /offer_id["']?\\s*[:=]\\s*["']?(\\d+)/,
+          /data-offer-id=["']?(\\d+)/
+        ];
+        for (const pattern of patterns) {
+          const match = text.match(pattern);
+          if (match) return match[1];
+        }
+        return '';
+      };
+      const offerIdFromElement = (el) => {
+        for (const attr of ['data-offer-id', 'data-offerid', 'offer-id', 'offerid']) {
+          const value = el.getAttribute && el.getAttribute(attr);
+          if (value && /^\\d+$/.test(value)) return value;
+        }
+        const anchor = el.querySelector && el.querySelector('a[href*="/offer/"]');
+        const fromHref = anchor ? offerIdFromText(anchor.href) : '';
+        if (fromHref) return fromHref;
+        return offerIdFromText((el.outerHTML || '').slice(0, 12000));
+      };
+      const isMetricLine = (line) =>
+        /[¥￥]|48H|24H|月代发|7天代发|铺货数|分销商|入驻|起批|包邮|页面原始|ID[:：]/.test(line);
+      const isMerchantLine = (line) =>
+        /公司|商贸|电子商务|贸易|工厂|旗舰店|专营店|经营部|个体工商户/.test(line) &&
+        !/洗发水|沐浴露|套装|便携|旅行|正品|批发|瓶|袋|装/.test(line);
+      const isUsableTitle = (line) => line && line.length >= 8 && !isMetricLine(line) && !isMerchantLine(line);
+      const titleFromElement = (el) => {
+        const offerAnchors = Array.from((el.querySelectorAll && el.querySelectorAll('a[href*="/offer/"]')) || []);
+        for (const anchor of offerAnchors) {
+          const candidates = [
+            normalize(anchor.getAttribute('title')),
+            normalize(anchor.innerText),
+            normalize(anchor.textContent),
+          ];
+          const matched = candidates.find(isUsableTitle);
+          if (matched) return matched;
+        }
+        const titleNodes = Array.from((el.querySelectorAll && el.querySelectorAll('[class*="title"], [class*="Title"]')) || []);
+        for (const titleNode of titleNodes) {
+          const candidates = [
+            normalize(titleNode.getAttribute('title')),
+            normalize(titleNode.innerText),
+            normalize(titleNode.textContent),
+          ];
+          const matched = candidates.find(isUsableTitle);
+          if (matched) return matched;
+        }
+        const lines = String(el.innerText || '')
+          .split(/\\n+/)
+          .map(normalize)
+          .filter(Boolean);
+        return lines.find(isUsableTitle) || lines[0] || '';
+      };
+      const selectors = [
+        '[class*="searchOfferWrapper"]',
+        '[class*="SearchOffer"]',
+        '[class*="offer-card"]',
+        '[class*="OfferCard"]',
+        '[class*="common-offer"]',
+        '[class*="ocms-fusion"]',
+        '[data-offer-id]',
+        '[data-offerid]'
+      ];
+      let cards = [];
+      for (const selector of selectors) {
+        cards = cards.concat(Array.from(document.querySelectorAll(selector)));
+      }
+      if (!cards.length) {
+        cards = Array.from(document.querySelectorAll('div, li')).filter((el) => {
+          const text = normalize(el.innerText);
+          return text.length >= 40 && /[¥￥]|48H|24H|月代发|7天代发|铺货数|分销商|入驻|起批/.test(text);
+        });
+      }
+
+      const byKey = new Map();
+      for (const card of cards) {
+        if (!isVisible(card)) continue;
+        const text = normalize(card.innerText);
+        if (text.length < 20) continue;
+        const offerId = offerIdFromElement(card);
+        if (expected.size && offerId && !expected.has(offerId)) continue;
+        const title = titleFromElement(card);
+        const rect = card.getBoundingClientRect();
+        const key = offerId || title;
+        if (!key) continue;
+        const row = {
+          offerId,
+          title,
+          text: text.slice(0, 500),
+          top: Math.round(rect.top + window.scrollY),
+          left: Math.round(rect.left + window.scrollX),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+          area: Math.round(rect.width * rect.height),
+        };
+        const previous = byKey.get(key);
+        if (!previous || row.top < previous.top || (row.top === previous.top && row.left < previous.left)) {
+          byKey.set(key, row);
+        }
+      }
+      return Array.from(byKey.values())
+        .sort((a, b) => a.top - b.top || a.left - b.left)
+        .slice(0, 80);
+    }
+    """
+    try:
+        rows = await page.evaluate(script, sorted(offer_ids or set()))
+    except Exception as exc:
+        if logger:
+            logger.warning(f"[Search] Failed to extract visible offer rows from DOM: {exc}")
+        return []
+    return rows or []
+
+
+async def _extract_selected_filter_chip_texts(page, logger=None) -> list[str]:
+    script = """
+    () => {
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const knownTerms = [
+        '极速开票',
+        '分销严选',
+        '一件代发',
+        '7天无理由',
+        '1件代发包邮',
+        '包邮',
+        '退货包运费',
+        '真实工厂认证',
+        '实力认证',
+        '官方物流',
+        '密文面单',
+        '抖音面单',
+      ];
+      const chips = [];
+      for (const el of Array.from(document.querySelectorAll('div, span, button, label'))) {
+        const text = normalize(el.innerText || el.textContent || '');
+        if (!text || text.length > 80) continue;
+        const matched = knownTerms.filter((term) => text.includes(term));
+        if (!matched.length) continue;
+        if (!/[×xX]|close|已选|指定|筛选|条件|面单/.test(text) && matched.length === 1) continue;
+        chips.push(text);
+      }
+      return Array.from(new Set(chips)).slice(0, 30);
+    }
+    """
+    try:
+        return await page.evaluate(script) or []
+    except Exception as exc:
+        if logger:
+            logger.warning(f"[Search] Failed to extract selected filter chips: {exc}")
+        return []
+
+
+def _unexpected_selected_filter_chips(selected_filter_chips: list[str], runtime_filter_snapshot: dict | None) -> list[str]:
+    configured_keys = set((runtime_filter_snapshot or {}).get("configured_enabled_filter_keys") or [])
+    configured_labels = {
+        get_ali1688_channel_search_filter_meta(key).get("label")
+        for key in configured_keys
+    }
+    configured_labels = {str(label) for label in configured_labels if label}
+    known_labels = {
+        str(get_ali1688_channel_search_filter_meta(key).get("label") or "")
+        for key in get_ali1688_channel_search_filter_keys()
+    }
+    known_labels.update({"抖音面单"})
+    known_labels.discard("")
+
+    unexpected = []
+    for chip in selected_filter_chips or []:
+        chip_text = str(chip or "").strip()
+        if not chip_text:
+            continue
+        matched = [label for label in known_labels if label and label in chip_text]
+        if any(label not in configured_labels for label in matched):
+            unexpected.append(chip_text)
+    return list(dict.fromkeys(unexpected))
+
+
+def _write_search_result_snapshots(
+    output_dir: Path,
+    html_content: str,
+    candidates: list,
+    visual_order_map: dict[str, int],
+    visual_rows: list[dict] | None = None,
+    result_url: str = "",
+    runtime_filter_snapshot: dict | None = None,
+    selected_filter_chips: list[str] | None = None,
+    unexpected_selected_filter_chips: list[str] | None = None,
+    visible_snapshot_file: str = "",
+    logger=None,
+) -> None:
+    try:
+        raw_html_file = output_dir / "search_result_page.html"
+        raw_html_file.write_text(html_content, encoding="utf-8")
+    except Exception as exc:
+        if logger:
+            logger.warning(f"[Search] Failed to save raw search HTML: {exc}")
+
+    rows = []
+    for adapter_index, candidate in enumerate(candidates, start=1):
+        offer_id = str(candidate.source_item_id or "")
+        rows.append({
+            "visual_index": visual_order_map.get(offer_id),
+            "adapter_index": adapter_index,
+            "offer_id": offer_id,
+            "title": candidate.title or "",
+            "price": candidate.price,
+            "shop_name": candidate.shop_name or "",
+            "item_url": candidate.item_url or "",
+        })
+    rows.sort(key=lambda row: (row["visual_index"] or row["adapter_index"], row["adapter_index"]))
+
+    try:
+        json_file = output_dir / "search_result_order_snapshot.json"
+        snapshot_context = {
+            "result_url": result_url,
+            "visible_snapshot_file": visible_snapshot_file,
+            "runtime_filter_stage": (runtime_filter_snapshot or {}).get("stage"),
+            "configured_enabled_filter_keys": (runtime_filter_snapshot or {}).get("configured_enabled_filter_keys") or [],
+            "applied_filter_keys": (runtime_filter_snapshot or {}).get("applied_filter_keys") or [],
+            "unapplied_filter_keys": (runtime_filter_snapshot or {}).get("unapplied_filter_keys") or [],
+            "selected_filter_chips": selected_filter_chips or [],
+            "unexpected_selected_filter_chips": unexpected_selected_filter_chips or [],
+        }
+        snapshot_payload = {
+            "context": snapshot_context,
+            "live_rows": visual_rows or [],
+            "rows": rows,
+        }
+        json_file.write_text(json.dumps(snapshot_payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        if logger:
+            logger.warning(f"[Search] Failed to save search order JSON snapshot: {exc}")
+
+    try:
+        live_table_rows = "\n".join(
+            "<tr>"
+            f"<td>{index}</td>"
+            f"<td>{html.escape(str((row or {}).get('offerId') or ''))}</td>"
+            f"<td>{html.escape(str((row or {}).get('title') or ''))}</td>"
+            f"<td>{html.escape(str((row or {}).get('text') or ''))}</td>"
+            "</tr>"
+            for index, row in enumerate(visual_rows or [], start=1)
+        )
+        table_rows = "\n".join(
+            "<tr>"
+            f"<td>{html.escape(str(row['visual_index'] or ''))}</td>"
+            f"<td>{html.escape(str(row['adapter_index']))}</td>"
+            f"<td>{html.escape(row['offer_id'])}</td>"
+            f"<td><a href=\"{html.escape(row['item_url'])}\" target=\"_blank\">{html.escape(row['title'])}</a></td>"
+            f"<td>{html.escape(str(row['price'] or ''))}</td>"
+            f"<td>{html.escape(row['shop_name'])}</td>"
+            "</tr>"
+            for row in rows
+        )
+        filter_context = runtime_filter_snapshot or {}
+        context_rows = "\n".join(
+            "<tr>"
+            f"<th>{html.escape(label)}</th>"
+            f"<td>{html.escape(str(value or ''))}</td>"
+            "</tr>"
+            for label, value in [
+                ("结果 URL", result_url),
+                ("可视截图", visible_snapshot_file),
+                ("筛选阶段", filter_context.get("stage")),
+                ("配置筛选项", ", ".join(filter_context.get("configured_enabled_filter_keys") or [])),
+                ("已应用筛选项", ", ".join(filter_context.get("applied_filter_keys") or [])),
+                ("未应用筛选项", ", ".join(filter_context.get("unapplied_filter_keys") or [])),
+                ("页面选中筛选 Chip", " | ".join(selected_filter_chips or [])),
+                ("异常选中筛选 Chip", " | ".join(unexpected_selected_filter_chips or [])),
+            ]
+        )
+        snapshot_html = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>1688 搜索结果解析快照</title>
+  <style>
+    body {{ font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 24px; color: #1f2937; }}
+    table {{ border-collapse: collapse; width: 100%; }}
+    th, td {{ border: 1px solid #d8dee9; padding: 8px 10px; text-align: left; vertical-align: top; }}
+    th {{ background: #f3f4f6; }}
+    tr:nth-child(even) {{ background: #fafafa; }}
+    a {{ color: #b83212; text-decoration: none; }}
+    .note {{ color: #6b7280; margin-bottom: 16px; }}
+    .context {{ margin-bottom: 24px; }}
+    .context th {{ width: 160px; }}
+  </style>
+</head>
+<body>
+  <h1>1688 搜索结果解析快照</h1>
+  <p class="note">这是系统从搜索页 HTML/DOM 中解析出的商品顺序。原始 HTML 保存在 search_result_page.html；实时可见 DOM 行用于校验浏览器当时的真实展示顺序。</p>
+  <h2>抓取上下文</h2>
+  <table class="context">
+    <tbody>{context_rows}</tbody>
+  </table>
+  <h2>实时可见 DOM 顺序</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>实时 index</th>
+        <th>Offer ID</th>
+        <th>标题</th>
+        <th>可见文本摘要</th>
+      </tr>
+    </thead>
+    <tbody>{live_table_rows}</tbody>
+  </table>
+  <h2>适配器解析结果</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>视觉 index</th>
+        <th>适配器 index</th>
+        <th>Offer ID</th>
+        <th>标题</th>
+        <th>价格</th>
+        <th>商家</th>
+      </tr>
+    </thead>
+    <tbody>{table_rows}</tbody>
+  </table>
+</body>
+</html>
+"""
+        snapshot_file = output_dir / "search_result_order_snapshot.html"
+        snapshot_file.write_text(snapshot_html, encoding="utf-8")
+        if logger:
+            logger.info(f"[Search] Saved search result snapshots to {output_dir}")
+    except Exception as exc:
+        if logger:
+            logger.warning(f"[Search] Failed to save search order HTML snapshot: {exc}")
 
 
 def _detail_offer_id_from_url(url: str) -> str:
@@ -2996,11 +3372,47 @@ async def _run(args):
                     logger.error(f"[Search] Recovery navigation failed in attempt {attempt}")
                 await asyncio.sleep(5)
                 
+        candidate_offer_ids = {str(c.source_item_id) for c in candidates if c.source_item_id}
+        visual_rows = await _extract_visual_offer_rows(page, candidate_offer_ids, logger=logger)
+        selected_filter_chips = await _extract_selected_filter_chip_texts(page, logger=logger)
+        unexpected_filter_chips = _unexpected_selected_filter_chips(selected_filter_chips, runtime_filter_snapshot)
+        visual_order_map = _build_visual_offer_order_map(candidates, visual_rows)
+        if visual_order_map:
+            logger.info(f"[Search] Extracted visual DOM order for {len(visual_order_map)} offers")
+        else:
+            logger.warning("[Search] Visual DOM order is unavailable; falling back to adapter candidate order")
+        visible_snapshot_file = ""
+        try:
+            visible_snapshot_path = output_dir / "search_result_visible_snapshot.png"
+            await page.screenshot(path=str(visible_snapshot_path), full_page=True)
+            visible_snapshot_file = visible_snapshot_path.name
+        except Exception as exc:
+            logger.warning(f"[Search] Failed to save visible search screenshot: {exc}")
+        _write_search_result_snapshots(
+            output_dir,
+            html_content,
+            candidates,
+            visual_order_map,
+            visual_rows=visual_rows,
+            result_url=page.url,
+            runtime_filter_snapshot=runtime_filter_snapshot,
+            selected_filter_chips=selected_filter_chips,
+            unexpected_selected_filter_chips=unexpected_filter_chips,
+            visible_snapshot_file=visible_snapshot_file,
+            logger=logger,
+        )
+        if unexpected_filter_chips:
+            await page.close()
+            raise Ali1688PayloadError(
+                "Unexpected selected 1688 filter chips detected: "
+                + " | ".join(unexpected_filter_chips)
+            )
+
         await page.close()
         
         import html as py_html
         parsed_candidates = []
-        for c in candidates:
+        for fallback_index, c in enumerate(candidates, start=1):
             dispatch_text = ""
             offer_id = c.source_item_id
             if offer_id:
@@ -3011,10 +3423,13 @@ async def _run(args):
             
             metrics = _extract_dispatch_metrics_from_text(dispatch_text)
             parsed_candidates.append({
+                "page_original_index": visual_order_map.get(str(offer_id), fallback_index),
                 "offer_id": offer_id,
                 "title": c.title,
                 "item_url": c.item_url,
                 "price": c.price,
+                "search_card_price": c.price,
+                "search_card_image_url": (getattr(c, "images", None) or [None])[0],
                 "pickup_48h_text": metrics["pickup_48h_text"],
                 "pickup_24h_text": metrics["pickup_24h_text"],
                 "month_dispatch_text": metrics["month_dispatch_text"],
@@ -3045,6 +3460,8 @@ async def _run(args):
                 "title": c["title"],
                 "item_url": c["item_url"],
                 "min_price": c["price"],
+                "search_card_price": c.get("search_card_price"),
+                "search_card_image_url": c.get("search_card_image_url"),
                 "pickup_48h_text": c.get("pickup_48h_text", ""),
                 "pickup_24h_text": c.get("pickup_24h_text", ""),
                 "month_dispatch_text": c.get("month_dispatch_text", ""),
@@ -3054,6 +3471,7 @@ async def _run(args):
                 "waybill_support_text": c.get("waybill_support_text", ""),
                 "settled_years_text": c.get("settled_years_text", ""),
                 "company_name": c.get("company_name", ""),
+                "page_original_index": c.get("page_original_index", 0),
                 "seven_day_dispatch_count": c.get("seven_day_dispatch_count", 0),
                 "month_dispatch_count": c.get("month_dispatch_count", 0),
                 "listing_count": c.get("listing_count", 0),
