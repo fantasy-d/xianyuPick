@@ -4753,6 +4753,9 @@ const App = () => {
     const [batchResultMap, setBatchResultMap] = useState({});
     const [confirmDialog, setConfirmDialog] = useState(null);
     const [sourceChannelFilter, setSourceChannelFilter] = useState("all");
+    const [archivePage, setArchivePage] = useState(1);
+    const [resultPage, setResultPage] = useState(1);
+    const [resultTaskPage, setResultTaskPage] = useState(1);
 
     // 全局双主题状态机
     const [theme, setTheme] = useState(() => localStorage.getItem("xianyu-theme") || "light");
@@ -5720,7 +5723,8 @@ const App = () => {
         }
         const parts = [];
         if (summary.configured.length > 0) {
-            parts.push(`已启用 ${summary.configured.length}`);
+            const labels = summary.configured.map(key => getChannelFilterLabel(key));
+            parts.push(`筛选项：${labels.join('、')}`);
         }
         return parts.join(' · ');
     };
@@ -5791,6 +5795,7 @@ const App = () => {
         const resp = await fetch(`/api/task_details/${task.id}`);
         const data = await resp.json();
         setDetailedItems(data.details || []);
+        setResultPage(1);
         setSelectedTask(task);
         setActiveView("results");
     };
@@ -6173,6 +6178,13 @@ const App = () => {
                  view === "tasks" ? (() => {
                     const activeTasks = tasks.filter(t => t.status !== '已完成').sort((a, b) => a.created_at.localeCompare(b.created_at));
                     const completedTasks = tasks.filter(t => t.status === '已完成');
+                     const itemsPerPage = 3;
+                     const totalPages = Math.ceil(completedTasks.length / itemsPerPage);
+                     const currentArchivePage = Math.max(1, Math.min(archivePage, totalPages || 1));
+                     const paginatedCompletedTasks = completedTasks.slice(
+                         (currentArchivePage - 1) * itemsPerPage,
+                         currentArchivePage * itemsPerPage
+                     )
                     return (
                         <div className="view-content">
                             <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
@@ -6258,57 +6270,61 @@ const App = () => {
                                         已归档历史任务
                                     </h3>
                                     <div className="space-y-4">
-                                        {completedTasks.map(t => (
+                                        {paginatedCompletedTasks.map(t => (
                                             <div 
-                                                className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 relative overflow-hidden ambient-shadow hover:border-primary transition-colors cursor-pointer group"
+                                                className="bg-surface-container-lowest border border-border-hairline rounded-xl pt-4 pb-4 px-5 relative overflow-hidden ambient-shadow hover:border-primary transition-colors cursor-pointer group"
                                                 key={t.id}
                                                 onClick={() => loadTaskResults(t)}
                                             >
-                                                <div className="flex justify-between items-start mb-2">
+                                                <div className="flex justify-between items-start">
                                                     <div>
                                                         <div className="font-bold text-on-surface text-base group-hover:text-primary transition-colors">{t.keyword}</div>
-                                                        <div className="flex items-center gap-2 mt-1.5">
-                                                            <span className="text-[10px] text-secondary font-mono">TASK_ID: {t.id}</span>
+                                                        <div className="flex items-center gap-2 mt-3">
+                                                            <span className="text-xs text-secondary font-mono">TASK_ID: {t.id}</span>
                                                             {renderTaskTypeBadge(t.input_type)}
                                                         </div>
                                                     </div>
-                                                    <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-success/10 text-success border border-success/20">
+                                                    <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-success/10 text-success border border-success/20">
                                                         已完成
                                                     </span>
                                                 </div>
 
-                                                <p className="text-xs text-secondary mt-2">调研时间: {t.created_at}</p>
-
-                                                {getTaskChannelSummaries(t).length > 0 && (
-                                                    <div className="flex flex-wrap gap-2 mt-3 min-h-[24px]">
-                                                        {getTaskChannelSummaries(t).map(channel => (
-                                                            <div key={`archive-${t.id}-${channel.channel_id}`} className="flex flex-col gap-1">
-                                                                <span
-                                                                    className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px] font-semibold"
-                                                                >
-                                                                    {channel.channel_label || channel.channel_id}
-                                                                    {channel.source_count > 0 ? ` · ${channel.source_count}` : ''}
-                                                                </span>
-                                                                {formatTaskChannelSummaryText(channel) && (
-                                                                    <span className="text-[10px] text-secondary px-1">
-                                                                        {formatTaskChannelSummaryText(channel)}
+                                                <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-secondary mt-2">
+                                                    <span>调研时间: {t.created_at}</span>
+                                                    {getTaskChannelSummaries(t).map(channel => {
+                                                        const summaryText = formatTaskChannelSummaryText(channel);
+                                                        return (
+                                                            <React.Fragment key={`archive-summary-${t.id}-${channel.channel_id}`}>
+                                                                <span className="text-border-hairline/60">|</span>
+                                                                <React.Fragment>
+                                                                    <span className="px-1.5 py-0.5 rounded bg-primary/8 text-primary font-semibold text-xs">
+                                                                        {channel.channel_label || channel.channel_id}
                                                                     </span>
-                                                                )}
-                                                            </div>
-                                                        ))}
-                                                    </div>
-                                                )}
+                                                                    {summaryText && (
+                                                                        <React.Fragment>
+                                                                            <span className="text-border-hairline/60">|</span>
+                                                                            <span>{summaryText}</span>
+                                                                        </React.Fragment>
+                                                                    )}
+                                                                </React.Fragment>
+                                                            </React.Fragment>
+                                                        );
+                                                    })}
+                                                </div>
 
-                                                <div className="flex justify-between items-center border-t border-border-hairline/60 pt-3 mt-4">
-                                                    <div className="flex items-center gap-3">
-                                                            <span className="text-[10px] text-secondary font-mono">V.{t.version}</span>
-                                                            {t.total_tokens > 0 && (
-                                                                <span className="inline-flex items-center gap-0.5 text-[10px] text-success/80 dark:text-success/90 font-mono">
-                                                                    <span className="material-symbols-outlined text-[11px] leading-none">generating_tokens</span>
-                                                                    AI Tokens: {(t.total_tokens || 0).toLocaleString()}
+                                                <div className="flex justify-between items-center mt-2.5 pt-2.5 border-t border-border-hairline/60">
+                                                    <div className="flex items-center gap-2.5 text-xs text-secondary">
+                                                        <span className="font-mono">V.{t.version}</span>
+                                                        {t.total_tokens > 0 && (
+                                                            <>
+                                                                <span className="text-border-hairline/60">|</span>
+                                                                <span className="inline-flex items-center gap-0.5">
+                                                                    <span className="material-symbols-outlined text-[13px] leading-none text-success">generating_tokens</span>
+                                                                    Tokens: {(t.total_tokens || 0).toLocaleString()}
                                                                 </span>
-                                                            )}
-                                                        </div>
+                                                            </>
+                                                        )}
+                                                    </div>
                                                     <div className="flex gap-2">
                                                         <button 
                                                             className="px-3 py-1 bg-surface-container border border-border-hairline hover:border-primary text-secondary hover:text-primary rounded text-xs font-semibold transition-colors" 
@@ -6317,7 +6333,7 @@ const App = () => {
                                                             重新扫描
                                                         </button>
                                                         <button 
-                                                            className="px-3 py-1 bg-error/10 border border-error/20 hover:bg-error hover:text-white text-error rounded text-xs font-semibold transition-all opacity-0 group-hover:opacity-100" 
+                                                            className="px-3 py-1 bg-error/10 border border-error/20 hover:bg-error hover:text-white text-error rounded text-xs font-semibold transition-all" 
                                                             onClick={(e) => { e.stopPropagation(); deleteTask(t.id); }}
                                                         >
                                                             逻辑删除
@@ -6326,6 +6342,28 @@ const App = () => {
                                                 </div>
                                             </div>
                                         ))}
+                                        
+                                        {totalPages > 1 && (
+                                            <div className="flex justify-center items-center gap-2 mt-4 pt-3 border-t border-border-hairline/60">
+                                                <button
+                                                    className="w-7 h-7 flex items-center justify-center rounded border border-border-hairline text-secondary hover:bg-surface-container-low transition-colors disabled:opacity-40"
+                                                    disabled={currentArchivePage <= 1}
+                                                    onClick={() => setArchivePage(currentArchivePage - 1)}
+                                                >
+                                                    <span className="material-symbols-outlined text-[16px]">chevron_left</span>
+                                                </button>
+                                                <span className="font-sans text-[11px] text-secondary font-semibold">
+                                                    页码 {currentArchivePage} / {totalPages}
+                                                </span>
+                                                <button
+                                                    className="w-7 h-7 flex items-center justify-center rounded border border-border-hairline text-secondary hover:bg-surface-container-low transition-colors disabled:opacity-40"
+                                                    disabled={currentArchivePage >= totalPages}
+                                                    onClick={() => setArchivePage(currentArchivePage + 1)}
+                                                >
+                                                    <span className="material-symbols-outlined text-[16px]">chevron_right</span>
+                                                </button>
+                                            </div>
+                                        )}
                                         {completedTasks.length === 0 && (
                                             <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-12 text-center text-xs text-secondary">
                                                 当前暂无已归档的历史调研记录
@@ -6338,115 +6376,207 @@ const App = () => {
                     );
                  })() :
                  view === "results" ? ( 
-                     selectedTask ? ( 
-                         <div> 
-                             <header className="mb-6 flex justify-between items-end">
-                                 <button onClick={() => setSelectedTask(null)} className="text-secondary hover:text-primary text-xs font-bold flex items-center gap-1">
-                                     <span className="material-symbols-outlined text-[16px]">arrow_back</span>
-                                     返回决策资产列表
-                                 </button>
-                                 <button 
-                                     className="px-4 py-2 bg-primary hover:bg-primary-container text-white font-sans text-xs font-semibold rounded-lg shadow-sm transition-colors flex items-center gap-1"
-                                     onClick={() => window.open(`/api/download/${selectedTask.id}`)}
-                                 >
-                                     <span className="material-symbols-outlined text-[16px]">download</span>
-                                     导出分析 Excel
-                                 </button>
-                             </header>
-
-                             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6">
-                                 {detailedItems.length > 0 ? detailedItems.map((group) => (
-                                     <div 
-                                         className="bg-surface-container-lowest border border-border-hairline rounded-xl overflow-hidden cursor-pointer hover:-translate-y-1 hover:shadow-lg transition-all relative group" 
-                                         key={group.rank} 
-                                         onClick={() => enterItemDetail(group)}
+                     selectedTask ? (() => {
+                         const itemsPerPage = 9;
+                         const totalResultPages = Math.ceil(detailedItems.length / itemsPerPage);
+                         const currentResultPage = Math.max(1, Math.min(resultPage, totalResultPages || 1));
+                         const paginatedDetailedItems = detailedItems.slice(
+                             (currentResultPage - 1) * itemsPerPage,
+                             currentResultPage * itemsPerPage
+                         );
+                         return (
+                             <div> 
+                                 <header className="mb-6 flex justify-between items-end">
+                                     <button onClick={() => setSelectedTask(null)} className="text-secondary hover:text-primary text-xs font-bold flex items-center gap-1">
+                                         <span className="material-symbols-outlined text-[16px]">arrow_back</span>
+                                         返回决策资产列表
+                                     </button>
+                                     <button 
+                                         className="px-4 py-2 bg-primary hover:bg-primary-container text-white font-sans text-xs font-semibold rounded-lg shadow-sm transition-colors flex items-center gap-1"
+                                         onClick={() => window.open(`/api/download/${selectedTask.id}`)}
                                      >
-                                         <div className="relative h-56 bg-surface-container-low border-b border-border-hairline overflow-hidden">
-                                             <img 
-                                                 src={group.xianyu_item?.image_url} 
-                                                 referrerPolicy="no-referrer" 
-                                                 className="w-full h-full object-cover transition-transform group-hover:scale-105 duration-300"
-                                             />
-                                             <div className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded bg-primary/90 text-white font-mono text-[10px] font-black">
-                                                 RANK #{group.rank}
+                                         <span className="material-symbols-outlined text-[16px]">download</span>
+                                         导出分析 Excel
+                                     </button>
+                                 </header>
+
+                                 <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-6">
+                                     {paginatedDetailedItems.length > 0 ? paginatedDetailedItems.map((group) => (
+                                         <div 
+                                             className="bg-surface-container-lowest border border-border-hairline rounded-xl overflow-hidden cursor-pointer hover:-translate-y-1 hover:shadow-lg transition-all relative group" 
+                                             key={group.rank} 
+                                             onClick={() => enterItemDetail(group)}
+                                         >
+                                             <div className="relative h-56 bg-surface-container-low border-b border-border-hairline overflow-hidden">
+                                                 <img 
+                                                     src={group.xianyu_item?.image_url} 
+                                                     referrerPolicy="no-referrer" 
+                                                     className="w-full h-full object-cover transition-transform group-hover:scale-105 duration-300"
+                                                 />
+                                                 <div className="absolute top-2.5 left-2.5 px-2 py-0.5 rounded bg-primary/90 text-white font-mono text-[10px] font-black">
+                                                     RANK #{group.rank}
+                                                 </div>
                                              </div>
-	                                         </div>
-                                         
-                                         <div className="p-4">
-                                             <h3 className="text-xs font-bold text-on-surface line-clamp-2 h-9 leading-relaxed">
-                                                 {group.xianyu_item?.title}
-                                             </h3>
-                                             <div className="flex flex-wrap gap-1.5 mt-3 min-h-[24px]">
-	                                                 {getItemCardChannels(group, selectedTask).map(channel => (
-                                                     <span
-                                                         key={`${group.rank}-${channel.channel_id}`}
-                                                         className="px-2 py-0.5 rounded-full bg-surface-container text-secondary border border-border-hairline text-[10px] font-semibold"
-                                                     >
-                                                         {formatChannelCountLabel(channel)}
-	                                                     </span>
-	                                                 ))}
-	                                             </div>
-	                                             
-	                                             <div className="flex justify-between items-center gap-4 mt-4 border-t border-border-hairline/60 pt-3 pb-3">
-	                                                 <span className="text-base font-black text-primary">¥{group.xianyu_item?.price}</span>
-	                                                 <span className="text-[10px] text-secondary font-semibold bg-surface-container px-2 py-0.5 rounded-full border border-border-hairline">
-	                                                     {group.sources?.length || 0} 个比价货源
-                                                 </span>
+                                             
+                                             <div className="pt-4 pb-3.5 px-4">
+                                                 <h3 className="text-xs font-bold text-on-surface line-clamp-2 h-9 leading-relaxed">
+                                                     {group.xianyu_item?.title}
+                                                 </h3>
+                                                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-secondary mt-2.5">
+                                                     {getItemCardChannels(group, selectedTask).map((channel, cIdx) => {
+                                                         const summaryText = formatTaskChannelSummaryText(channel);
+                                                         return (
+                                                             <React.Fragment key={`${group.rank}-${channel.channel_id}`}>
+                                                                 {cIdx > 0 && <span className="text-border-hairline/60">|</span>}
+                                                                 <span className="px-1.5 py-0.5 rounded bg-primary/8 text-primary font-semibold text-xs whitespace-nowrap">
+                                                                     {formatChannelCountLabel(channel)}
+                                                                 </span>
+                                                                 {summaryText && (
+                                                                     <React.Fragment>
+                                                                         <span className="text-border-hairline/60">|</span>
+                                                                         <span>{summaryText}</span>
+                                                                     </React.Fragment>
+                                                                 )}
+                                                             </React.Fragment>
+                                                         );
+                                                     })}
+                                                 </div>
+                                                 
+                                                 <div className="flex justify-between items-center gap-4 mt-2.5 border-t border-border-hairline/60 pt-2.5">
+                                                     <span className="text-base font-black text-primary">¥{group.xianyu_item?.price}</span>
+                                                     <span className="text-xs text-secondary font-semibold bg-surface-container px-2 py-0.5 rounded-full">
+                                                         {group.sources?.length || 0} 个比价货源
+                                                     </span>
+                                                 </div>
                                              </div>
+                                             <div className="id-corner">DB_ID: {group.xianyu_item?.db_id}</div>
                                          </div>
-                                         <div className="id-corner">DB_ID: {group.xianyu_item?.db_id}</div>
-                                     </div>
-                                 )) : (
-                                     <div className="col-span-full bg-surface-container-lowest border border-border-hairline rounded-xl py-24 text-center">
-                                         <p className="text-secondary text-sm">该分析任务尚未产生可匹配的比价数据。</p>
+                                     )) : (
+                                         <div className="col-span-full bg-surface-container-lowest border border-border-hairline rounded-xl py-24 text-center">
+                                             <p className="text-secondary text-sm">该分析任务尚未产生可匹配的比价数据。</p>
+                                         </div>
+                                     )}
+                                 </div>
+
+                                 {totalResultPages > 1 && (
+                                     <div className="flex justify-center items-center gap-4 mt-8 pt-4 border-t border-border-hairline/60">
+                                         <button
+                                             className="w-8 h-8 flex items-center justify-center rounded-lg border border-border-hairline bg-surface-container-lowest text-secondary hover:text-primary hover:border-primary transition-all disabled:opacity-40"
+                                             disabled={currentResultPage <= 1}
+                                             onClick={() => setResultPage(currentResultPage - 1)}
+                                         >
+                                             <span className="material-symbols-outlined text-[18px]">chevron_left</span>
+                                         </button>
+                                         <span className="font-sans text-xs text-secondary font-semibold">
+                                             第 {currentResultPage} / {totalResultPages} 页（共{detailedItems.length}个）
+                                         </span>
+                                         <button
+                                             className="w-8 h-8 flex items-center justify-center rounded-lg border border-border-hairline bg-surface-container-lowest text-secondary hover:text-primary hover:border-primary transition-all disabled:opacity-40"
+                                             disabled={currentResultPage >= totalResultPages}
+                                             onClick={() => setResultPage(currentResultPage + 1)}
+                                         >
+                                             <span className="material-symbols-outlined text-[18px]">chevron_right</span>
+                                         </button>
                                      </div>
                                  )}
                              </div>
-                         </div> 
-                     ) : (
-                         <div>
-                             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
-                                 {completedTasks.map(t => (
-                                     <div 
-                                         className="bg-surface-container-lowest border border-border-hairline rounded-xl p-6 relative overflow-hidden ambient-shadow hover:border-primary transition-all duration-150 cursor-pointer group" 
-                                         key={t.id} 
-                                         onClick={() => loadTaskResults(t)}
-                                     >
-                                         <div className="flex flex-col justify-between h-28">
-                                             <div className="text-center">
-                                                 <div className="font-black text-on-surface text-lg group-hover:text-primary transition-colors">{t.keyword}</div>
-                                                 <div className="text-xs text-secondary mt-2">调研时间: {t.created_at}</div>
-                                             </div>
+                         );
+                     })() : (
+                         (() => {
+                             const tasksPerPage = 9;
+                             const totalResultTaskPages = Math.ceil(completedTasks.length / tasksPerPage);
+                             const currentResultTaskPage = Math.max(1, Math.min(resultTaskPage, totalResultTaskPages || 1));
+                             const paginatedCompletedTasks = completedTasks.slice(
+                                 (currentResultTaskPage - 1) * tasksPerPage,
+                                 currentResultTaskPage * tasksPerPage
+                             );
+                             return (
+                                 <div>
+                                     <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6">
+                                         {paginatedCompletedTasks.map(t => (
+                                             <div 
+                                                 className="bg-surface-container-lowest border border-border-hairline rounded-xl pt-4 pb-4 px-5 relative overflow-hidden ambient-shadow hover:border-primary transition-colors cursor-pointer group" 
+                                                 key={t.id} 
+                                                 onClick={() => loadTaskResults(t)}
+                                             >
+                                                 <div className="flex justify-between items-start">
+                                                     <div>
+                                                         <div className="font-bold text-on-surface text-base group-hover:text-primary transition-colors">{t.keyword}</div>
+                                                         <div className="flex items-center gap-2 mt-2.5">
+                                                             <span className="text-xs text-secondary font-mono">TASK_ID: {t.id}</span>
+                                                             {renderTaskTypeBadge(t.input_type)}
+                                                         </div>
+                                                     </div>
+                                                     <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-success/10 text-success border border-success/20">
+                                                         已完成
+                                                     </span>
+                                                 </div>
 
-                                            {getTaskChannelSummaries(t).length > 0 && (
-                                                <div className="flex flex-wrap justify-center gap-2 mt-3 min-h-[24px]">
-                                                    {getTaskChannelSummaries(t).map(channel => (
-                                                        <div key={`results-${t.id}-${channel.channel_id}`} className="flex flex-col items-center gap-1">
-                                                            <span
-                                                                className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px] font-semibold"
-                                                            >
-                                                                {channel.channel_label || channel.channel_id}
-                                                                {channel.source_count > 0 ? ` · ${channel.source_count}` : ''}
-                                                            </span>
-                                                            {formatTaskChannelSummaryText(channel) && (
-                                                                <span className="text-[10px] text-secondary">
-                                                                    {formatTaskChannelSummaryText(channel)}
-                                                                </span>
-                                                            )}
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            )}
-                                             
-                                             <div className="flex justify-between items-end border-t border-border-hairline/60 pt-2 font-mono text-[9px] text-secondary/60 mt-3">
-                                                 <span>V.{t.version}</span>
-                                                 <span>ID: {t.id}</span>
+                                                 <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-secondary mt-2.5">
+                                                     <span>调研时间: {t.created_at}</span>
+                                                     {getTaskChannelSummaries(t).map(channel => {
+                                                         const summaryText = formatTaskChannelSummaryText(channel);
+                                                         return (
+                                                             <React.Fragment key={`results-summary-${t.id}-${channel.channel_id}`}>
+                                                                 <span className="text-border-hairline/60">|</span>
+                                                                 <React.Fragment>
+                                                                     <span className="px-1.5 py-0.5 rounded bg-primary/8 text-primary font-semibold text-xs">
+                                                                         {channel.channel_label || channel.channel_id}
+                                                                     </span>
+                                                                     {summaryText && (
+                                                                         <React.Fragment>
+                                                                             <span className="text-border-hairline/60">|</span>
+                                                                             <span>{summaryText}</span>
+                                                                         </React.Fragment>
+                                                                     )}
+                                                                 </React.Fragment>
+                                                             </React.Fragment>
+                                                         );
+                                                     })}
+                                                 </div>
+
+                                                 <div className="flex justify-between items-center mt-2.5 pt-2.5 border-t border-border-hairline/60">
+                                                     <div className="flex items-center gap-2.5 text-xs text-secondary">
+                                                         <span className="font-mono">V.{t.version}</span>
+                                                         {t.total_tokens > 0 && (
+                                                             <React.Fragment>
+                                                                 <span className="text-border-hairline/60">|</span>
+                                                                 <span className="inline-flex items-center gap-0.5">
+                                                                     <span className="material-symbols-outlined text-[13px] leading-none text-success">generating_tokens</span>
+                                                                     Tokens: {(t.total_tokens || 0).toLocaleString()}
+                                                                 </span>
+                                                             </React.Fragment>
+                                                         )}
+                                                     </div>
+                                                 </div>
                                              </div>
-                                         </div>
+                                         ))}
                                      </div>
-                                 ))}
-                             </div>
-                         </div>
+
+                                     {totalResultTaskPages > 1 && (
+                                         <div className="flex justify-center items-center gap-4 mt-8 pt-4 border-t border-border-hairline/60">
+                                             <button
+                                                 className="w-8 h-8 flex items-center justify-center rounded-lg border border-border-hairline bg-surface-container-lowest text-secondary hover:text-primary hover:border-primary transition-all disabled:opacity-40"
+                                                 disabled={currentResultTaskPage <= 1}
+                                                 onClick={() => setResultTaskPage(currentResultTaskPage - 1)}
+                                             >
+                                                 <span className="material-symbols-outlined text-[18px]">chevron_left</span>
+                                             </button>
+                                             <span className="font-sans text-xs text-secondary font-semibold">
+                                                 第 {currentResultTaskPage} / {totalResultTaskPages} 页（共{completedTasks.length}个）
+                                             </span>
+                                             <button
+                                                 className="w-8 h-8 flex items-center justify-center rounded-lg border border-border-hairline bg-surface-container-lowest text-secondary hover:text-primary hover:border-primary transition-all disabled:opacity-40"
+                                                 disabled={currentResultTaskPage >= totalResultTaskPages}
+                                                 onClick={() => setResultTaskPage(currentResultTaskPage + 1)}
+                                             >
+                                                 <span className="material-symbols-outlined text-[18px]">chevron_right</span>
+                                             </button>
+                                         </div>
+                                     )}
+                                 </div>
+                             );
+                         })()
                      ) 
                  ) :
                  view === "item_detail" && selectedItem ? ( 
@@ -6502,7 +6632,7 @@ const App = () => {
                                          {getItemUsedChannels(selectedItem).map(channel => (
                                              <span
                                                  key={`detail-${channel.channel_id}`}
-                                                 className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15 text-[10px] font-semibold"
+                                                 className="px-2 py-0.5 rounded-full bg-primary/8 text-primary text-[10px] font-semibold"
                                              >
                                                  {channel.channel_label || channel.channel_id}
                                              </span>
