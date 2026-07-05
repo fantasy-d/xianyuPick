@@ -153,6 +153,130 @@ def _normalize_openapi_product_status(detail_data: dict[str, Any]) -> dict[str, 
     }
 
 
+def _format_unix_time(value) -> str:
+    try:
+        timestamp = int(value or 0)
+        if timestamp <= 0:
+            return ""
+        return datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return ""
+
+
+def _format_cent_amount(value) -> str:
+    try:
+        return f"¥{float(value or 0) / 100:.2f}"
+    except Exception:
+        return "¥0.00"
+
+
+def _parse_cent_amount_from_request(req: dict, cent_key: str, yuan_key: str, *, default: int | None = None) -> int | None:
+    if not isinstance(req, dict):
+        return default
+    raw_cent = req.get(cent_key)
+    if raw_cent not in (None, ""):
+        try:
+            return int(raw_cent)
+        except Exception:
+            return None
+    raw_yuan = req.get(yuan_key)
+    if raw_yuan in (None, ""):
+        return default
+    try:
+        return int(round(float(raw_yuan) * 100))
+    except Exception:
+        return None
+
+
+OPENAPI_ORDER_STATUS_LABELS = {
+    11: "待付款",
+    12: "待发货",
+    21: "已发货",
+    22: "已完成",
+    23: "已退款",
+    24: "已关闭",
+}
+
+
+def _format_openapi_order_status(value) -> str:
+    try:
+        status = int(value)
+    except Exception:
+        return "未知状态"
+    return OPENAPI_ORDER_STATUS_LABELS.get(status, f"状态 {status}")
+
+
+def _normalize_openapi_order(order_data: dict[str, Any] | None, *, include_raw: bool = False) -> dict[str, Any]:
+    order = order_data if isinstance(order_data, dict) else {}
+    goods = order.get("goods") if isinstance(order.get("goods"), dict) else {}
+    images = goods.get("images") if isinstance(goods.get("images"), list) else []
+    address_parts = [
+        order.get("prov_name"),
+        order.get("city_name"),
+        order.get("area_name"),
+        order.get("town_name"),
+        order.get("address"),
+    ]
+    normalized = {
+        "order_no": str(order.get("order_no") or ""),
+        "order_status": order.get("order_status"),
+        "order_status_label": _format_openapi_order_status(order.get("order_status")),
+        "refund_status": order.get("refund_status"),
+        "order_time": order.get("order_time"),
+        "order_time_text": _format_unix_time(order.get("order_time")),
+        "pay_time_text": _format_unix_time(order.get("pay_time")),
+        "consign_time_text": _format_unix_time(order.get("consign_time")),
+        "confirm_time_text": _format_unix_time(order.get("confirm_time")),
+        "cancel_time_text": _format_unix_time(order.get("cancel_time")),
+        "update_time_text": _format_unix_time(order.get("update_time")),
+        "total_amount": order.get("total_amount"),
+        "total_amount_text": _format_cent_amount(order.get("total_amount")),
+        "pay_amount": order.get("pay_amount"),
+        "pay_amount_text": _format_cent_amount(order.get("pay_amount")),
+        "express_fee": order.get("express_fee"),
+        "express_fee_text": _format_cent_amount(order.get("express_fee")),
+        "buyer_nick": str(order.get("buyer_nick") or ""),
+        "seller_name": str(order.get("seller_name") or ""),
+        "seller_remark": str(order.get("seller_remark") or ""),
+        "receiver_name": str(order.get("receiver_name") or ""),
+        "receiver_mobile": str(order.get("receiver_mobile") or ""),
+        "receiver_address": "".join(str(part or "") for part in address_parts),
+        "waybill_no": str(order.get("waybill_no") or ""),
+        "express_code": str(order.get("express_code") or ""),
+        "express_name": str(order.get("express_name") or ""),
+        "goods": {
+            "title": str(goods.get("title") or ""),
+            "quantity": goods.get("quantity"),
+            "price": goods.get("price"),
+            "price_text": _format_cent_amount(goods.get("price")),
+            "product_id": str(goods.get("product_id") or ""),
+            "item_id": str(goods.get("item_id") or ""),
+            "outer_id": str(goods.get("outer_id") or ""),
+            "sku_id": str(goods.get("sku_id") or ""),
+            "sku_text": str(goods.get("sku_text") or ""),
+            "image": str(images[0]) if images else "",
+            "images": images,
+            "service_support": str(goods.get("service_support") or ""),
+        },
+    }
+    if include_raw:
+        normalized["raw"] = order
+    return normalized
+
+
+def _extract_openapi_order_list(data: dict[str, Any]) -> tuple[list[dict[str, Any]], int]:
+    payload = data if isinstance(data, dict) else {}
+    raw_items = payload.get("list") or payload.get("orders") or payload.get("items") or []
+    if not isinstance(raw_items, list):
+        raw_items = []
+    total = payload.get("total") or payload.get("total_count") or payload.get("count") or len(raw_items)
+    try:
+        total = int(total)
+    except Exception:
+        total = len(raw_items)
+    return [_normalize_openapi_order(item) for item in raw_items], total
+
+
 def _ordered_unique_string_list(values) -> list[str]:
     if not isinstance(values, list):
         return []
@@ -2498,6 +2622,111 @@ def get_xianyu_products(
         "page": page,
         "limit": limit
     }
+
+@app.get("/api/orders")
+def get_openapi_orders(
+    page: int = 1,
+    limit: int = 20,
+    order_status: str = "",
+    account_id: str = "",
+):
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    try:
+        safe_page = max(1, int(page or 1))
+        safe_limit = min(max(1, int(limit or 20)), 100)
+        publisher = PublisherV3(account_id=get_request_openapi_account_id({"account_id": account_id}))
+        result = publisher.query_order_list(
+            page_no=safe_page,
+            page_size=safe_limit,
+            order_status=order_status,
+        )
+        if result.get("status") != "success":
+            return {
+                "status": "failed",
+                "msg": result.get("msg") or "订单列表查询失败",
+                "items": [],
+                "total": 0,
+                "page": safe_page,
+                "limit": safe_limit,
+            }
+        items, total = _extract_openapi_order_list(result.get("data") or {})
+        return {
+            "status": "success",
+            "items": items,
+            "total": total,
+            "page": safe_page,
+            "limit": safe_limit,
+        }
+    except Exception as e:
+        logger.error(f"OpenAPI order list failed: {e}")
+        return {"status": "failed", "msg": f"订单列表查询异常: {e}", "items": [], "total": 0, "page": page, "limit": limit}
+
+
+@app.get("/api/orders/{order_no}")
+def get_openapi_order_detail(order_no: str, account_id: str = ""):
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    try:
+        publisher = PublisherV3(account_id=get_request_openapi_account_id({"account_id": account_id}))
+        result = publisher.query_order_detail(order_no)
+        if result.get("status") != "success":
+            return {"status": "failed", "msg": result.get("msg") or "订单详情查询失败"}
+        return {
+            "status": "success",
+            "order": _normalize_openapi_order(result.get("data") or {}, include_raw=True),
+        }
+    except Exception as e:
+        logger.error(f"OpenAPI order detail failed for {order_no}: {e}")
+        return {"status": "failed", "msg": f"订单详情查询异常: {e}"}
+
+
+@app.post("/api/orders/{order_no}/ship")
+def ship_openapi_order(order_no: str, req: dict = {}):
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    try:
+        payload = dict(req or {})
+        payload["order_no"] = str(order_no or "").strip()
+        publisher = PublisherV3(account_id=get_request_openapi_account_id(payload))
+        detail_result = publisher.query_order_detail(order_no)
+        if detail_result.get("status") != "success":
+            return {"status": "failed", "msg": detail_result.get("msg") or "订单详情查询失败，无法确认是否可发货"}
+        order_status = (detail_result.get("data") or {}).get("order_status")
+        if int(order_status or 0) != 12:
+            return {"status": "failed", "msg": f"当前订单状态为 {_format_openapi_order_status(order_status)}，只有待发货订单才能物流发货"}
+        result = publisher.ship_order(payload)
+        if result.get("status") != "success":
+            return {"status": "failed", "msg": result.get("msg") or "订单物流发货失败"}
+        return {"status": "success", "msg": "订单物流发货成功", "raw": result.get("raw")}
+    except Exception as e:
+        logger.error(f"OpenAPI order ship failed for {order_no}: {e}")
+        return {"status": "failed", "msg": f"订单物流发货异常: {e}"}
+
+
+@app.post("/api/orders/{order_no}/modify_price")
+def modify_openapi_order_price(order_no: str, req: dict = {}):
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    try:
+        payload = dict(req or {})
+        order_price = _parse_cent_amount_from_request(payload, "order_price", "order_price_yuan")
+        express_fee = _parse_cent_amount_from_request(payload, "express_fee", "express_fee_yuan", default=0)
+        if order_price is None:
+            return {"status": "failed", "msg": "请填写有效的订单价格"}
+        if express_fee is None:
+            return {"status": "failed", "msg": "请填写有效的运费"}
+        publisher = PublisherV3(account_id=get_request_openapi_account_id(payload))
+        detail_result = publisher.query_order_detail(order_no)
+        if detail_result.get("status") != "success":
+            return {"status": "failed", "msg": detail_result.get("msg") or "订单详情查询失败，无法确认是否可改价"}
+        order_status = (detail_result.get("data") or {}).get("order_status")
+        if int(order_status or 0) != 11:
+            return {"status": "failed", "msg": f"当前订单状态为 {_format_openapi_order_status(order_status)}，只有待付款订单才能修改价格"}
+        result = publisher.modify_order_price(order_no, order_price, express_fee)
+        if result.get("status") != "success":
+            return {"status": "failed", "msg": result.get("msg") or "订单修改价格失败"}
+        return {"status": "success", "msg": "订单修改价格成功", "raw": result.get("raw")}
+    except Exception as e:
+        logger.error(f"OpenAPI order modify price failed for {order_no}: {e}")
+        return {"status": "failed", "msg": f"订单修改价格异常: {e}"}
+
 
 @app.get("/api/tasks/{task_id}/logs", response_class=PlainTextResponse)
 def get_logs(task_id: str):

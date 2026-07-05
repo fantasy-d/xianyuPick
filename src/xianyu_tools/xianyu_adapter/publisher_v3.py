@@ -40,6 +40,119 @@ class PublisherV3:
             self.app_secret = str(self.app_secret).strip()
         self.defaults = self.conf.get("default_config", {})
 
+    def _post_openapi(self, path: str, payload: Dict[str, Any], label: str, timeout: int = 20) -> Dict[str, Any]:
+        timestamp = int(time.time())
+        auth = APISigner.sign_v3_protocol(payload, self.appid, self.app_secret, timestamp)
+        target_url = f"{self.base_url}{path}"
+        params = {
+            "appid": auth["app_key"],
+            "timestamp": auth["timestamp"],
+            "sign": auth["sign"],
+        }
+        compact_body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
+        headers = {"Content-Type": "application/json"}
+
+        try:
+            resp = requests.post(target_url, params=params, data=compact_body.encode("utf-8"), headers=headers, timeout=timeout)
+            try:
+                result = resp.json()
+            except Exception:
+                return {"status": "failed", "msg": f"{label}响应解析失败，HTTP {resp.status_code}", "raw_text": resp.text[:200]}
+
+            if result.get("code") == 0:
+                return {"status": "success", "data": result.get("data") or {}, "raw": result}
+            if result.get("code") == 100001 and result.get("msg") == "签名错误":
+                return {
+                    "status": "failed",
+                    "msg": "签名错误：请检查系统设置中的闲管家 OpenAPI appid/app_secret 是否匹配且仍有效",
+                    "raw": result,
+                }
+            return {"status": "failed", "msg": result.get("msg") or f"{label}失败", "raw": result}
+        except Exception as e:
+            return {"status": "failed", "msg": f"{label}连接异常: {e}"}
+
+    def query_order_list(
+        self,
+        page_no: int = 1,
+        page_size: int = 20,
+        order_status: int | str | None = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "page_no": max(1, int(page_no or 1)),
+            "page_size": min(max(1, int(page_size or 20)), 100),
+        }
+        if order_status not in (None, "", "all"):
+            try:
+                payload["order_status"] = int(order_status)
+            except Exception:
+                payload["order_status"] = order_status
+        return self._post_openapi("/api/open/order/list", payload, "订单列表查询")
+
+    def query_order_detail(self, order_no: str) -> Dict[str, Any]:
+        order_no = str(order_no or "").strip()
+        if not order_no:
+            return {"status": "failed", "msg": "缺少订单号"}
+        return self._post_openapi("/api/open/order/detail", {"order_no": order_no}, "订单详情查询")
+
+    def ship_order(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        order_no = str((payload or {}).get("order_no") or "").strip()
+        waybill_no = str((payload or {}).get("waybill_no") or "").strip()
+        express_code = str((payload or {}).get("express_code") or "").strip()
+        express_name = str((payload or {}).get("express_name") or "").strip()
+        if not order_no:
+            return {"status": "failed", "msg": "缺少订单号"}
+        if not waybill_no:
+            return {"status": "failed", "msg": "请填写快递单号"}
+        if not express_code:
+            return {"status": "failed", "msg": "请填写快递公司代码"}
+        if not express_name:
+            return {"status": "failed", "msg": "请填写快递公司名称"}
+
+        request_payload: Dict[str, Any] = {
+            "order_no": order_no,
+            "waybill_no": waybill_no,
+            "express_code": express_code,
+            "express_name": express_name,
+        }
+        for key in (
+            "ship_name",
+            "ship_mobile",
+            "ship_district_id",
+            "ship_prov_name",
+            "ship_city_name",
+            "ship_area_name",
+            "ship_address",
+        ):
+            value = (payload or {}).get(key)
+            if value not in (None, ""):
+                if key == "ship_district_id":
+                    try:
+                        request_payload[key] = int(value)
+                    except Exception:
+                        return {"status": "failed", "msg": "寄件方地区 ID 必须是数字"}
+                else:
+                    request_payload[key] = str(value).strip()
+        return self._post_openapi("/api/open/order/ship", request_payload, "订单物流发货")
+
+    def modify_order_price(self, order_no: str, order_price: int, express_fee: int) -> Dict[str, Any]:
+        order_no = str(order_no or "").strip()
+        if not order_no:
+            return {"status": "failed", "msg": "缺少订单号"}
+        try:
+            safe_order_price = int(order_price)
+            safe_express_fee = int(express_fee)
+        except Exception:
+            return {"status": "failed", "msg": "订单价格和运费必须是分单位整数"}
+        if safe_order_price < 1:
+            return {"status": "failed", "msg": "订单价格必须大于 0 分"}
+        if safe_express_fee < 0:
+            return {"status": "failed", "msg": "运费不能小于 0 分"}
+        return self._post_openapi(
+            "/api/open/order/modify/price",
+            {"order_no": order_no, "order_price": safe_order_price, "express_fee": safe_express_fee},
+            "订单修改价格",
+        )
+
     def _load_categories(self) -> List[Dict[str, Any]]:
         """
         加载类目列表。如果本地缓存 `config/xianyu_categories.json` 存在且内容不为空，则从本地读取；

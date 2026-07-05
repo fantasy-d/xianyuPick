@@ -3,6 +3,20 @@ const sourceSkuCache = new Map();
 const DEFAULT_GROSS_PROFIT_RATE = 0.3;
 const SOURCE_LIST_PAGE_SIZE = 10;
 const TOKEN_LOG_PAGE_SIZE = 10;
+const ORDER_PAGE_SIZE = 20;
+const OPENAPI_ORDER_STATUS_OPTIONS = [
+    { value: "11", label: "待付款" },
+    { value: "12", label: "待发货" },
+    { value: "21", label: "已发货" },
+    { value: "22", label: "已完成" },
+    { value: "23", label: "已退款" },
+    { value: "24", label: "已关闭" },
+];
+
+const formatCentValueForInput = (value) => {
+    const amount = Number(value);
+    return Number.isFinite(amount) ? (amount / 100).toFixed(2) : '';
+};
 
 const isSourceDetailIncomplete = (source) => !!(
     source?.is_detail_incomplete
@@ -1404,6 +1418,679 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
             </div>
         </div>,
         document.body
+    );
+};
+
+const OrderImageThumb = ({ order, sizeClass = "w-14 h-14" }) => {
+    const image = order?.goods?.image;
+    if (!image) {
+        return (
+            <div className={`${sizeClass} rounded-lg bg-surface-container border border-border-hairline flex items-center justify-center text-secondary shrink-0`}>
+                <span className="material-symbols-outlined text-[18px]">image_not_supported</span>
+            </div>
+        );
+    }
+    return (
+        <img
+            src={image}
+            referrerPolicy="no-referrer"
+            loading="lazy"
+            decoding="async"
+            className={`${sizeClass} rounded-lg object-cover border border-border-hairline bg-surface-container shrink-0`}
+        />
+    );
+};
+
+// --- 订单详情页组件 ---
+const OrderDetailPage = ({ orderNo, onBack }) => {
+    const [orderDetail, setOrderDetail] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+
+    const fetchOrderDetail = async () => {
+        if (!orderNo) {
+            setError('缺少订单号，请返回订单列表重新选择。');
+            return;
+        }
+        setLoading(true);
+        setError('');
+        try {
+            const res = await fetch(`/api/orders/${encodeURIComponent(orderNo)}`).then(r => r.json());
+            if (res.status === 'success') {
+                setOrderDetail(res.order || null);
+            } else {
+                setError(res.msg || '订单详情查询失败');
+            }
+        } catch (err) {
+            setError('订单详情连接失败，请检查后端服务。');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        fetchOrderDetail();
+    }, [orderNo]);
+
+    return (
+        <div className="view-content">
+            <button
+                onClick={onBack}
+                className="mb-5 inline-flex items-center gap-1 text-secondary hover:text-primary text-xs font-bold transition-colors"
+            >
+                <span className="material-symbols-outlined text-[18px]">arrow_back</span>
+                返回订单列表
+            </button>
+
+            {loading ? (
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-12 text-center text-secondary ambient-shadow">
+                    <span className="material-symbols-outlined animate-spin text-primary align-middle mr-2">sync</span>
+                    正在读取订单详情...
+                </div>
+            ) : error ? (
+                <div className="bg-error/10 border border-error/30 text-error rounded-xl p-5 text-sm font-semibold">
+                    {error}
+                </div>
+            ) : orderDetail ? (
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-5 ambient-shadow">
+                    <div className="flex flex-wrap items-start justify-between gap-4 pb-5 border-b border-border-hairline">
+                        <div className="space-y-3">
+                            <div className="grid grid-cols-[56px_minmax(0,1fr)] items-center gap-3">
+                                <div className="text-xs text-secondary">订单号</div>
+                                <div className="font-mono text-lg font-black text-on-surface break-all">{orderDetail.order_no}</div>
+                            </div>
+                            <div className="grid grid-cols-[56px_minmax(0,1fr)] items-center gap-3">
+                                <div className="text-xs text-secondary">状态</div>
+                                <div className="text-xs font-bold text-primary">
+                                    {orderDetail.order_status_label}
+                                </div>
+                            </div>
+                        </div>
+                        <button
+                            onClick={fetchOrderDetail}
+                            className="px-3 py-2 bg-surface-container-high hover:bg-primary/10 text-primary rounded-lg text-xs font-bold flex items-center gap-1 transition-colors"
+                        >
+                            <span className="material-symbols-outlined text-[16px]">sync</span>
+                            刷新详情
+                        </button>
+                    </div>
+
+                    <div className="grid grid-cols-1 xl:grid-cols-[minmax(0,1.4fr)_minmax(0,1fr)] gap-6 pt-5">
+                        <section>
+                            <div className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
+                                <span className="material-symbols-outlined text-primary text-[18px]">inventory_2</span>
+                                商品信息
+                            </div>
+                            <div className="flex gap-4">
+                                <OrderImageThumb order={orderDetail} sizeClass="w-20 h-20" />
+                                <div className="min-w-0">
+                                    <div className="text-base font-bold text-on-surface leading-snug">{orderDetail.goods?.title || '未命名商品'}</div>
+                                    <div className="text-xs text-secondary mt-2">{orderDetail.goods?.sku_text || '默认规格'}</div>
+                                    <div className="text-xs text-secondary mt-1">数量 {orderDetail.goods?.quantity || 0} · 单价 {orderDetail.goods?.price_text}</div>
+                                    <div className="text-xs text-secondary mt-1">商品 ID {orderDetail.goods?.item_id || '-'}</div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section>
+                            <div className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
+                                <span className="material-symbols-outlined text-primary text-[18px]">payments</span>
+                                金额与时间
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
+                                <div className="flex justify-between items-baseline gap-3"><span className="text-secondary">实付金额</span><span className="font-mono text-lg font-black text-primary">{orderDetail.pay_amount_text}</span></div>
+                                <div className="flex justify-between items-baseline gap-3"><span className="text-secondary">订单总额</span><span className="font-mono font-bold text-on-surface">{orderDetail.total_amount_text}</span></div>
+                                <div className="flex justify-between items-baseline gap-3"><span className="text-secondary">运费</span><span className="font-mono font-bold text-on-surface">{orderDetail.express_fee_text}</span></div>
+                                <div className="flex justify-between gap-3"><span className="text-secondary">下单时间</span><span className="text-on-surface font-semibold text-right">{orderDetail.order_time_text || '-'}</span></div>
+                                <div className="flex justify-between gap-3"><span className="text-secondary">支付时间</span><span className="text-on-surface font-semibold text-right">{orderDetail.pay_time_text || '-'}</span></div>
+                                <div className="flex justify-between gap-3"><span className="text-secondary">发货时间</span><span className="text-on-surface font-semibold text-right">{orderDetail.consign_time_text || '-'}</span></div>
+                                <div className="flex justify-between gap-3"><span className="text-secondary">取消时间</span><span className="text-on-surface font-semibold text-right">{orderDetail.cancel_time_text || '-'}</span></div>
+                            </div>
+                        </section>
+                    </div>
+
+                    <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 pt-5 mt-5 border-t border-border-hairline">
+                        <section>
+                            <div className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
+                                <span className="material-symbols-outlined text-primary text-[18px]">location_on</span>
+                                收货信息
+                            </div>
+                            <div className="space-y-3 text-sm">
+                                <div>
+                                    <div className="text-xs text-secondary mb-1">收货人</div>
+                                    <div className="font-semibold text-on-surface">{orderDetail.receiver_name || '-'}</div>
+                                </div>
+                                <div>
+                                    <div className="text-xs text-secondary mb-1">联系电话</div>
+                                    <div className="font-semibold text-on-surface">{orderDetail.receiver_mobile || '-'}</div>
+                                </div>
+                                <div>
+                                    <div className="text-xs text-secondary mb-1">收货地址</div>
+                                    <div className="font-semibold text-on-surface leading-relaxed">{orderDetail.receiver_address || '-'}</div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section>
+                            <div className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
+                                <span className="material-symbols-outlined text-primary text-[18px]">local_shipping</span>
+                                物流信息
+                            </div>
+                            <div className="space-y-3 text-sm">
+                                <div>
+                                    <div className="text-xs text-secondary mb-1">物流公司</div>
+                                    <div className="font-semibold text-on-surface">{orderDetail.express_name || orderDetail.express_code || '暂无物流公司'}</div>
+                                </div>
+                                <div>
+                                    <div className="text-xs text-secondary mb-1">运单号</div>
+                                    <div className="font-mono font-semibold text-on-surface">{orderDetail.waybill_no || '暂无运单号'}</div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section>
+                            <div className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
+                                <span className="material-symbols-outlined text-primary text-[18px]">person</span>
+                                交易对象
+                            </div>
+                            <div className="space-y-3 text-sm">
+                                <div>
+                                    <div className="text-xs text-secondary mb-1">买家昵称</div>
+                                    <div className="font-semibold text-on-surface">{orderDetail.buyer_nick || '-'}</div>
+                                </div>
+                                <div>
+                                    <div className="text-xs text-secondary mb-1">卖家账号</div>
+                                    <div className="font-semibold text-on-surface">{orderDetail.seller_name || '-'}</div>
+                                </div>
+                                {orderDetail.seller_remark && (
+                                    <div>
+                                        <div className="text-xs text-secondary mb-1">卖家备注</div>
+                                        <div className="text-secondary leading-relaxed">{orderDetail.seller_remark}</div>
+                                    </div>
+                                )}
+                            </div>
+                        </section>
+                    </div>
+                </div>
+            ) : (
+                <div className="bg-surface-container-lowest border border-border-hairline rounded-xl p-12 text-center text-secondary ambient-shadow">
+                    暂无订单详情
+                </div>
+            )}
+        </div>
+    );
+};
+
+const OrderOperationModal = ({ type, order, onClose, onSuccess }) => {
+    const [active, setActive] = useState(false);
+    const [submitting, setSubmitting] = useState(false);
+    const [error, setError] = useState('');
+    const [shipForm, setShipForm] = useState({
+        waybill_no: '',
+        express_code: '',
+        express_name: '',
+        ship_name: '',
+        ship_mobile: '',
+        ship_district_id: '',
+        ship_prov_name: '',
+        ship_city_name: '',
+        ship_area_name: '',
+        ship_address: '',
+    });
+    const [priceForm, setPriceForm] = useState({
+        order_price_yuan: formatCentValueForInput(order?.total_amount),
+        express_fee_yuan: formatCentValueForInput(order?.express_fee),
+    });
+
+    useEffect(() => {
+        let frameId = requestAnimationFrame(() => {
+            frameId = requestAnimationFrame(() => setActive(true));
+        });
+        document.body.style.overflow = 'hidden';
+        return () => {
+            cancelAnimationFrame(frameId);
+            document.body.style.overflow = '';
+        };
+    }, []);
+
+    const close = () => {
+        if (submitting) return;
+        setActive(false);
+        setTimeout(onClose, 220);
+    };
+
+    const updateShipForm = (key, value) => {
+        setShipForm(prev => ({ ...prev, [key]: value }));
+    };
+
+    const updatePriceForm = (key, value) => {
+        setPriceForm(prev => ({ ...prev, [key]: value }));
+    };
+
+    const submit = async () => {
+        setError('');
+        if (!order?.order_no) {
+            setError('缺少订单号，请返回列表重新选择订单。');
+            return;
+        }
+
+        let endpoint = '';
+        let body = {};
+        if (type === 'ship') {
+            if (!shipForm.waybill_no.trim() || !shipForm.express_code.trim() || !shipForm.express_name.trim()) {
+                setError('请填写快递单号、快递公司代码和快递公司名称。');
+                return;
+            }
+            endpoint = `/api/orders/${encodeURIComponent(order.order_no)}/ship`;
+            body = shipForm;
+        } else {
+            const orderPrice = Number(priceForm.order_price_yuan);
+            const expressFee = Number(priceForm.express_fee_yuan || 0);
+            if (!Number.isFinite(orderPrice) || orderPrice <= 0) {
+                setError('订单价格必须大于 0。');
+                return;
+            }
+            if (!Number.isFinite(expressFee) || expressFee < 0) {
+                setError('运费不能小于 0。');
+                return;
+            }
+            endpoint = `/api/orders/${encodeURIComponent(order.order_no)}/modify_price`;
+            body = priceForm;
+        }
+
+        setSubmitting(true);
+        try {
+            const res = await fetch(endpoint, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+            }).then(r => r.json());
+            if (res.status !== 'success') {
+                setError(res.msg || '操作失败');
+                return;
+            }
+            setActive(false);
+            setTimeout(() => onSuccess(res.msg || '操作成功'), 220);
+        } catch (err) {
+            setError('连接失败，请检查后端服务。');
+        } finally {
+            setSubmitting(false);
+        }
+    };
+
+    const isShip = type === 'ship';
+    const title = isShip ? '订单物流发货' : '订单修改价格';
+    const icon = isShip ? 'local_shipping' : 'payments';
+
+    return ReactDOM.createPortal(
+        <div className={`preview-modal-overlay ${active ? 'active' : ''}`} onClick={close}>
+            <div
+                className={`preview-modal-wrapper ${active ? 'active' : ''}`}
+                style={{ width: '640px' }}
+                onClick={e => e.stopPropagation()}
+            >
+                <div className="px-6 py-4 border-b border-border-hairline flex justify-between items-center bg-surface-container-low">
+                    <h3 className="font-sans text-base font-bold text-on-surface flex items-center gap-2">
+                        <span className="material-symbols-outlined text-primary">{icon}</span>
+                        {title}
+                    </h3>
+                    <button onClick={close} className="w-8 h-8 rounded-full hover:bg-surface-container-high flex items-center justify-center text-secondary hover:text-on-surface transition-all">
+                        <span className="material-symbols-outlined text-[20px]">close</span>
+                    </button>
+                </div>
+
+                <div className="p-6 space-y-4">
+                    <div className="rounded-xl border border-border-hairline bg-surface-container-low px-4 py-3 text-xs text-secondary">
+                        <div className="font-mono font-bold text-on-surface break-all">订单号：{order?.order_no || '-'}</div>
+                        <div className="mt-1">{isShip ? '寄件方信息不填时，将使用闲管家后台默认发货地址。' : '金额单位为元，提交时会按 OpenAPI 要求转换为分。'}</div>
+                    </div>
+
+                    {error && (
+                        <div className="rounded-lg border border-error/30 bg-error/10 text-error px-4 py-3 text-xs font-semibold">
+                            {error}
+                        </div>
+                    )}
+
+                    {isShip ? (
+                        <div className="space-y-4">
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <label className="block">
+                                    <span className="block text-xs text-secondary mb-1">快递单号</span>
+                                    <input value={shipForm.waybill_no} onChange={e => updateShipForm('waybill_no', e.target.value)} className="w-full px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                                </label>
+                                <label className="block">
+                                    <span className="block text-xs text-secondary mb-1">快递公司代码</span>
+                                    <input value={shipForm.express_code} onChange={e => updateShipForm('express_code', e.target.value)} placeholder="如 shunfeng / qita" className="w-full px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                                </label>
+                                <label className="block">
+                                    <span className="block text-xs text-secondary mb-1">快递公司名称</span>
+                                    <input value={shipForm.express_name} onChange={e => updateShipForm('express_name', e.target.value)} placeholder="如 顺丰速运" className="w-full px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                                </label>
+                            </div>
+                            <div className="border-t border-border-hairline pt-4">
+                                <div className="text-xs font-bold text-on-surface mb-3">寄件方信息（可选）</div>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                                    <input value={shipForm.ship_name} onChange={e => updateShipForm('ship_name', e.target.value)} placeholder="寄件人姓名" className="px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                                    <input value={shipForm.ship_mobile} onChange={e => updateShipForm('ship_mobile', e.target.value)} placeholder="寄件人手机号" className="px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                                    <input value={shipForm.ship_district_id} onChange={e => updateShipForm('ship_district_id', e.target.value)} placeholder="地区 ID（有则优先）" className="px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                                    <input value={shipForm.ship_prov_name} onChange={e => updateShipForm('ship_prov_name', e.target.value)} placeholder="省份" className="px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                                    <input value={shipForm.ship_city_name} onChange={e => updateShipForm('ship_city_name', e.target.value)} placeholder="城市" className="px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                                    <input value={shipForm.ship_area_name} onChange={e => updateShipForm('ship_area_name', e.target.value)} placeholder="区县" className="px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                                    <input value={shipForm.ship_address} onChange={e => updateShipForm('ship_address', e.target.value)} placeholder="详细地址" className="md:col-span-2 px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                                </div>
+                            </div>
+                        </div>
+                    ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            <label className="block">
+                                <span className="block text-xs text-secondary mb-1">订单价格（元）</span>
+                                <input type="number" min="0.01" step="0.01" value={priceForm.order_price_yuan} onChange={e => updatePriceForm('order_price_yuan', e.target.value)} className="w-full px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                            </label>
+                            <label className="block">
+                                <span className="block text-xs text-secondary mb-1">运费（元）</span>
+                                <input type="number" min="0" step="0.01" value={priceForm.express_fee_yuan} onChange={e => updatePriceForm('express_fee_yuan', e.target.value)} className="w-full px-3 py-2 rounded-lg border border-border-hairline bg-surface-container-lowest text-sm focus:outline-none focus:border-primary" />
+                            </label>
+                        </div>
+                    )}
+                </div>
+
+                <div className="px-6 py-4 border-t border-border-hairline flex gap-3 justify-end bg-surface-container-low">
+                    <button onClick={close} disabled={submitting} className="px-4 py-2 border border-border-hairline rounded-lg text-secondary font-sans text-xs font-semibold hover:bg-surface-container-high hover:text-on-surface transition-colors disabled:opacity-50">
+                        取消
+                    </button>
+                    <button onClick={submit} disabled={submitting} className="px-4 py-2 bg-primary hover:bg-primary-container text-white font-sans text-xs font-semibold rounded-lg shadow-sm disabled:opacity-50 transition-colors">
+                        {submitting ? '提交中...' : (isShip ? '确认发货' : '确认改价')}
+                    </button>
+                </div>
+            </div>
+        </div>,
+        document.body
+    );
+};
+
+// --- 订单管理组件 ---
+const OrderManager = ({ hideHeader = false, onOpenDetail }) => {
+    const [orders, setOrders] = useState([]);
+    const [total, setTotal] = useState(0);
+    const [page, setPage] = useState(1);
+    const [orderStatus, setOrderStatus] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState('');
+    const [selectedOrderNo, setSelectedOrderNo] = useState('');
+    const [operationType, setOperationType] = useState('');
+    const [operationNotice, setOperationNotice] = useState('');
+
+    const totalPages = Math.max(1, Math.ceil(total / ORDER_PAGE_SIZE));
+    const selectedOrder = orders.find(order => order.order_no === selectedOrderNo);
+    const canShipSelectedOrder = Number(selectedOrder?.order_status) === 12;
+    const canModifyPriceSelectedOrder = Number(selectedOrder?.order_status) === 11;
+
+    const fetchOrders = async () => {
+        setLoading(true);
+        setError('');
+        setSelectedOrderNo('');
+        try {
+            const url = `/api/orders?page=${page}&limit=${ORDER_PAGE_SIZE}&order_status=${encodeURIComponent(orderStatus)}`;
+            const res = await fetch(url).then(r => r.json());
+            if (res.status !== 'success') {
+                setOrders([]);
+                setTotal(0);
+                setError(res.msg || '订单列表查询失败');
+                return;
+            }
+            setOrders(res.items || []);
+            setTotal(res.total || 0);
+        } catch (err) {
+            setOrders([]);
+            setTotal(0);
+            setError('订单列表连接失败，请检查后端服务。');
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const selectOrder = (orderNo) => {
+        setSelectedOrderNo(orderNo);
+    };
+
+    const toggleOrder = (orderNo, checked) => {
+        if (checked) {
+            setSelectedOrderNo(orderNo);
+        } else if (selectedOrderNo === orderNo) {
+            setSelectedOrderNo('');
+        }
+    };
+
+    const openOrderOperation = (type) => {
+        setOperationNotice('');
+        if (!selectedOrder) {
+            setError('请先选择订单。');
+            return;
+        }
+        if (type === 'ship' && !canShipSelectedOrder) {
+            setError('只有待发货订单才能物流发货。');
+            return;
+        }
+        if (type === 'price' && !canModifyPriceSelectedOrder) {
+            setError('只有待付款订单才能修改价格。');
+            return;
+        }
+        setOperationType(type);
+    };
+
+    const handleOrderOperationSuccess = (message) => {
+        setOperationType('');
+        setOperationNotice(message || '操作成功');
+        fetchOrders();
+    };
+
+    useEffect(() => {
+        fetchOrders();
+    }, [page, orderStatus]);
+
+    const changeOrderStatus = (value) => {
+        setPage(1);
+        setOrderStatus(value);
+    };
+
+    return (
+        <div className="view-content">
+            {!hideHeader && (
+                <header className="mb-6">
+                    <h1 className="font-sans text-2xl font-bold text-on-surface">订单管理</h1>
+                    <p className="font-sans text-sm text-secondary mt-1">通过闲管家 OpenAPI 查询订单列表与订单详情。</p>
+                </header>
+            )}
+
+            <div className="bg-surface-container-lowest border border-border-hairline rounded-xl ambient-shadow overflow-hidden">
+                <div className="px-5 py-4 border-b border-border-hairline flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                        <div className="font-sans text-sm font-bold text-on-surface flex items-center gap-2">
+                            <span className="material-symbols-outlined text-primary text-[18px]">receipt_long</span>
+                            闲管家订单列表
+                            <span className="text-secondary font-semibold">({total} 条)</span>
+                        </div>
+                        <div className="text-xs text-secondary mt-1">列表按闲管家 OpenAPI 返回结果展示，订单详情按订单号实时查询。</div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                        <select
+                            value={orderStatus}
+                            onChange={(e) => changeOrderStatus(e.target.value)}
+                            className="bg-surface-container-low border border-border-hairline rounded-lg px-3 py-2 text-xs text-on-surface focus:outline-none focus:border-primary"
+                        >
+                            <option value="">全部状态</option>
+                            {OPENAPI_ORDER_STATUS_OPTIONS.map((option) => (
+                                <option key={option.value} value={option.value}>{option.label}</option>
+                            ))}
+                        </select>
+                        <button
+                            onClick={fetchOrders}
+                            className="px-3 py-2 bg-primary hover:bg-primary-container text-white rounded-lg text-xs font-bold flex items-center gap-1 transition-colors"
+                        >
+                            <span className={`material-symbols-outlined text-[16px] ${loading ? 'animate-spin' : ''}`}>sync</span>
+                            刷新订单
+                        </button>
+                        <button
+                            disabled={!selectedOrderNo}
+                            onClick={() => onOpenDetail && onOpenDetail(selectedOrderNo)}
+                            className="px-3 py-2 bg-surface-container-high hover:bg-primary/10 text-primary rounded-lg text-xs font-bold flex items-center gap-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            <span className="material-symbols-outlined text-[16px]">open_in_new</span>
+                            查看订单详情
+                        </button>
+                        <button
+                            disabled={!canShipSelectedOrder}
+                            title={selectedOrderNo && !canShipSelectedOrder ? '只有待发货订单才能物流发货' : ''}
+                            onClick={() => openOrderOperation('ship')}
+                            className="px-3 py-2 bg-surface-container-high hover:bg-primary/10 text-primary rounded-lg text-xs font-bold flex items-center gap-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            <span className="material-symbols-outlined text-[16px]">local_shipping</span>
+                            物流发货
+                        </button>
+                        <button
+                            disabled={!canModifyPriceSelectedOrder}
+                            title={selectedOrderNo && !canModifyPriceSelectedOrder ? '只有待付款订单才能修改价格' : ''}
+                            onClick={() => openOrderOperation('price')}
+                            className="px-3 py-2 bg-surface-container-high hover:bg-primary/10 text-primary rounded-lg text-xs font-bold flex items-center gap-1 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        >
+                            <span className="material-symbols-outlined text-[16px]">payments</span>
+                            修改价格
+                        </button>
+                    </div>
+                </div>
+
+                {error && (
+                    <div className="mx-5 mt-4 rounded-lg border border-error/30 bg-error/10 text-error px-4 py-3 text-xs font-semibold">
+                        {error}
+                    </div>
+                )}
+                {operationNotice && (
+                    <div className="mx-5 mt-4 rounded-lg border border-primary/30 bg-primary/10 text-primary px-4 py-3 text-xs font-semibold">
+                        {operationNotice}
+                    </div>
+                )}
+
+                <div className="overflow-x-auto">
+                    <table className="w-full text-left">
+                        <thead>
+                            <tr className="bg-table-header-bg border-b border-border-hairline">
+                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary w-12"></th>
+                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">商品</th>
+                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">订单</th>
+                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">订单状态</th>
+                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">订单时间</th>
+                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">数量</th>
+                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">金额</th>
+                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">总金额</th>
+                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">买家/收货</th>
+                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">物流</th>
+                            </tr>
+                        </thead>
+                        <tbody className="divide-y divide-border-hairline">
+                            {loading ? (
+                                <tr>
+                                    <td colSpan="10" className="py-12 text-center text-secondary text-sm">
+                                        <span className="material-symbols-outlined animate-spin text-primary align-middle mr-2">sync</span>
+                                        正在读取订单...
+                                    </td>
+                                </tr>
+                            ) : orders.length === 0 ? (
+                                <tr>
+                                    <td colSpan="10" className="py-12 text-center text-secondary text-sm">暂无订单数据</td>
+                                </tr>
+                            ) : orders.map(order => {
+                                const isSelected = selectedOrderNo === order.order_no;
+                                return (
+                                    <tr
+                                        key={order.order_no}
+                                        className={`transition-colors cursor-pointer ${isSelected ? 'bg-primary/5' : 'hover:bg-surface-container-low'}`}
+                                        onClick={() => selectOrder(order.order_no)}
+                                    >
+                                        <td className="p-cell-padding">
+                                            <input
+                                                type="checkbox"
+                                                checked={isSelected}
+                                                onClick={(e) => e.stopPropagation()}
+                                                onChange={(e) => toggleOrder(order.order_no, e.target.checked)}
+                                                className="w-4 h-4 accent-primary cursor-pointer"
+                                                aria-label={`选择订单 ${order.order_no}`}
+                                            />
+                                        </td>
+                                        <td className="p-cell-padding min-w-[300px]">
+                                            <div className="flex items-start gap-3">
+                                                <OrderImageThumb order={order} />
+                                                <div className="min-w-0">
+                                                    <div className="font-sans text-sm font-bold text-on-surface line-clamp-2">{order.goods?.title || '未命名商品'}</div>
+                                                    <div className="text-xs text-secondary mt-1 line-clamp-1">{order.goods?.sku_text || '默认规格'}</div>
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td className="p-cell-padding">
+                                            <div className="font-mono text-xs font-bold text-on-surface">{order.order_no}</div>
+                                        </td>
+                                        <td className="p-cell-padding">
+                                            <div className="inline-flex items-center px-2 py-0.5 rounded-full bg-surface-container border border-border-hairline text-[10px] text-secondary font-bold">
+                                                {order.order_status_label}
+                                            </div>
+                                        </td>
+                                        <td className="p-cell-padding min-w-[150px]">
+                                            <div className="text-[11px] text-secondary">{order.order_time_text || '无下单时间'}</div>
+                                        </td>
+                                        <td className="p-cell-padding">
+                                            <div className="font-mono text-xs font-bold text-on-surface">{order.goods?.quantity || 0}</div>
+                                        </td>
+                                        <td className="p-cell-padding">
+                                            <div className="font-mono text-sm font-bold text-primary">{order.pay_amount_text}</div>
+                                        </td>
+                                        <td className="p-cell-padding">
+                                            <div className="font-mono text-sm font-bold text-on-surface">{order.total_amount_text}</div>
+                                        </td>
+                                        <td className="p-cell-padding min-w-[220px]">
+                                            <div className="text-xs font-bold text-on-surface">{order.buyer_nick || '未知买家'}</div>
+                                            <div className="text-[11px] text-secondary mt-1 line-clamp-2">{order.receiver_name} {order.receiver_mobile} {order.receiver_address}</div>
+                                        </td>
+                                        <td className="p-cell-padding">
+                                            <div className="text-xs font-bold text-on-surface">{order.express_name || order.express_code || '未发货/无物流'}</div>
+                                            <div className="text-[11px] text-secondary mt-1">{order.waybill_no || '暂无运单号'}</div>
+                                        </td>
+                                    </tr>
+                                );
+                            })}
+                        </tbody>
+                    </table>
+                </div>
+
+                <div className="px-5 py-4 border-t border-border-hairline flex items-center justify-between">
+                    <div className="text-xs text-secondary">
+                        第 {page} / {totalPages} 页
+                    </div>
+                    <div className="flex gap-2">
+                        <button
+                            disabled={page <= 1 || loading}
+                            onClick={() => setPage(prev => Math.max(1, prev - 1))}
+                            className="px-3 py-1.5 rounded-lg border border-border-hairline text-xs text-secondary disabled:opacity-40 hover:bg-surface-container-high"
+                        >
+                            上一页
+                        </button>
+                        <button
+                            disabled={page >= totalPages || loading}
+                            onClick={() => setPage(prev => Math.min(totalPages, prev + 1))}
+                            className="px-3 py-1.5 rounded-lg border border-border-hairline text-xs text-secondary disabled:opacity-40 hover:bg-surface-container-high"
+                        >
+                            下一页
+                        </button>
+                    </div>
+                </div>
+            </div>
+            {operationType && (
+                <OrderOperationModal
+                    type={operationType}
+                    order={selectedOrder}
+                    onClose={() => setOperationType('')}
+                    onSuccess={handleOrderOperationSuccess}
+                />
+            )}
+        </div>
     );
 };
 
@@ -5342,6 +6029,7 @@ const App = () => {
     const [selectedTask, setSelectedTask] = useState(null);
     const [detailedItems, setDetailedItems] = useState([]); 
     const [selectedItem, setSelectedItem] = useState(null); 
+    const [selectedOrderNo, setSelectedOrderNo] = useState('');
     const [sysStatus, setSysStatus] = useState({});
     const [newKeyword, setNewKeyword] = useState("");
 
@@ -6513,6 +7201,11 @@ const App = () => {
         setSourceListPage(1);
         setActiveView("item_detail");
     };
+
+    const enterOrderDetail = (orderNo) => {
+        setSelectedOrderNo(orderNo);
+        setActiveView("order_detail");
+    };
     const completedTasks = tasks.filter(t => t.status === '已完成');
     const resolvedChannelGroups = useMemo(() => {
         if (!selectedItem) return [];
@@ -6612,11 +7305,13 @@ const App = () => {
     }, [selectedItem, selectedTask, resolvedChannelGroups, sourceChannelFilter]);
     const pageIntro = (() => {
         if (view === 'item_detail') return null;
+        if (view === 'order_detail') return null;
         if (view === 'dashboard') return { icon: 'dashboard', title: '控制台中心', description: '全局扫描 Worker 统计面板及后台状态概览。' };
         if (view === 'tasks') return { icon: 'list_alt', title: '任务队列中心', description: '查看和管理各个品类的深度爬取状态。左侧显示活跃进行中队列，右侧显示归档历史。' };
         if (view === 'results' && selectedTask) return { icon: 'query_stats', title: `“${selectedTask.keyword}” 爆款深度对比报告`, description: '每个爆款商品均可以点入查看对应货源渠道的深度对比结果。' };
         if (view === 'results') return { icon: 'travel_explore', title: '选品决策资产库', description: '系统已完成的爆款数据中心。点击各个品类卡片，可直接穿透查看商品的多渠道货源采购价与深度分析。' };
         if (view === 'published') return { icon: 'shopping_bag', title: '选品管理', description: '管理从决策资产库加入的候选货源，支持后续上架、下架与删除处理。' };
+        if (view === 'orders') return { icon: 'receipt_long', title: '订单管理', description: '通过闲管家 OpenAPI 查询订单列表和订单详情。' };
         if (view === 'logs') return { icon: 'analytics', title: '任务日志中心', description: '实时监控扫描 Worker 的后台标准输出日志。' };
         if (view === 'token_stats') return { icon: 'generating_tokens', title: 'AI Token 计量舱', description: '系统大模型调用统计、模型消耗占比及审计流水线。' };
         if (view === 'settings') return { icon: 'settings', title: '系统参数配置', description: '全局管理大模型服务密钥及闲鱼 OpenAPI 的各类配置。' };
@@ -6628,6 +7323,13 @@ const App = () => {
                 icon: 'inventory_2',
                 title: '决策资产 / 货源明细',
                 description: '查看单个爆款商品对应的多渠道货源深度对比结果。'
+            };
+        }
+        if (view === 'order_detail') {
+            return {
+                icon: 'receipt_long',
+                title: '订单管理 / 订单详情',
+                description: selectedOrderNo ? `查看订单 ${selectedOrderNo} 的实时详情。` : '查看订单实时详情。'
             };
         }
         if (view === 'token_stats') {
@@ -6652,7 +7354,9 @@ const App = () => {
     })();
 
     const navItemClass = (itemKey) => {
-        const isActive = (itemKey === 'results' && ['results', 'item_detail'].includes(view)) || view === itemKey;
+        const isActive = (itemKey === 'results' && ['results', 'item_detail'].includes(view))
+            || (itemKey === 'orders' && ['orders', 'order_detail'].includes(view))
+            || view === itemKey;
         if (sidebarCollapsed) {
             return `group relative flex items-center justify-center px-3 py-3 rounded-xl font-sans text-xs transition-all duration-150 scale-100 active:scale-95 cursor-pointer ${
                 isActive
@@ -6715,6 +7419,11 @@ const App = () => {
                         <span className="material-symbols-outlined text-[18px]">shopping_bag</span>
                         <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>选品管理</span>
                         {sidebarCollapsed && <span className="sidebar-tooltip">选品管理</span>}
+                    </li>
+                    <li className={navItemClass("orders")} onClick={() => setActiveView("orders")}>
+                        <span className="material-symbols-outlined text-[18px]">receipt_long</span>
+                        <span className={`sidebar-fade-content ${sidebarCollapsed ? 'is-collapsed' : ''}`}>订单管理</span>
+                        {sidebarCollapsed && <span className="sidebar-tooltip">订单管理</span>}
                     </li>
                     <li className={navItemClass("logs")} onClick={() => setActiveView("logs")}>
                         <span className="material-symbols-outlined text-[18px]">analytics</span>
@@ -6803,6 +7512,8 @@ const App = () => {
                 {view === 'logs' ? <LogViewer tasks={tasks} hideHeader={true} /> : 
                  view === 'token_stats' ? <TokenStatsView hideHeader={true} /> :
                  view === 'settings' ? <SystemSettingsView hideHeader={true} /> :
+                 view === 'orders' ? <OrderManager hideHeader={true} onOpenDetail={enterOrderDetail} /> :
+                 view === 'order_detail' ? <OrderDetailPage orderNo={selectedOrderNo} onBack={() => setActiveView("orders")} /> :
                  view === "dashboard" ? (() => {
                     const activeTasks = tasks.filter(t => t.status !== '已完成');
                     const runningCount = tasks.filter(t => ['执行中', '正在暂停'].includes(t.status)).length;
