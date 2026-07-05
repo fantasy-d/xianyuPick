@@ -637,6 +637,59 @@ class PublisherV3:
         except Exception as e:
             return {"status": "failed", "msg": f"下架连接异常: {e}"}
 
+    def query_product_detail(self, product_id: str) -> Dict[str, Any]:
+        """
+        查询商品详情，用于同步本地选品/发布状态。
+        """
+        payload = {
+            "product_id": int(product_id)
+        }
+
+        timestamp = int(time.time())
+        auth = APISigner.sign_v3_protocol(payload, self.appid, self.app_secret, timestamp)
+
+        target_url = f"{self.base_url}/api/open/product/detail"
+        params = {
+            "appid": auth['app_key'],
+            "timestamp": auth['timestamp'],
+            "seller_id": str(self.conf.get("seller_id") or self.defaults.get("seller_id") or ""),
+            "sign": auth['sign']
+        }
+
+        compact_body = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
+        headers = {"Content-Type": "application/json"}
+
+        logger.info(f"Querying Product Detail {product_id}...")
+        try:
+            resp = requests.post(target_url, params=params, data=compact_body.encode('utf-8'), headers=headers, timeout=20)
+            logger.info(f"Product detail response raw text: {resp.text[:500]}")
+            try:
+                result = resp.json()
+            except Exception as json_err:
+                logger.error(f"Failed to parse JSON response from product detail: {json_err}. Raw text: {resp.text}")
+                return {"status": "failed", "msg": f"商品详情响应解析失败，原始报文: {resp.text[:100]}"}
+
+            if result.get("code") == 0:
+                return {"status": "success", "data": result.get("data") or {}, "raw": result}
+            if result.get("code") == 100001 and result.get("msg") == "签名错误":
+                return {
+                    "status": "failed",
+                    "msg": "签名错误：请检查系统设置中的闲管家 OpenAPI appid/app_secret 是否匹配且仍有效",
+                    "raw": result,
+                }
+            if result.get("code") == 100001 and result.get("msg") == "商品信息查询失败":
+                return {
+                    "status": "failed",
+                    "msg": (
+                        f"商品信息查询失败：当前闲管家 OpenAPI 账号下查不到管家商品 ID {product_id}，"
+                        "可能该选品由其他 OpenAPI 账号发布、云端商品已删除，或本地记录保存的是旧账号商品 ID"
+                    ),
+                    "raw": result,
+                }
+            return {"status": "failed", "msg": result.get("msg") or "查询商品详情失败", "raw": result}
+        except Exception as e:
+            return {"status": "failed", "msg": f"商品详情连接异常: {e}"}
+
     def delete_item(self, product_id: str) -> Dict[str, Any]:
         """
         删除商品 (Delete Product)

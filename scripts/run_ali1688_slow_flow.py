@@ -1799,14 +1799,22 @@ async def _extract_selected_filter_chip_texts(page, logger=None) -> list[str]:
         '官方物流',
         '密文面单',
         '抖音面单',
+        '密文面单：抖音面单',
       ];
       const chips = [];
-      for (const el of Array.from(document.querySelectorAll('div, span, button, label'))) {
-        const text = normalize(el.innerText || el.textContent || '');
+      const activeTagSelectors = [
+        '[class*="filterTag--"]',
+        '[class*="selectedFilter"]',
+        '[class*="selected-filter"]',
+        '[class*="conditionTag"]',
+        '[class*="condition-tag"]'
+      ];
+      for (const tag of Array.from(document.querySelectorAll(activeTagSelectors.join(',')))) {
+        const label = tag.querySelector('[class*="filterLabel--"], [class*="label"], span, div');
+        const text = normalize((label || tag).innerText || (label || tag).textContent || '');
         if (!text || text.length > 80) continue;
         const matched = knownTerms.filter((term) => text.includes(term));
         if (!matched.length) continue;
-        if (!/[×xX]|close|已选|指定|筛选|条件|面单/.test(text) && matched.length === 1) continue;
         chips.push(text);
       }
       return Array.from(new Set(chips)).slice(0, 30);
@@ -1822,27 +1830,155 @@ async def _extract_selected_filter_chip_texts(page, logger=None) -> list[str]:
 
 def _unexpected_selected_filter_chips(selected_filter_chips: list[str], runtime_filter_snapshot: dict | None) -> list[str]:
     configured_keys = set((runtime_filter_snapshot or {}).get("configured_enabled_filter_keys") or [])
-    configured_labels = {
-        get_ali1688_channel_search_filter_meta(key).get("label")
-        for key in configured_keys
-    }
-    configured_labels = {str(label) for label in configured_labels if label}
-    known_labels = {
-        str(get_ali1688_channel_search_filter_meta(key).get("label") or "")
-        for key in get_ali1688_channel_search_filter_keys()
-    }
-    known_labels.update({"抖音面单"})
-    known_labels.discard("")
+    known_label_entries: list[tuple[str, set[str]]] = []
+    for key in get_ali1688_channel_search_filter_keys():
+        meta = get_ali1688_channel_search_filter_meta(key)
+        labels = [(str(meta.get("label") or "").strip(), {key})]
+        if key == "douyin_encrypted_waybill":
+            labels.append(("密文面单：抖音面单", {key}))
+        for label, matched_keys in labels:
+            if label:
+                known_label_entries.append((label, matched_keys))
 
     unexpected = []
     for chip in selected_filter_chips or []:
         chip_text = str(chip or "").strip()
         if not chip_text:
             continue
-        matched = [label for label in known_labels if label and label in chip_text]
-        if any(label not in configured_labels for label in matched):
+        matched_entries = sorted(
+            [
+                (label, keys)
+                for label, keys in known_label_entries
+                if label and label in chip_text
+            ],
+            key=lambda item: len(item[0]),
+            reverse=True,
+        )
+        selected_entries: list[tuple[str, set[str]]] = []
+        for label, keys in matched_entries:
+            if any(label in selected_label for selected_label, _ in selected_entries):
+                continue
+            selected_entries.append((label, keys))
+        has_selected_state_signal = bool(re.search(r"清空|已选|选中|条件|指定|[×xX]|close|：", chip_text))
+        if not has_selected_state_signal:
+            continue
+        has_unconfigured_label = any(
+            not (matched_keys & configured_keys)
+            for _, matched_keys in selected_entries
+        )
+        if selected_entries and has_unconfigured_label:
             unexpected.append(chip_text)
     return list(dict.fromkeys(unexpected))
+
+
+async def _clear_unexpected_selected_filter_chips(
+    page,
+    unexpected_filter_chips: list[str],
+    *,
+    logger=None,
+) -> list[str]:
+    chip_texts = [
+        str(chip or "").strip()
+        for chip in unexpected_filter_chips or []
+        if str(chip or "").strip()
+    ]
+    if not chip_texts:
+        return []
+
+    script = """
+    async ({ chipTexts }) => {
+      const normalize = (value) => String(value || '').replace(/\\s+/g, ' ').trim();
+      const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+      const clickNode = (node) => {
+        if (!node) return false;
+        try {
+          node.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true, cancelable: true }));
+          node.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+          node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
+          return true;
+        } catch (e) {
+          try {
+            node.click();
+            return true;
+          } catch (_) {
+            return false;
+          }
+        }
+      };
+      const tagSelectors = [
+        '[class*="filterTag--"]',
+        '[class*="selectedFilter"]',
+        '[class*="selected-filter"]',
+        '[class*="conditionTag"]',
+        '[class*="condition-tag"]'
+      ];
+      const removeSelectors = [
+        '[class*="removeButton--"]',
+        '[class*="remove"]',
+        '[class*="close"]',
+        '[aria-label*="删除"]',
+        '[aria-label*="移除"]',
+        'button',
+        'i',
+        'svg'
+      ];
+      const cleared = [];
+      for (const chipText of chipTexts) {
+        const tags = Array.from(document.querySelectorAll(tagSelectors.join(',')));
+        const target = tags.find((tag) => {
+          const label = tag.querySelector('[class*="filterLabel--"], [class*="label"], span, div');
+          const labelText = normalize((label || tag).innerText || (label || tag).textContent || '');
+          const tagText = normalize(tag.innerText || tag.textContent || '');
+          const labelMatched = labelText && (
+            labelText === chipText
+            || chipText.includes(labelText)
+            || labelText.includes(chipText)
+          );
+          const tagMatched = tagText && (
+            tagText === chipText
+            || chipText.includes(tagText)
+            || tagText.includes(chipText)
+          );
+          return Boolean(labelMatched || tagMatched);
+        });
+        if (!target) continue;
+        const remover = removeSelectors
+          .map((selector) => target.querySelector(selector))
+          .find(Boolean) || target.lastElementChild;
+        if (!remover) continue;
+        if (clickNode(remover)) {
+          cleared.push(chipText);
+          await sleep(300);
+        }
+      }
+      return Array.from(new Set(cleared));
+    }
+    """
+    try:
+        cleared = await page.evaluate(script, {"chipTexts": chip_texts}) or []
+    except Exception as exc:
+        if logger:
+            logger.warning(f"[Search] Failed to clear unexpected selected filter chips: {exc}")
+        return []
+
+    cleared = [
+        str(chip or "").strip()
+        for chip in cleared
+        if str(chip or "").strip()
+    ]
+    if cleared:
+        try:
+            await page.wait_for_load_state("domcontentloaded", timeout=5000)
+        except Exception:
+            pass
+        await asyncio.sleep(1.2)
+        if logger:
+            logger.info(
+                "[Search] Cleared unexpected selected filter chips: %s",
+                {"cleared_filter_chips": cleared, "result_url": page.url},
+            )
+    return list(dict.fromkeys(cleared))
 
 
 def _write_search_result_snapshots(
@@ -2532,6 +2668,22 @@ def _looks_like_captcha_page(url: str, title: str) -> bool:
     return False
 
 
+def _looks_like_blocked_ali1688_html(html_content: str) -> bool:
+    markers = (
+        "_____tmd_____",
+        "action\":\"captcha\"",
+        "rgv587_flag:sm",
+        "/punish?x5secdata=",
+        "baxia-punish",
+        "验证码拦截",
+        "安全验证",
+        "访问被拒绝",
+        "哎呦喂",
+        "空空如也",
+    )
+    return any(marker in html_content for marker in markers)
+
+
 async def _wait_for_search_or_slider(page, timeout_seconds: float = 8.0) -> str:
     """等待页面进入搜索框、滑块或登录页状态之一。
     注意：_looks_like_login_url 必须是同步调用，不能 await。"""
@@ -2778,7 +2930,13 @@ async def _export_sku_from_detail_page(
         )
         if not success:
             logger.error(f"    [Session] Detail page navigation failed Rank {index}")
-            return {"status": "failed", "images": []}
+            return {
+                "status": "failed",
+                "images": [],
+                "sku_details": [],
+                "detail_incomplete": True,
+                "detail_incomplete_reason": "1688 风控/验证码导致详情页未完整抓取",
+            }
 
         # 等待页面渲染（JS 执行、图片懒加载触发）
         await page.evaluate("window.scrollTo(0, 400)")
@@ -2798,6 +2956,21 @@ async def _export_sku_from_detail_page(
             logger.info(f"    [HTML] Saved raw page HTML to {html_file}")
         except Exception as html_err:
             logger.warning(f"    [HTML] Failed to save raw HTML (non-fatal): {html_err}")
+
+        detail_title = ""
+        try:
+            detail_title = await page.title() or ""
+        except Exception:
+            pass
+        if _looks_like_captcha_page(page.url, detail_title) or _looks_like_blocked_ali1688_html(html_content):
+            logger.warning(f"    [Risk Control] Detail page blocked or incomplete Rank {index}: {page.url}")
+            return {
+                "status": "failed",
+                "images": [],
+                "sku_details": [],
+                "detail_incomplete": True,
+                "detail_incomplete_reason": "1688 风控/验证码导致详情页未完整抓取",
+            }
 
         parsed_html = Ali1688SourceAdapter.extract_detail_sku_and_images(html_content)
         logger.info(f"    [HTML] Scrapling parsed: {len(parsed_html['sku_details'])} SKU entries, {len(parsed_html['images'])} images")
@@ -2954,14 +3127,27 @@ async def _export_sku_from_detail_page(
 
         if sku_details or clean_final:
             logger.info(f"    [Step 4/4] Success! Extracted SKUs: {len(sku_details)}, Images: {len(clean_final)}")
-            return {"status": "success", "images": clean_final, "sku_details": sku_details, **detail_metrics}
+            return {
+                "status": "success",
+                "images": clean_final,
+                "sku_details": sku_details,
+                "detail_incomplete": False,
+                "detail_incomplete_reason": "",
+                **detail_metrics,
+            }
             
     except Exception as e:
         logger.error(f"    [Browser Error] Rank {index}: {e}")
     finally:
         await page.close()
         
-    return {"status": "failed", "images": [], "sku_details": []}
+    return {
+        "status": "failed",
+        "images": [],
+        "sku_details": [],
+        "detail_incomplete": True,
+        "detail_incomplete_reason": "详情页抓取异常，货源详情可能不完整",
+    }
 
 
 async def _run(args):
@@ -3314,6 +3500,37 @@ async def _run(args):
             extra={"result_url": page.url},
         )
 
+        selected_filter_chips_before_clear = await _extract_selected_filter_chip_texts(page, logger=logger)
+        unexpected_filter_chips_before_clear = _unexpected_selected_filter_chips(
+            selected_filter_chips_before_clear,
+            runtime_filter_snapshot,
+        )
+        if unexpected_filter_chips_before_clear:
+            cleared_filter_chips = await _clear_unexpected_selected_filter_chips(
+                page,
+                unexpected_filter_chips_before_clear,
+                logger=logger,
+            )
+            selected_filter_chips_after_clear = await _extract_selected_filter_chip_texts(page, logger=logger)
+            unexpected_filter_chips_after_clear = _unexpected_selected_filter_chips(
+                selected_filter_chips_after_clear,
+                runtime_filter_snapshot,
+            )
+            runtime_filter_snapshot = _write_runtime_filter_snapshot_audit(
+                output_dir,
+                runtime_filter_snapshot,
+                stage="unexpected_filter_chips_checked",
+                logger=logger,
+                extra={
+                    "result_url": page.url,
+                    "selected_filter_chips_before_clear": selected_filter_chips_before_clear,
+                    "unexpected_filter_chips_before_clear": unexpected_filter_chips_before_clear,
+                    "cleared_filter_chips": cleared_filter_chips,
+                    "selected_filter_chips_after_clear": selected_filter_chips_after_clear,
+                    "unexpected_filter_chips_after_clear": unexpected_filter_chips_after_clear,
+                },
+            )
+
         from xianyu_tools.source_adapter.ali1688 import Ali1688CaptchaError, Ali1688PayloadError
         adapter = Ali1688SourceAdapter()
         candidates = []
@@ -3478,6 +3695,9 @@ async def _run(args):
                 "distributor_count": c.get("distributor_count", 0),
                 "sku_count": 0,
                 "status": "pending",
+                "detail_status": "pending",
+                "is_detail_incomplete": False,
+                "detail_incomplete_reason": "",
                 "drop_reason": None,
                 "images": [],
                 "source_filter_snapshot": runtime_filter_snapshot,
@@ -3492,6 +3712,9 @@ async def _run(args):
                 manual_verification_wait_seconds=manual_verification_wait_seconds,
             )
             item_data["status"] = res["status"]
+            item_data["detail_status"] = res["status"]
+            item_data["is_detail_incomplete"] = bool(res.get("detail_incomplete"))
+            item_data["detail_incomplete_reason"] = str(res.get("detail_incomplete_reason") or "")
             item_data["images"] = res.get("images", [])
             item_data["sku_items"] = res.get("sku_details", [])
             item_data["sku_count"] = len(res.get("sku_details", []))

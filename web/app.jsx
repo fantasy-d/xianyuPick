@@ -1,6 +1,28 @@
 const { useState, useEffect, useRef, useMemo } = React;
 const sourceSkuCache = new Map();
+const DEFAULT_GROSS_PROFIT_RATE = 0.3;
+const SOURCE_LIST_PAGE_SIZE = 10;
 const TOKEN_LOG_PAGE_SIZE = 10;
+
+const isSourceDetailIncomplete = (source) => !!(
+    source?.is_detail_incomplete
+    || source?.source_is_detail_incomplete
+    || source?.detail_status === 'failed'
+    || source?.source_detail_status === 'failed'
+);
+
+const getSourceDetailIncompleteReason = (source) => (
+    source?.detail_incomplete_reason
+    || source?.source_detail_incomplete_reason
+    || '1688 风控/验证码导致详情页未完整抓取'
+);
+
+const normalizeGrossProfitRate = (value) => {
+    let rate = parseFloat(value);
+    if (!Number.isFinite(rate) || rate <= 0) return DEFAULT_GROSS_PROFIT_RATE;
+    if (rate > 1) rate = rate / 100;
+    return Math.min(rate, 1);
+};
 
 // --- 任务类型标签组件 ---
 const renderTaskTypeBadge = (inputType) => {
@@ -662,8 +684,383 @@ const ActionConfirmModal = ({ title, description, confirmLabel, tone = 'warning'
     );
 };
 
+const TaskStartConfigModal = ({ keyword, crawlConfig, sourceChannelsConfig, llmConfig, onStart, onClose }) => {
+    const [active, setActive] = useState(false);
+    const [mode, setMode] = useState('confirm');
+    const [draft, setDraft] = useState(() => ({
+        source_limit_1688: Number(crawlConfig?.source_limit_1688 || 10),
+        gross_profit_rate: normalizeGrossProfitRate(crawlConfig?.gross_profit_rate),
+        source_filter_models: Array.isArray(crawlConfig?.source_filter_models) ? crawlConfig.source_filter_models : [],
+        source_channel_selection_mode: crawlConfig?.source_channel_selection_mode || 'active_pool',
+        enabled_source_channels: Array.isArray(crawlConfig?.enabled_source_channels) ? crawlConfig.enabled_source_channels : [],
+        channel_search_filters: Array.isArray(crawlConfig?.channel_search_filters) ? crawlConfig.channel_search_filters : [],
+    }));
+
+    useEffect(() => {
+        let frameId = requestAnimationFrame(() => {
+            frameId = requestAnimationFrame(() => setActive(true));
+        });
+        document.body.style.overflow = 'hidden';
+        return () => {
+            cancelAnimationFrame(frameId);
+            document.body.style.overflow = '';
+        };
+    }, []);
+
+    const close = () => {
+        setActive(false);
+        setTimeout(onClose, 220);
+    };
+
+    const channels = Array.isArray(sourceChannelsConfig?.channels) ? sourceChannelsConfig.channels : [];
+    const llmModels = Array.from(new Set(
+        (Array.isArray(llmConfig) ? llmConfig : [])
+            .flatMap(item => Array.isArray(item.models) ? item.models : [])
+            .map(name => String(name || '').trim())
+            .filter(Boolean)
+    ));
+    const filterMeta = [
+        { key: 'rapid_invoice', label: '极速开票' },
+        { key: 'selected_distributors', label: '分销严选' },
+        { key: 'single_piece_drop_shipping', label: '一件代发' },
+        { key: 'seven_day_return', label: '7天无理由' },
+        { key: 'single_piece_free_shipping', label: '1件代发包邮' },
+        { key: 'free_shipping', label: '包邮' },
+        { key: 'freight_insurance_return', label: '退货包运费' },
+        { key: 'real_factory_verified', label: '真实工厂认证' },
+        { key: 'strength_verified', label: '实力认证' },
+        { key: 'official_logistics', label: '官方物流' },
+        { key: 'douyin_encrypted_waybill', label: '抖音面单' },
+    ];
+
+    const setSourceLimit = (value) => {
+        let next = parseInt(value, 10) || 10;
+        if (next < 1) next = 1;
+        if (next > 100) next = 100;
+        setDraft(prev => ({ ...prev, source_limit_1688: next }));
+    };
+
+    const setGrossRatePercent = (value) => {
+        let next = parseInt(value, 10) || 30;
+        if (next < 1) next = 1;
+        if (next > 100) next = 100;
+        setDraft(prev => ({ ...prev, gross_profit_rate: next / 100 }));
+    };
+
+    const toggleModel = (modelName) => {
+        setDraft(prev => {
+            const current = Array.isArray(prev.source_filter_models) ? prev.source_filter_models : [];
+            const next = current.includes(modelName)
+                ? current.filter(item => item !== modelName)
+                : [...current, modelName];
+            return { ...prev, source_filter_models: next };
+        });
+    };
+
+    const toggleAccount = (channelId, accountId, checked) => {
+        setDraft(prev => {
+            const entries = Array.isArray(prev.enabled_source_channels) ? [...prev.enabled_source_channels] : [];
+            const idx = entries.findIndex(item => item.channel_id === channelId);
+            const entry = idx >= 0 ? { ...entries[idx] } : { channel_id: channelId, enabled: true, account_ids: [] };
+            const accountIds = Array.isArray(entry.account_ids) ? [...entry.account_ids] : [];
+            entry.account_ids = checked
+                ? Array.from(new Set([...accountIds, accountId]))
+                : accountIds.filter(item => item !== accountId);
+            entry.enabled = entry.account_ids.length > 0;
+            if (idx >= 0) entries[idx] = entry;
+            else entries.push(entry);
+            return { ...prev, source_channel_selection_mode: 'custom_selected', enabled_source_channels: entries };
+        });
+    };
+
+    const toggleFilter = (channelId, filterKey, checked) => {
+        setDraft(prev => {
+            const entries = Array.isArray(prev.channel_search_filters) ? [...prev.channel_search_filters] : [];
+            const idx = entries.findIndex(item => item.channel_id === channelId);
+            const entry = idx >= 0 ? { ...entries[idx], filters: { ...(entries[idx].filters || {}) } } : { channel_id: channelId, filters: {} };
+            entry.filters[filterKey] = checked;
+            if (idx >= 0) entries[idx] = entry;
+            else entries.push(entry);
+            return { ...prev, channel_search_filters: entries };
+        });
+    };
+
+    const getSelectedAccountIds = (channelId) => {
+        const entry = (draft.enabled_source_channels || []).find(item => item.channel_id === channelId);
+        return Array.isArray(entry?.account_ids) ? entry.account_ids : [];
+    };
+
+    const getFilterValues = (channelId) => {
+        return ((draft.channel_search_filters || []).find(item => item.channel_id === channelId)?.filters) || {};
+    };
+
+    const summarizeEnabledChannel = (channel) => {
+        const selectedAccountIds = getSelectedAccountIds(channel.channel_id);
+        const accounts = (channel.accounts || []).filter(account => selectedAccountIds.includes(account.account_id));
+        const accountLabels = accounts.map(account => {
+            const realName = account.session_report?.account_name;
+            return realName || account.label || account.account_id;
+        });
+        return {
+            channelLabel: channel.label || channel.channel_id,
+            accountLabels,
+        };
+    };
+
+    const enabledChannelSummaries = channels
+        .map(summarizeEnabledChannel)
+        .filter(item => item.accountLabels.length > 0);
+
+    const configuredFilterLabels = channels.flatMap(channel => {
+        const values = getFilterValues(channel.channel_id);
+        return filterMeta
+            .filter(filter => values[filter.key])
+            .map(filter => `${channel.label || channel.channel_id}：${filter.label}`);
+    });
+
+    const selectedModelLabels = (draft.source_filter_models || []).length > 0
+        ? draft.source_filter_models
+        : llmModels;
+
+    const startWithConfig = (useDefault) => {
+        onStart(useDefault ? crawlConfig : draft);
+    };
+
+    return ReactDOM.createPortal(
+        <div className={`preview-modal-overlay ${active ? 'active' : ''}`} onClick={close}>
+            <div
+                className={`preview-modal-wrapper ${active ? 'active' : ''}`}
+                style={{ width: mode === 'confirm' ? '640px' : '880px' }}
+                onClick={e => e.stopPropagation()}
+            >
+                <div className="px-6 py-4 border-b border-border-hairline flex justify-between items-center bg-surface-container-low">
+                    <h3 className="font-sans text-base font-bold text-on-surface flex items-center gap-2">
+                        <span className="material-symbols-outlined text-primary">tune</span>
+                        启动扫描配置
+                    </h3>
+                    <button onClick={close} className="w-8 h-8 rounded-full hover:bg-surface-container-high flex items-center justify-center text-secondary hover:text-on-surface transition-all">
+                        <span className="material-symbols-outlined text-[20px]">close</span>
+                    </button>
+                </div>
+
+                {mode === 'confirm' ? (
+                    <div className="p-6 space-y-4">
+                        <div className="rounded-xl border border-border-hairline bg-surface-container-low px-4 py-4">
+                            <div className="text-sm font-semibold text-on-surface">是否使用系统默认商品爬取与筛选配置？</div>
+                            <div className="mt-2 text-xs text-secondary leading-relaxed">
+                                任务：<span className="font-semibold text-on-surface">{keyword}</span>。选择“自定义本次配置”只会影响本次任务，不会改动系统默认配置。
+                            </div>
+                        </div>
+                        <div className="rounded-xl border border-primary/15 bg-primary/[0.03] px-4 py-4 space-y-3">
+                            <div className="font-sans text-xs font-bold text-on-surface">当前系统默认配置概览</div>
+                            <div className="flex flex-wrap gap-2 text-[11px]">
+                                <span className="px-2.5 py-1 rounded-full bg-surface-container-lowest border border-border-hairline">
+                                    1688 抓取 {draft.source_limit_1688} 条
+                                </span>
+                                <span className="px-2.5 py-1 rounded-full bg-surface-container-lowest border border-border-hairline">
+                                    毛利率 {Math.round(normalizeGrossProfitRate(draft.gross_profit_rate) * 100)}%
+                                </span>
+                                <span className="px-2.5 py-1 rounded-full bg-surface-container-lowest border border-border-hairline">
+                                    模型：{(draft.source_filter_models || []).length > 0 ? draft.source_filter_models.join('、') : '全部已保存模型'}
+                                </span>
+                            </div>
+                            <div className="space-y-2 text-[11px]">
+                                <div className="font-semibold text-secondary">货源渠道账号</div>
+                                <div className="flex flex-wrap gap-2">
+                                    {enabledChannelSummaries.length === 0 ? (
+                                        <span className="px-2.5 py-1 rounded-full bg-warning/8 text-warning border border-warning/15">未选择可抓取账号</span>
+                                    ) : enabledChannelSummaries.map(item => (
+                                        <span key={`default-channel-${item.channelLabel}`} className="px-2.5 py-1 rounded-full bg-surface-container-lowest border border-border-hairline">
+                                            {item.channelLabel}：{item.accountLabels.join('、')}
+                                        </span>
+                                    ))}
+                                </div>
+                            </div>
+                            <div className="space-y-2 text-[11px]">
+                                <div className="font-semibold text-secondary">货源筛选项</div>
+                                <div className="flex flex-wrap gap-2">
+                                    {configuredFilterLabels.length === 0 ? (
+                                        <span className="px-2.5 py-1 rounded-full bg-surface-container-lowest border border-border-hairline">未启用</span>
+                                    ) : configuredFilterLabels.map(label => (
+                                        <span key={`default-filter-${label}`} className="px-2.5 py-1 rounded-full bg-success/8 text-success border border-success/15">
+                                            {label}
+                                        </span>
+                                    ))}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                ) : (
+                    <div className="p-6 space-y-4 max-h-[82vh] overflow-y-auto">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div className="space-y-2">
+                                <span className="font-sans text-xs text-secondary font-semibold">1688 商品爬取数量</span>
+                                <div className="flex items-center gap-4">
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="100"
+                                        step="1"
+                                        value={draft.source_limit_1688}
+                                        onChange={(e) => setSourceLimit(e.target.value)}
+                                        className="flex-1 h-1.5 bg-surface-container rounded-lg appearance-none cursor-pointer accent-primary"
+                                    />
+                                    <div className="flex items-center gap-1">
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="100"
+                                            step="1"
+                                            value={draft.source_limit_1688}
+                                            onChange={(e) => setSourceLimit(e.target.value)}
+                                            className="w-16 bg-surface-container-low border border-border-hairline text-on-surface text-center font-mono text-xs rounded-lg px-2 py-1 focus:outline-none focus:border-primary"
+                                        />
+                                        <span className="font-sans text-xs text-secondary">条</span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div className="space-y-2">
+                                <span className="font-sans text-xs text-secondary font-semibold">预期净利润毛利率（%）</span>
+                                <div className="flex items-center gap-4">
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="100"
+                                        step="1"
+                                        value={Math.round(normalizeGrossProfitRate(draft.gross_profit_rate) * 100)}
+                                        onChange={(e) => setGrossRatePercent(e.target.value)}
+                                        className="flex-1 h-1.5 bg-surface-container rounded-lg appearance-none cursor-pointer accent-primary"
+                                    />
+                                    <div className="flex items-center gap-1">
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="100"
+                                            value={Math.round(normalizeGrossProfitRate(draft.gross_profit_rate) * 100)}
+                                            onChange={(e) => setGrossRatePercent(e.target.value)}
+                                            className="w-16 bg-surface-container-low border border-border-hairline text-on-surface text-center font-mono text-xs rounded-lg px-2 py-1 focus:outline-none focus:border-primary"
+                                        />
+                                        <span className="font-sans text-xs text-secondary">%</span>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="space-y-3">
+                            <div className="flex items-center justify-between gap-3">
+                                <div className="font-sans text-xs text-secondary font-semibold">货源渠道与账号</div>
+                                <span className="text-[11px] text-secondary">勾选后仅影响本次任务</span>
+                            </div>
+                            {channels.length === 0 ? (
+                                <div className="rounded-xl border border-warning/20 bg-warning/5 px-4 py-3 text-xs text-warning">
+                                    当前系统配置中没有可用货源渠道。
+                                </div>
+                            ) : channels.map(channel => (
+                                <div key={channel.channel_id} className="rounded-xl border border-border-hairline bg-surface-container-low p-3 space-y-3">
+                                    <div className="font-sans text-xs font-bold text-on-surface">{channel.label || channel.channel_id}</div>
+                                    {(channel.accounts || []).length === 0 ? (
+                                        <div className="rounded-lg border border-dashed border-border-hairline bg-surface-container-lowest px-3 py-2 text-xs text-secondary">
+                                            当前渠道暂无账号。
+                                        </div>
+                                    ) : (
+                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                            {(channel.accounts || []).map(account => {
+                                                const accountName = account.session_report?.account_name;
+                                                const statusText = account.session_report?.status_text || (account.session_report?.is_usable ? '登录正常' : '未检测');
+                                                return (
+                                            <label key={account.account_id} className="flex items-center gap-2 rounded-lg border border-border-hairline bg-surface-container-lowest px-3 py-2 text-xs cursor-pointer">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={getSelectedAccountIds(channel.channel_id).includes(account.account_id)}
+                                                    onChange={(e) => toggleAccount(channel.channel_id, account.account_id, e.target.checked)}
+                                                    className="rounded border-secondary text-primary focus:ring-primary/20"
+                                                />
+                                                <span className="min-w-0">
+                                                    <span className="font-semibold text-on-surface">{accountName || account.label || account.account_id}</span>
+                                                    <span className="ml-2 text-secondary">{statusText}</span>
+                                                </span>
+                                            </label>
+                                                );
+                                            })}
+                                        </div>
+                                    )}
+                                    <div className="flex flex-wrap gap-2 pt-2 border-t border-border-hairline/70">
+                                        {filterMeta.map(filter => (
+                                            <label key={filter.key} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full border border-border-hairline bg-surface-container-lowest text-[11px] cursor-pointer">
+                                                <input
+                                                    type="checkbox"
+                                                    checked={!!getFilterValues(channel.channel_id)[filter.key]}
+                                                    onChange={(e) => toggleFilter(channel.channel_id, filter.key, e.target.checked)}
+                                                    className="rounded border-secondary text-primary focus:ring-primary/20"
+                                                />
+                                                <span>{filter.label}</span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                </div>
+                            ))}
+                        </div>
+
+                        <div className="space-y-3">
+                            <div className="font-sans text-xs text-secondary font-semibold">商品相关性筛选模型（空则使用全部已保存模型）</div>
+                            <div className="flex flex-wrap gap-2">
+                                {llmModels.length === 0 ? (
+                                    <span className="text-xs text-secondary">当前未读取到已保存模型。</span>
+                                ) : llmModels.map(modelName => (
+                                    <label key={modelName} className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-full border border-border-hairline bg-surface-container-low text-[11px] cursor-pointer">
+                                        <input
+                                            type="checkbox"
+                                            checked={(draft.source_filter_models || []).includes(modelName)}
+                                            onChange={() => toggleModel(modelName)}
+                                            className="rounded border-secondary text-primary focus:ring-primary/20"
+                                        />
+                                        <span>{modelName}</span>
+                                    </label>
+                                ))}
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                <div className="px-6 py-4 border-t border-border-hairline flex gap-3 justify-end bg-surface-container-low">
+                    <button
+                        onClick={close}
+                        className="px-4 py-2 border border-border-hairline rounded-lg text-secondary font-sans text-xs font-semibold hover:bg-surface-container-high hover:text-on-surface transition-colors"
+                    >
+                        取消
+                    </button>
+                    {mode === 'confirm' ? (
+                        <>
+                            <button
+                                onClick={() => setMode('custom')}
+                                className="px-4 py-2 border border-primary/25 text-primary rounded-lg font-sans text-xs font-semibold hover:bg-primary/5 transition-colors"
+                            >
+                                自定义本次配置
+                            </button>
+                            <button
+                                onClick={() => startWithConfig(true)}
+                                className="px-4 py-2 bg-primary hover:bg-primary-container text-white font-sans text-xs font-semibold rounded-lg shadow-sm transition-colors"
+                            >
+                                使用系统默认配置
+                            </button>
+                        </>
+                    ) : (
+                        <button
+                            onClick={() => startWithConfig(false)}
+                            className="px-4 py-2 bg-primary hover:bg-primary-container text-white font-sans text-xs font-semibold rounded-lg shadow-sm transition-colors"
+                        >
+                            启动
+                        </button>
+                    )}
+                </div>
+            </div>
+        </div>,
+        document.body
+    );
+};
+
 // --- 商品详情模态弹窗组件（解决闪烁与退场动画） ---
-const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchStatusMap, batchResultMap }) => {
+const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchStatusMap, batchResultMap, grossProfitRate = DEFAULT_GROSS_PROFIT_RATE }) => {
     const [active, setActive] = useState(false);
     const [skus, setSkus] = useState([]);
     const [loadingSkus, setLoadingSkus] = useState(false);
@@ -719,7 +1116,8 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
 
     const costPrice = parseFloat(item.source_price) || 0;
     const refPrice = parseFloat(item.ref_price) || 0;
-    const margin = (refPrice - costPrice - 20).toFixed(2);
+    const normalizedGrossProfitRate = normalizeGrossProfitRate(grossProfitRate);
+    const margin = (costPrice * normalizedGrossProfitRate).toFixed(2);
     
     // AI ROI 测算
     const roiPercentage = costPrice > 0 ? Math.round(((refPrice - costPrice) / costPrice) * 100) : 0;
@@ -923,21 +1321,21 @@ const DetailModal = ({ item, onClose, onUpdateItem, handleStatusLoaded, batchSta
                             </div>
                             
                             {item.ref_price > 0 && (
-                                <>
-                                    <div className="flex justify-between items-baseline border-t border-border-hairline/60 pt-2">
-                                        <span className="text-xs text-secondary">爆款参考售价</span>
-                                        <span className="font-mono text-sm font-bold text-on-surface">¥{item.ref_price}</span>
-                                    </div>
-                                    <div className="flex justify-between items-baseline border-t border-border-hairline/60 pt-2">
-                                        <span className="text-xs text-secondary">预期净利润额</span>
-                                        <span className={`font-mono text-base font-black ${parseFloat(margin) > 50 ? 'text-success' : 'text-error'}`}>
-                                            ¥{margin}
-                                        </span>
-                                    </div>
-                                </>
+                                <div className="flex justify-between items-baseline border-t border-border-hairline/60 pt-2">
+                                    <span className="text-xs text-secondary">爆款参考售价</span>
+                                    <span className="font-mono text-sm font-bold text-on-surface">¥{item.ref_price}</span>
+                                </div>
+                            )}
+                            {costPrice > 0 && (
+                                <div className="flex justify-between items-baseline border-t border-border-hairline/60 pt-2">
+                                    <span className="text-xs text-secondary">预期净利润额</span>
+                                    <span className={`font-mono text-base font-black ${parseFloat(margin) > 50 ? 'text-success' : 'text-error'}`}>
+                                        ¥{margin}
+                                    </span>
+                                </div>
                             )}
                             <div className="text-[10px] text-secondary pt-1">
-                                ROI {roiPercentage}% · 运费估算已计入
+                                ROI {roiPercentage}% · 毛利率配置 {Math.round(normalizedGrossProfitRate * 100)}%
                             </div>
                         </div>
 
@@ -1031,7 +1429,10 @@ const PublishedManager = ({ hideHeader = false }) => {
     const [batchPublishing, setBatchPublishing] = useState(false);
     const [batchDepublishing, setBatchDepublishing] = useState(false);
     const [batchDeleting, setBatchDeleting] = useState(false);
+    const [batchSyncingStatus, setBatchSyncingStatus] = useState(false);
+    const [syncStatusNotice, setSyncStatusNotice] = useState("");
     const [confirmDialog, setConfirmDialog] = useState(null);
+    const [grossProfitRate, setGrossProfitRate] = useState(DEFAULT_GROSS_PROFIT_RATE);
 
     // 用于收集每个商品的实时状态映射
     const [batchStatusMap, setBatchStatusMap] = useState({});
@@ -1042,10 +1443,15 @@ const PublishedManager = ({ hideHeader = false }) => {
         if (rawStatus === 'success' || rawStatus === 'done') return 'done';
         if (rawStatus === 'depublished') return 'depublished';
         if (rawStatus === 'failed') return 'failed';
-        if (rawStatus === 'pending' || rawStatus === 'publishing' || rawStatus === 'depublishing') return 'publishing';
+        if (rawStatus === 'pending' || rawStatus === 'publishing' || rawStatus === 'depublishing' || rawStatus === 'syncing') return 'publishing';
         if (rawStatus === 'deleting') return 'deleting';
         if (rawStatus === 'deleted' || rawStatus === 'none' || rawStatus === 'idle' || !rawStatus) return 'idle';
         return 'idle';
+    };
+
+    const formatPublishedSourcePrice = (item) => {
+        const suffix = Number(item?.source_sku_count || 0) > 1 ? '起' : '';
+        return `¥${item?.source_price}${suffix}`;
     };
 
     const getPublishedItemStatus = (item) => normalizePublishedStatus(batchStatusMap[item.source_db_id] || item.publish_status);
@@ -1058,6 +1464,9 @@ const PublishedManager = ({ hideHeader = false }) => {
         .map(item => item.source_db_id);
     const deletableIds = selectedItems
         .filter(item => ['selected', 'depublished', 'failed'].includes(getPublishedItemStatus(item)))
+        .map(item => item.source_db_id);
+    const syncableIds = selectedItems
+        .filter(item => item.xianyu_item_id && !['selected', 'idle'].includes(getPublishedItemStatus(item)))
         .map(item => item.source_db_id);
 
     const fetchPublishedProducts = async () => {
@@ -1080,9 +1489,24 @@ const PublishedManager = ({ hideHeader = false }) => {
         }
     };
 
+    const fetchProfitConfig = async () => {
+        try {
+            const res = await fetch('/api/system/configs').then(r => r.json());
+            if (res.status === 'success') {
+                setGrossProfitRate(normalizeGrossProfitRate(res.data?.crawl?.gross_profit_rate));
+            }
+        } catch (e) {
+            console.error("加载毛利率配置失败:", e);
+        }
+    };
+
     useEffect(() => {
         fetchPublishedProducts();
     }, [page, keyword, filterStatus, minSourcePrice, maxSourcePrice, minRefPrice, maxRefPrice, sortBy, sortOrder, refreshTrigger]);
+
+    useEffect(() => {
+        fetchProfitConfig();
+    }, []);
 
     useEffect(() => {
         const visibleIds = new Set(items.map(item => item.source_db_id));
@@ -1162,6 +1586,69 @@ const PublishedManager = ({ hideHeader = false }) => {
             });
         } finally {
             setBatchPublishing(false);
+        }
+    };
+
+    const doBatchSyncStatus = async () => {
+        if (selectedIds.length === 0) {
+            alert("请先选择要同步状态的选品");
+            return;
+        }
+        const toSyncIds = [...syncableIds];
+        if (toSyncIds.length === 0) {
+            alert("当前勾选选品里，没有可同步的已发布商品。");
+            return;
+        }
+        const previousStatusById = {};
+        selectedItems.forEach(item => {
+            previousStatusById[item.source_db_id] = batchStatusMap[item.source_db_id] || item.publish_status || 'idle';
+        });
+
+        setBatchSyncingStatus(true);
+        setSyncStatusNotice("");
+        toSyncIds.forEach(dbId => {
+            setBatchStatusMap(prev => ({ ...prev, [dbId]: 'syncing' }));
+        });
+
+        try {
+            const resBatch = await fetch('/api/selection/sync_status/batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ source_ids: toSyncIds })
+            }).then(r => r.json());
+
+            if (resBatch.success) {
+                resBatch.success.forEach(item => {
+                    const dbId = item.source_id;
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: item.publish_status || item.status }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: item.publish_status || item.status, msg: item.msg, published_url: item.published_url } }));
+                });
+            }
+            if (resBatch.failed) {
+                resBatch.failed.forEach(item => {
+                    const dbId = item.source_id;
+                    setBatchStatusMap(prev => ({ ...prev, [dbId]: previousStatusById[dbId] || 'idle' }));
+                    setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: item.msg } }));
+                });
+            }
+            const successCount = (resBatch.success || []).length;
+            const failedItems = resBatch.failed || [];
+            if (failedItems.length > 0) {
+                const firstMsg = failedItems[0]?.msg || '未知错误';
+                setSyncStatusNotice(`同步选品状态：成功 ${successCount} 项，失败 ${failedItems.length} 项。失败原因：${firstMsg}`);
+            } else {
+                setSyncStatusNotice(`同步选品状态：成功 ${successCount} 项`);
+            }
+        } catch (e) {
+            console.error("同步选品状态失败:", e);
+            toSyncIds.forEach(dbId => {
+                setBatchStatusMap(prev => ({ ...prev, [dbId]: previousStatusById[dbId] || 'idle' }));
+                setBatchResultMap(prev => ({ ...prev, [dbId]: { status: 'failed', msg: '网络或连接出错' } }));
+            });
+            setSyncStatusNotice("同步选品状态失败：网络或连接出错");
+        } finally {
+            setBatchSyncingStatus(false);
+            setRefreshTrigger(t => t + 1);
         }
     };
 
@@ -1465,6 +1952,11 @@ const PublishedManager = ({ hideHeader = false }) => {
                                     已选 {selectedIds.length} 项
                                 </span>
                             )}
+                            {syncStatusNotice && (
+                                <span className="text-xs font-semibold text-warning bg-warning/10 border border-warning/20 px-2 py-0.5 rounded-full">
+                                    {syncStatusNotice}
+                                </span>
+                            )}
                         </div>
 
                         {selectedIds.length > 0 && (
@@ -1472,16 +1964,26 @@ const PublishedManager = ({ hideHeader = false }) => {
                                 {publishableIds.length > 0 && (
                                     <button
                                         className="px-3.5 py-1.5 bg-primary hover:bg-primary-container text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40"
-                                        disabled={batchPublishing || batchDepublishing || batchDeleting}
+                                        disabled={batchPublishing || batchDepublishing || batchDeleting || batchSyncingStatus}
                                         onClick={doBatchPublish}
                                     >
                                         {batchPublishing ? "云同步中..." : `🚀 批量发布 (${publishableIds.length})`}
                                     </button>
                                 )}
+                                {syncableIds.length > 0 && (
+                                    <button
+                                        className="px-3.5 py-1.5 bg-surface-container-high hover:bg-surface-container-highest border border-border-hairline text-on-surface rounded-lg text-xs font-semibold transition-colors disabled:opacity-40 flex items-center gap-1"
+                                        disabled={batchPublishing || batchDepublishing || batchDeleting || batchSyncingStatus}
+                                        onClick={doBatchSyncStatus}
+                                    >
+                                        <span className={`material-symbols-outlined text-[16px] ${batchSyncingStatus ? 'animate-spin' : ''}`}>sync</span>
+                                        {batchSyncingStatus ? "同步中..." : `同步选品状态 (${syncableIds.length})`}
+                                    </button>
+                                )}
                                 {depublishableIds.length > 0 && (
                                     <button
                                         className="px-3.5 py-1.5 bg-warning hover:bg-warning/80 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40"
-                                        disabled={batchPublishing || batchDepublishing || batchDeleting}
+                                        disabled={batchPublishing || batchDepublishing || batchDeleting || batchSyncingStatus}
                                         onClick={doBatchDepublish}
                                     >
                                         {batchDepublishing ? "云同步中..." : `⚠️ 批量下架 (${depublishableIds.length})`}
@@ -1490,7 +1992,7 @@ const PublishedManager = ({ hideHeader = false }) => {
                                 {deletableIds.length > 0 && (
                                     <button
                                         className="px-3.5 py-1.5 bg-error hover:bg-error/85 text-white rounded-lg text-xs font-semibold transition-colors disabled:opacity-40"
-                                        disabled={batchPublishing || batchDepublishing || batchDeleting}
+                                        disabled={batchPublishing || batchDepublishing || batchDeleting || batchSyncingStatus}
                                         onClick={doBatchDelete}
                                     >
                                         {batchDeleting ? "云注销中..." : `🗑️ 批量删除 (${deletableIds.length})`}
@@ -1532,6 +2034,8 @@ const PublishedManager = ({ hideHeader = false }) => {
                                 {items.map((item) => {
                                     const currentStatus = getPublishedItemStatus(item);
                                     const isChecked = selectedIds.includes(item.source_db_id);
+                                    const detailIncomplete = isSourceDetailIncomplete(item);
+                                    const detailIncompleteReason = getSourceDetailIncompleteReason(item);
                                     
                                     let statusText = '未知';
                                     let statusClass = 'bg-secondary/10 text-secondary border-secondary/20';
@@ -1611,6 +2115,15 @@ const PublishedManager = ({ hideHeader = false }) => {
                                                     >
                                                         查看1688货源 ↗
                                                     </a>
+                                                    {detailIncomplete && (
+                                                        <span
+                                                            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded-full bg-warning/10 text-warning border border-warning/20 text-[10px] font-bold"
+                                                            title={detailIncompleteReason}
+                                                        >
+                                                            <span className="material-symbols-outlined text-[12px] leading-none">warning</span>
+                                                            风控未完整抓取
+                                                        </span>
+                                                    )}
                                                 </div>
                                             </td>
                                             <td className="p-cell-padding font-mono font-bold text-on-surface">{item.xianyu_item_id || '-'}</td>
@@ -1620,7 +2133,7 @@ const PublishedManager = ({ hideHeader = false }) => {
                                                     {statusText}
                                                 </span>
                                             </td>
-                                            <td className="p-cell-padding font-mono text-secondary font-bold">¥{item.source_price}</td>
+                                            <td className="p-cell-padding font-mono text-secondary font-bold">{formatPublishedSourcePrice(item)}</td>
                                             <td className="p-cell-padding font-mono text-on-surface font-semibold">¥{item.ref_price || '-'}</td>
                                             <td className="p-cell-padding text-secondary text-xs">{item.publish_time}</td>
                                         </tr>
@@ -1675,6 +2188,7 @@ const PublishedManager = ({ hideHeader = false }) => {
                     handleStatusLoaded={handleStatusLoaded}
                     batchStatusMap={batchStatusMap}
                     batchResultMap={batchResultMap}
+                    grossProfitRate={grossProfitRate}
                 />
             )}
             {confirmDialog && (
@@ -2172,7 +2686,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
             { key: 'real_factory_verified', label: '真实工厂认证', group: '资质认证' },
             { key: 'strength_verified', label: '实力认证', group: '资质认证' },
             { key: 'official_logistics', label: '官方物流', group: '服务能力' },
-            { key: 'encrypted_waybill', label: '密文面单', group: '服务能力' }
+            { key: 'douyin_encrypted_waybill', label: '抖音面单', group: '密文面单' }
         ]
     };
     const getSupportedChannelSearchFilters = (channelType) => CHANNEL_SEARCH_FILTER_META[channelType] || [];
@@ -2252,6 +2766,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     const [crawlCollapsed, setCrawlCollapsed] = useState(true);
     const [crawlConfig, setCrawlConfig] = useState({
         source_limit_1688: 10,
+        gross_profit_rate: DEFAULT_GROSS_PROFIT_RATE,
         source_filter_models: [],
         source_channel_selection_mode: 'active_pool',
         enabled_source_channels: [],
@@ -2436,7 +2951,12 @@ const SystemSettingsView = ({ hideHeader = false }) => {
     const currentSourceAccount = currentSourceAccounts.find(item => item.account_id === currentSourceAccountId) || currentSourceAccounts[0] || createSourceChannelAccount(currentSourceChannel?.channel_id || 'ali1688', 1);
     const currentSourceRealtimeName = currentSourceAccount?.session_report?.account_name || '';
     const currentSourceLabel = currentSourceAccount?.label || '';
-    const currentSourceDisplayName = currentSourceLabel || currentSourceAccount?.account_id || currentSourceRealtimeName || '';
+    const getSourceAccountDisplayName = (account, fallbackIndex) => {
+        const reportName = account?.session_report?.account_name || '';
+        const fallbackName = fallbackIndex ? `渠道账号 ${fallbackIndex}` : '';
+        return reportName || account?.label || account?.account_id || fallbackName;
+    };
+    const currentSourceDisplayName = getSourceAccountDisplayName(currentSourceAccount);
     const currentSourceNameSource = currentSourceAccount?.session_report?.account_name_source || currentSourceAccount?.session_report?.source || '';
     const isSourceNameFallback = !currentSourceRealtimeName && !!currentSourceLabel;
     const visibleActiveSourceAccountIds = activeSourceAccountIds.filter(id => loginReadySourceAccounts.some(account => account.account_id === id));
@@ -3375,6 +3895,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                 if (data.crawl) {
                     setCrawlConfig({
                         source_limit_1688: parseInt(data.crawl.source_limit_1688) || 10,
+                        gross_profit_rate: normalizeGrossProfitRate(data.crawl.gross_profit_rate),
                         source_filter_models: data.crawl.source_filter_models || [],
                         source_channel_selection_mode: data.crawl.source_channel_selection_mode || 'active_pool',
                         enabled_source_channels: Array.isArray(data.crawl.enabled_source_channels) ? data.crawl.enabled_source_channels : [],
@@ -3989,7 +4510,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                 <div className="space-y-1">
                                     <label className="block font-sans text-xs text-secondary font-semibold">应用私钥 (App Secret)</label>
                                     <div className="relative">
-                                        <input 
+                                        <input
                                             type={currentOpenapiAccount.show_secret ? 'text' : 'password'}
                                             value={currentOpenapiAccount.app_secret || ''}
                                             onChange={(e) => setCurrentOpenapiAccount(prev => ({ ...prev, app_secret: e.target.value }))}
@@ -4183,7 +4704,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                                     <div className="space-y-1">
                                         <label className="block font-sans text-xs text-secondary font-semibold">默认运费 (分)</label>
-                                        <input 
+                                        <input
                                             type="number"
                                             value={currentOpenapiAccount.default_config?.express_fee}
                                             onChange={(e) => setCurrentOpenapiAccount(prev => ({
@@ -4260,7 +4781,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                 <div className="space-y-1">
                                     <div className="w-full min-h-[38px] bg-surface-container-low border border-border-hairline rounded-lg px-3 py-2 flex flex-wrap items-center gap-3">
                                         {loginReadySourceAccounts.length > 0 ? (
-                                            loginReadySourceAccounts.map(account => {
+                                            loginReadySourceAccounts.map((account, idx) => {
                                                 const isChecked = visibleActiveSourceAccountIds.includes(account.account_id);
                                                 return (
                                                     <label key={account.account_id} className="inline-flex items-center gap-2 text-xs text-on-surface font-sans cursor-pointer">
@@ -4270,7 +4791,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                                             onChange={(e) => handleSourceActiveAccountToggle(account.account_id, e.target.checked)}
                                                             className="rounded border-border-hairline text-primary focus:ring-primary/30"
                                                         />
-                                                        <span>{account.label || account.account_id}</span>
+                                                        <span>{getSourceAccountDisplayName(account, idx + 1)}</span>
                                                     </label>
                                                 );
                                             })
@@ -4297,7 +4818,7 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                                     onClick={() => handleSourceAccountSwitch(account.account_id)}
                                                     className={selectableChipActionClass(isSelected)}
                                                 >
-                                                    {account.label || `渠道账号 ${idx + 1}`}
+                                                    {getSourceAccountDisplayName(account, idx + 1)}
                                                 </button>
                                                 {isActive && (
                                                     <span className={`inline-block w-1.5 h-1.5 rounded-full ${loginVisualState.dotClass}`} title={loginVisualState.title}></span>
@@ -4480,31 +5001,74 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                     </span>
                                 </div>
                                 <p className="font-sans text-[11px] text-secondary leading-relaxed">
-                                    控制每个闲鱼爆款商品去 1688 抓取的最大候选商品深度（合理区间：5 - 50）。数值越大扫描更彻底，但也会消耗更多抓取时间与资源。
+                                    控制每个闲鱼爆款商品去 1688 抓取的最大候选商品深度（最多 100 条）。数值越大扫描更彻底，但也会消耗更多抓取时间与资源。
                                 </p>
                                 <div className="flex items-center gap-4">
                                     <input 
                                         type="range"
-                                        min="5"
-                                        max="50"
+                                        min="1"
+                                        max="100"
                                         step="1"
                                         value={crawlConfig.source_limit_1688}
                                         onChange={(e) => setCrawlConfig(prev => ({ ...prev, source_limit_1688: parseInt(e.target.value) || 10 }))}
                                         className="flex-1 h-1.5 bg-surface-container rounded-lg appearance-none cursor-pointer accent-primary"
                                     />
-                                    <input 
-                                        type="number"
-                                        min="5"
-                                        max="50"
-                                        value={crawlConfig.source_limit_1688}
-                                        onChange={(e) => {
-                                            let val = parseInt(e.target.value) || 10;
-                                            if (val < 5) val = 5;
-                                            if (val > 50) val = 50;
-                                            setCrawlConfig(prev => ({ ...prev, source_limit_1688: val }));
-                                        }}
-                                        className="w-16 bg-surface-container-low border border-border-hairline text-on-surface text-center font-mono text-xs rounded-lg px-2 py-1 focus:outline-none focus:border-primary"
+                                    <div className="flex items-center gap-1">
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="100"
+                                            step="1"
+                                            value={crawlConfig.source_limit_1688}
+                                            onChange={(e) => {
+                                                let val = parseInt(e.target.value) || 10;
+                                                if (val < 1) val = 1;
+                                                if (val > 100) val = 100;
+                                                setCrawlConfig(prev => ({ ...prev, source_limit_1688: val }));
+                                            }}
+                                            className="w-16 bg-surface-container-low border border-border-hairline text-on-surface text-center font-mono text-xs rounded-lg px-2 py-1 focus:outline-none focus:border-primary"
+                                        />
+                                        <span className="font-sans text-xs text-secondary">条</span>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="space-y-2 pt-2 border-t border-border-hairline/70">
+                                <div className="flex justify-between items-center">
+                                    <label className="font-sans text-xs text-secondary font-semibold">预期净利润毛利率</label>
+                                    <span className="font-mono text-xs font-bold text-primary bg-primary/10 px-2 py-0.5 rounded">
+                                        {Math.round(normalizeGrossProfitRate(crawlConfig.gross_profit_rate) * 100)}%
+                                    </span>
+                                </div>
+                                <p className="font-sans text-[11px] text-secondary leading-relaxed">
+                                    商品档案与货源对比中的预期净利润按 “1688 成本价 × 毛利率” 计算。
+                                </p>
+                                <div className="flex items-center gap-4">
+                                    <input
+                                        type="range"
+                                        min="1"
+                                        max="100"
+                                        step="1"
+                                        value={Math.round(normalizeGrossProfitRate(crawlConfig.gross_profit_rate) * 100)}
+                                        onChange={(e) => setCrawlConfig(prev => ({ ...prev, gross_profit_rate: (parseInt(e.target.value) || 30) / 100 }))}
+                                        className="flex-1 h-1.5 bg-surface-container rounded-lg appearance-none cursor-pointer accent-primary"
                                     />
+                                    <div className="flex items-center gap-1">
+                                        <input
+                                            type="number"
+                                            min="1"
+                                            max="100"
+                                            value={Math.round(normalizeGrossProfitRate(crawlConfig.gross_profit_rate) * 100)}
+                                            onChange={(e) => {
+                                                let val = parseInt(e.target.value) || 30;
+                                                if (val < 1) val = 1;
+                                                if (val > 100) val = 100;
+                                                setCrawlConfig(prev => ({ ...prev, gross_profit_rate: val / 100 }));
+                                            }}
+                                            className="w-16 bg-surface-container-low border border-border-hairline text-on-surface text-center font-mono text-xs rounded-lg px-2 py-1 focus:outline-none focus:border-primary"
+                                        />
+                                        <span className="font-sans text-xs text-secondary">%</span>
+                                    </div>
                                 </div>
                             </div>
 
@@ -4609,9 +5173,11 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                                     </div>
                                                 ) : (
                                                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                                        {currentCrawlChannel.crawl_accounts.map(account => {
+                                                        {currentCrawlChannel.crawl_accounts.map((account, idx) => {
                                                             const report = account.session_report || {};
                                                             const isChecked = currentCrawlSelectedAccountIds.includes(account.account_id);
+                                                            const accountDisplayName = getSourceAccountDisplayName(account, idx + 1);
+                                                            const accountRemark = account.label || '';
                                                             return (
                                                                 <label
                                                                     key={account.account_id}
@@ -4630,16 +5196,18 @@ const SystemSettingsView = ({ hideHeader = false }) => {
                                                                     <div className="min-w-0 flex-1">
                                                                         <div className="flex items-center gap-2 flex-wrap">
                                                                             <span className="font-sans text-xs font-semibold text-on-surface">
-                                                                                {account.label || account.account_id}
+                                                                                {accountDisplayName}
                                                                             </span>
                                                                             <span className="inline-flex items-center gap-1 text-[10px] text-success">
                                                                                 <span className="w-1.5 h-1.5 rounded-full bg-success"></span>
                                                                                 <span>{report.status_text || '登录正常'}</span>
                                                                             </span>
                                                                         </div>
-                                                                        <div className="mt-1 text-[11px] text-secondary">
-                                                                            渠道账号备注：{account.label || account.account_id}
-                                                                        </div>
+                                                                        {accountRemark && accountRemark !== accountDisplayName && (
+                                                                            <div className="mt-1 text-[11px] text-secondary">
+                                                                                账号备注：{accountRemark}
+                                                                            </div>
+                                                                        )}
                                                                     </div>
                                                                 </label>
                                                             );
@@ -4784,7 +5352,10 @@ const App = () => {
     const [batchStatusMap, setBatchStatusMap] = useState({});
     const [batchResultMap, setBatchResultMap] = useState({});
     const [confirmDialog, setConfirmDialog] = useState(null);
+    const [taskStartConfig, setTaskStartConfig] = useState(null);
     const [sourceChannelFilter, setSourceChannelFilter] = useState("all");
+    const [sourceSortRule, setSourceSortRule] = useState("price_asc");
+    const [sourceListPage, setSourceListPage] = useState(1);
     const [archivePage, setArchivePage] = useState(1);
     const [resultPage, setResultPage] = useState(1);
     const [resultTaskPage, setResultTaskPage] = useState(1);
@@ -4813,12 +5384,18 @@ const App = () => {
             setSelectedIds([]);
             setBatchStatusMap({});
             setBatchResultMap({});
+            setSourceListPage(1);
         } else {
             setSelectedIds([]);
             setBatchStatusMap({});
             setBatchResultMap({});
+            setSourceListPage(1);
         }
     }, [selectedItem]);
+
+    useEffect(() => {
+        setSourceListPage(1);
+    }, [sourceChannelFilter, sourceSortRule]);
 
     const selectableSources = (selectedItem?.sources || []).filter(src => !src.drop_reason);
     const selectedSources = selectableSources.filter(src => selectedIds.includes(src.db_id));
@@ -4860,13 +5437,39 @@ const App = () => {
         return () => { clearInterval(timerId); document.removeEventListener("visibilitychange", handleVisibilityChange); };
     }, []);
 
-    const createTask = async () => { 
-        if (!newKeyword) return; 
+    const openTaskStartConfig = async () => {
+        const keyword = newKeyword.trim();
+        if (!keyword) return;
+        try {
+            const payload = await fetch("/api/system/configs").then(r => r.json());
+            const data = payload?.data || payload || {};
+            setTaskStartConfig({
+                keyword,
+                crawl: data?.crawl || {},
+                sourceChannels: data?.source_channels || {},
+                llm: data?.llm || [],
+            });
+        } catch (err) {
+            console.error("加载启动配置失败:", err);
+            setConfirmDialog({
+                title: '启动配置读取失败',
+                description: '无法读取系统默认配置，请稍后重试。',
+                confirmLabel: '我知道了',
+                tone: 'warning',
+                onConfirm: () => {}
+            });
+        }
+    };
+
+    const createTask = async (crawlConfigSnapshot) => {
+        const keyword = (taskStartConfig?.keyword || newKeyword).trim();
+        if (!keyword) return;
         await fetch("/api/tasks", { 
             method: "POST", 
             headers: { "Content-Type": "application/json" }, 
-            body: JSON.stringify({ keyword: newKeyword }) 
+            body: JSON.stringify({ keyword, crawl_config: crawlConfigSnapshot })
         }); 
+        setTaskStartConfig(null);
         setNewKeyword(""); 
         setActiveView("tasks"); 
         refreshData(); 
@@ -5177,9 +5780,73 @@ const App = () => {
         strength_verified: '实力认证',
         official_logistics: '官方物流',
         encrypted_waybill: '密文面单',
+        douyin_encrypted_waybill: '抖音面单',
     };
 
+    const nonConfigurableChannelSearchFilterKeys = new Set(['encrypted_waybill']);
+    const isRenderableChannelSearchFilterKey = (filterKey) => !nonConfigurableChannelSearchFilterKeys.has(filterKey);
     const getChannelFilterLabel = (filterKey) => channelSearchFilterLabelMap[filterKey] || filterKey;
+
+    const renderTaskStartConfigSummary = (task) => {
+        const cfg = task?.crawl_config_snapshot || {};
+        if (!cfg || Object.keys(cfg).length === 0) {
+            return (
+                <details className="mt-3 rounded-lg border border-border-hairline bg-surface-container-low px-3 py-2 text-xs text-secondary" onClick={e => e.stopPropagation()}>
+                    <summary className="cursor-pointer font-semibold text-on-surface">查看启动配置</summary>
+                    <div className="mt-2">该任务创建时尚未记录配置快照。</div>
+                </details>
+            );
+        }
+        const sourceLimit = Number(cfg.source_limit_1688 || 10);
+        const grossRate = Math.round(normalizeGrossProfitRate(cfg.gross_profit_rate) * 100);
+        const models = Array.isArray(cfg.source_filter_models) ? cfg.source_filter_models : [];
+        const channels = Array.isArray(cfg.enabled_source_channels) ? cfg.enabled_source_channels : [];
+        const filters = Array.isArray(cfg.channel_search_filters) ? cfg.channel_search_filters : [];
+
+        return (
+            <details className="mt-3 rounded-lg border border-border-hairline bg-surface-container-low px-3 py-2 text-xs text-secondary" onClick={e => e.stopPropagation()}>
+                <summary className="cursor-pointer font-semibold text-on-surface">查看启动配置</summary>
+                <div className="mt-2 space-y-2">
+                    <div className="flex flex-wrap gap-2">
+                        <span className="px-2 py-0.5 rounded bg-surface-container-lowest border border-border-hairline">1688 抓取 {sourceLimit} 条</span>
+                        <span className="px-2 py-0.5 rounded bg-surface-container-lowest border border-border-hairline">毛利率 {grossRate}%</span>
+                        <span className="px-2 py-0.5 rounded bg-surface-container-lowest border border-border-hairline">
+                            模型：{models.length > 0 ? models.join('、') : '全部已保存模型'}
+                        </span>
+                    </div>
+                    {channels.length > 0 && (
+                        <div className="space-y-1">
+                            <div className="font-semibold text-on-surface">货源账号</div>
+                            <div className="flex flex-wrap gap-1.5">
+                                {channels.map(channel => (
+                                    <span key={`task-cfg-channel-${task.id}-${channel.channel_id}`} className="px-2 py-0.5 rounded-full bg-primary/8 text-primary border border-primary/15">
+                                        {channel.channel_id}：{Array.isArray(channel.account_ids) && channel.account_ids.length > 0 ? channel.account_ids.join('、') : '未选择账号'}
+                                    </span>
+                                ))}
+                            </div>
+                        </div>
+                    )}
+                    {filters.length > 0 && (
+                        <div className="space-y-1">
+                            <div className="font-semibold text-on-surface">货源筛选项</div>
+                            <div className="flex flex-wrap gap-1.5">
+                                {filters.map(entry => {
+                                    const enabledKeys = Object.entries(entry.filters || {})
+                                        .filter(([key, enabled]) => !!enabled && isRenderableChannelSearchFilterKey(key))
+                                        .map(([key]) => key);
+                                    return (
+                                        <span key={`task-cfg-filter-${task.id}-${entry.channel_id}`} className="px-2 py-0.5 rounded-full bg-surface-container-lowest border border-border-hairline">
+                                            {entry.channel_id}：{enabledKeys.length > 0 ? enabledKeys.map(getChannelFilterLabel).join('、') : '未启用筛选项'}
+                                        </span>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                    )}
+                </div>
+            </details>
+        );
+    };
 
     const buildEmptyChannelFilterSummary = () => ({
         configured: [],
@@ -5206,7 +5873,7 @@ const App = () => {
         const filterStatusMap = snapshot.filter_status_map && typeof snapshot.filter_status_map === 'object'
             ? snapshot.filter_status_map
             : {};
-        const configured = Array.isArray(snapshot.configured_enabled_filter_keys)
+        const configuredRaw = Array.isArray(snapshot.configured_enabled_filter_keys)
             ? snapshot.configured_enabled_filter_keys
             : Array.isArray(snapshot.configured_filter_keys)
                 ? snapshot.configured_filter_keys
@@ -5215,22 +5882,25 @@ const App = () => {
                 : Object.entries(snapshot.filters || {})
                     .filter(([, enabled]) => !!enabled)
                     .map(([key]) => key);
+        const configured = configuredRaw.filter(isRenderableChannelSearchFilterKey);
         const queryInjected = Object.entries(filterStatusMap)
-            .filter(([, meta]) => meta?.status === 'query_injected_pending_verification')
+            .filter(([key, meta]) => isRenderableChannelSearchFilterKey(key) && meta?.status === 'query_injected_pending_verification')
             .map(([key]) => key);
         const applied = Object.entries(filterStatusMap)
-            .filter(([, meta]) => meta?.status === 'applied')
+            .filter(([key, meta]) => isRenderableChannelSearchFilterKey(key) && meta?.status === 'applied')
             .map(([key]) => key);
         const unapplied = Object.entries(filterStatusMap)
-            .filter(([, meta]) => meta?.status === 'unapplied')
+            .filter(([key, meta]) => isRenderableChannelSearchFilterKey(key) && meta?.status === 'unapplied')
             .map(([key]) => key);
         const fallbackQueryInjected = Array.isArray(snapshot.query_injected_filter_keys)
-            ? snapshot.query_injected_filter_keys
+            ? snapshot.query_injected_filter_keys.filter(isRenderableChannelSearchFilterKey)
             : [];
-        const fallbackApplied = Array.isArray(snapshot.applied_filter_keys) ? snapshot.applied_filter_keys : [];
+        const fallbackApplied = Array.isArray(snapshot.applied_filter_keys)
+            ? snapshot.applied_filter_keys.filter(isRenderableChannelSearchFilterKey)
+            : [];
         const fallbackQueryInjectedPending = fallbackQueryInjected.filter((key) => !fallbackApplied.includes(key));
         const fallbackUnapplied = (Array.isArray(snapshot.unapplied_filter_keys) ? snapshot.unapplied_filter_keys : [])
-            .filter((key) => !fallbackQueryInjected.includes(key));
+            .filter((key) => isRenderableChannelSearchFilterKey(key) && !fallbackQueryInjected.includes(key));
         const topLevelQueryVerificationDetails = snapshot.query_verification_details && typeof snapshot.query_verification_details === 'object'
             ? snapshot.query_verification_details
             : snapshot.verification_details && typeof snapshot.verification_details === 'object'
@@ -5297,22 +5967,24 @@ const App = () => {
 
     const normalizeChannelFilterSummary = (summary, fallbackSnapshot = null, channelType = '') => {
         if (summary && typeof summary === 'object') {
-            const configured = Array.isArray(summary.configured) ? summary.configured : [];
+            const configured = Array.isArray(summary.configured)
+                ? summary.configured.filter(isRenderableChannelSearchFilterKey)
+                : [];
             return {
                 ...buildEmptyChannelFilterSummary(),
                 configured,
                 configuredPending: Array.isArray(summary.configuredPending)
-                    ? summary.configuredPending
+                    ? summary.configuredPending.filter(isRenderableChannelSearchFilterKey)
                     : Array.isArray(summary.configured_pending)
-                        ? summary.configured_pending
+                        ? summary.configured_pending.filter(isRenderableChannelSearchFilterKey)
                         : [],
                 queryInjected: Array.isArray(summary.queryInjected)
-                    ? summary.queryInjected
+                    ? summary.queryInjected.filter(isRenderableChannelSearchFilterKey)
                     : Array.isArray(summary.query_injected)
-                        ? summary.query_injected
+                        ? summary.query_injected.filter(isRenderableChannelSearchFilterKey)
                         : [],
-                applied: Array.isArray(summary.applied) ? summary.applied : [],
-                unapplied: Array.isArray(summary.unapplied) ? summary.unapplied : [],
+                applied: Array.isArray(summary.applied) ? summary.applied.filter(isRenderableChannelSearchFilterKey) : [],
+                unapplied: Array.isArray(summary.unapplied) ? summary.unapplied.filter(isRenderableChannelSearchFilterKey) : [],
                 unsupported: !!summary.unsupported,
                 configuredFilterCount: Number.isFinite(Number(summary.configuredFilterCount))
                     ? Number(summary.configuredFilterCount)
@@ -5719,15 +6391,6 @@ const App = () => {
         return [detailText, reasonText, hintText].filter(Boolean).join(' · ');
     };
 
-    const getSourceEstimatedProfit = (source, xianyuPrice) => {
-        if (Number.isFinite(Number(source?.estimated_profit))) {
-            return Number(source.estimated_profit);
-        }
-        const listingPrice = parseFloat(xianyuPrice || 0);
-        const costPrice = parseFloat(source?.min_price || 0);
-        return listingPrice - costPrice - 20;
-    };
-
     const getSourcePageOrder = (source) => {
         const pageIndex = Number(source?.page_original_index || 0);
         const normalizedIndex = pageIndex > 0 ? pageIndex : Number.MAX_SAFE_INTEGER;
@@ -5735,14 +6398,25 @@ const App = () => {
         return [normalizedIndex, dbId];
     };
 
-    const sortSourcesByEstimatedProfit = (sources = [], listingPrice = 0) => [...sources].sort((left, right) => {
-        const profitDiff = getSourceEstimatedProfit(right, listingPrice) - getSourceEstimatedProfit(left, listingPrice);
-        if (profitDiff !== 0) {
-            return profitDiff;
-        }
+    const getSourceMinPrice = (source) => {
+        const price = Number(source?.min_price);
+        return Number.isFinite(price) ? price : Number.MAX_SAFE_INTEGER;
+    };
+
+    const formatSourceDisplayPrice = (source) => {
+        const price = source?.min_price ?? '';
+        const suffix = Number(source?.sku_count || 0) > 1 ? '起' : '';
+        return `¥${price}${suffix}`;
+    };
+
+    const sortSourcesByRule = (sources = [], sortRule = "price_asc") => [...sources].sort((left, right) => {
         const [leftIndex, leftId] = getSourcePageOrder(left);
         const [rightIndex, rightId] = getSourcePageOrder(right);
-        return leftIndex - rightIndex || leftId - rightId;
+        if (sortRule === "page_original") {
+            return leftIndex - rightIndex || leftId - rightId;
+        }
+        const priceDiff = getSourceMinPrice(left) - getSourceMinPrice(right);
+        return priceDiff || leftIndex - rightIndex || leftId - rightId;
     });
 
     const formatTaskChannelSummaryText = (channel) => {
@@ -5835,6 +6509,8 @@ const App = () => {
     const enterItemDetail = (group) => {
         setSelectedItem(group);
         setSourceChannelFilter("all");
+        setSourceSortRule("price_asc");
+        setSourceListPage(1);
         setActiveView("item_detail");
     };
     const completedTasks = tasks.filter(t => t.status === '已完成');
@@ -5844,14 +6520,8 @@ const App = () => {
         const rawGroups = hasApiProvidedChannelGroups
             ? selectedItem.channel_groups
             : buildChannelGroupsFromSources(selectedItem.sources || []);
-        const listingPrice = parseFloat(selectedItem.xianyu_item?.price || 0);
         const decorateGroup = (group) => {
-            const normalizedSources = hasApiProvidedChannelGroups
-                ? [...(group.sources || [])]
-                : sortSourcesByEstimatedProfit(group.sources || [], listingPrice);
-            const bestEstimatedProfit = normalizedSources.length > 0
-                ? Math.max(...normalizedSources.map(source => getSourceEstimatedProfit(source, listingPrice)))
-                : Number.NEGATIVE_INFINITY;
+            const normalizedSources = sortSourcesByRule(group.sources || [], sourceSortRule);
             const [firstPageOriginalIndex] = normalizedSources.length > 0
                 ? getSourcePageOrder(normalizedSources[0])
                 : [Number.MAX_SAFE_INTEGER, 0];
@@ -5865,9 +6535,6 @@ const App = () => {
             return {
                 ...group,
                 sources: normalizedSources,
-                best_estimated_profit: Number.isFinite(Number(group?.best_estimated_profit))
-                    ? Number(group.best_estimated_profit)
-                    : bestEstimatedProfit,
                 first_page_original_index: Number.isFinite(Number(group?.first_page_original_index))
                     ? Number(group.first_page_original_index)
                     : firstPageOriginalIndex,
@@ -5877,14 +6544,22 @@ const App = () => {
         const decoratedGroups = rawGroups
             .map(decorateGroup)
             .filter(group => sourceChannelFilter === "all" || group.channel_id === sourceChannelFilter);
-        if (hasApiProvidedChannelGroups) {
-            return decoratedGroups;
+        if (sourceSortRule === "page_original") {
+            return decoratedGroups.sort((left, right) => {
+                if (left.first_page_original_index !== right.first_page_original_index) {
+                    return left.first_page_original_index - right.first_page_original_index;
+                }
+                return String(left.channel_label || left.channel_id || '').localeCompare(
+                    String(right.channel_label || right.channel_id || ''),
+                    'zh-CN'
+                );
+            });
         }
         return decoratedGroups.sort((left, right) => {
-            const profitDiff = Number(right.best_estimated_profit || 0) - Number(left.best_estimated_profit || 0);
-            if (profitDiff !== 0) {
-                return profitDiff;
-            }
+            const leftMinPrice = Math.min(...(left.sources || []).map(getSourceMinPrice));
+            const rightMinPrice = Math.min(...(right.sources || []).map(getSourceMinPrice));
+            const priceDiff = leftMinPrice - rightMinPrice;
+            if (priceDiff !== 0) return priceDiff;
             if (left.first_page_original_index !== right.first_page_original_index) {
                 return left.first_page_original_index - right.first_page_original_index;
             }
@@ -5893,15 +6568,37 @@ const App = () => {
                 'zh-CN'
             );
         });
-    }, [selectedItem, sourceChannelFilter]);
-    const sourceSortStrategyLabel = String(
-        selectedItem?.source_sort_strategy?.label
-        || '预估纯利倒序'
-    ).trim() || '预估纯利倒序';
-    const sourceSortStrategyDescription = String(
-        selectedItem?.source_sort_strategy?.description
-        || '当前结果按预估纯利从高到低固定排序，渠道筛选仅影响当前展示范围。'
-    ).trim() || '当前结果按预估纯利从高到低固定排序，渠道筛选仅影响当前展示范围。';
+    }, [selectedItem, sourceChannelFilter, sourceSortRule]);
+    const sourceSortRuleDescription = sourceSortRule === "page_original"
+        ? "当前结果按 1688 搜索结果页原始顺序展示，缺失原始序号的货源排在后面。"
+        : "当前结果按货源价格从低到高排序，多 SKU 商品使用最低拿货价。";
+    const sourceListEntries = useMemo(() => resolvedChannelGroups.flatMap(group => (
+        (group.sources || []).map((source, sourceIndex) => ({ group, source, sourceIndex }))
+    )), [resolvedChannelGroups]);
+    const sourceListTotal = sourceListEntries.length;
+    const sourceListTotalPages = Math.max(1, Math.ceil(sourceListTotal / SOURCE_LIST_PAGE_SIZE));
+    const currentSourceListPage = Math.max(1, Math.min(sourceListPage, sourceListTotalPages));
+    const paginatedChannelGroups = useMemo(() => {
+        const start = (currentSourceListPage - 1) * SOURCE_LIST_PAGE_SIZE;
+        const pageEntries = sourceListEntries.slice(start, start + SOURCE_LIST_PAGE_SIZE);
+        const groupIndexMap = new Map();
+        const groups = [];
+        pageEntries.forEach(({ group, source }) => {
+            const groupKey = group.channel_id || group.channel_label || 'unknown';
+            if (!groupIndexMap.has(groupKey)) {
+                groupIndexMap.set(groupKey, groups.length);
+                groups.push({ ...group, sources: [] });
+            }
+            groups[groupIndexMap.get(groupKey)].sources.push(source);
+        });
+        return groups;
+    }, [sourceListEntries, currentSourceListPage]);
+
+    useEffect(() => {
+        if (sourceListPage !== currentSourceListPage) {
+            setSourceListPage(currentSourceListPage);
+        }
+    }, [sourceListPage, currentSourceListPage]);
     const detailFallbackFilterChannels = useMemo(() => {
         if (!selectedItem || resolvedChannelGroups.length > 0) {
             return [];
@@ -6173,7 +6870,7 @@ const App = () => {
                                     />
                                     <button 
                                         className="bg-primary hover:bg-primary-container text-white font-sans text-sm font-semibold px-6 py-3 rounded-lg transition-colors scale-100 active:scale-95 shadow-[0_2px_8px_rgba(168,50,0,0.15)] flex items-center gap-2 shrink-0"
-                                        onClick={createTask}
+                                        onClick={openTaskStartConfig}
                                     >
                                         <span className="material-symbols-outlined text-[18px]">play_arrow</span>
                                         启动扫描 Worker
@@ -6251,6 +6948,7 @@ const App = () => {
                                                     </div>
 
                                                     <p className="text-xs text-secondary line-clamp-2 min-h-[32px] mt-2 mb-3 bg-surface-container-low p-2 rounded border border-border-hairline/40">{t.msg || 'Worker 正在分配进程空间...'}</p>
+                                                    {renderTaskStartConfigSummary(t)}
                                                     
                                                     <div className="w-full h-1 bg-surface-container rounded-full overflow-hidden mb-4">
                                                         <div className="h-full bg-primary transition-all duration-300" style={{ width: `${t.progress}%` }}></div>
@@ -6343,6 +7041,7 @@ const App = () => {
                                                         );
                                                     })}
                                                 </div>
+                                                {renderTaskStartConfigSummary(t)}
 
                                                 <div className="flex justify-between items-center mt-2.5 pt-2.5 border-t border-border-hairline/60">
                                                     <div className="flex items-center gap-2.5 text-xs text-secondary">
@@ -6409,7 +7108,7 @@ const App = () => {
                  })() :
                  view === "results" ? ( 
                      selectedTask ? (() => {
-                         const itemsPerPage = 9;
+                         const itemsPerPage = 6;
                          const totalResultPages = Math.ceil(detailedItems.length / itemsPerPage);
                          const currentResultPage = Math.max(1, Math.min(resultPage, totalResultPages || 1));
                          const paginatedDetailedItems = detailedItems.slice(
@@ -6663,29 +7362,27 @@ const App = () => {
                          <div>
                              <header className="flex justify-between items-center mb-4 flex-wrap gap-4 border-b border-border-hairline pb-4">
                                  <div>
-                                     <h3 className="font-sans text-sm font-bold text-on-surface">货源深度对比表 ({selectedItem.sources?.length || 0} 条匹配)</h3>
-                                     <div className="flex flex-wrap gap-1.5 mt-2">
-                                         {getItemUsedChannels(selectedItem).map(channel => (
-                                             <span
-                                                 key={`detail-${channel.channel_id}`}
-                                                 className="px-2 py-0.5 rounded-full bg-primary/8 text-primary text-[10px] font-semibold"
-                                             >
-                                                 {channel.channel_label || channel.channel_id}
-                                             </span>
-                                         ))}
-                                     </div>
+                                     <h3 className="font-sans text-sm font-bold text-on-surface">货源深度对比表 ({sourceListTotal} 条匹配)</h3>
                                  </div>
                                  
                                  <div className="flex flex-wrap items-center justify-end gap-3">
-                                     <div className="flex items-center gap-2 bg-surface-container border border-border-hairline px-3 py-2 rounded-xl ambient-shadow">
+                                     <div className="flex items-center gap-2">
                                          <span className="material-symbols-outlined text-[15px] text-secondary">swap_vert</span>
-                                         <span className="text-xs text-secondary font-semibold whitespace-nowrap">固定排序</span>
-                                         <span className="px-2.5 py-1 rounded-lg bg-surface-container-low border border-border-hairline text-xs font-semibold text-on-surface whitespace-nowrap">
-                                             {sourceSortStrategyLabel}
-                                         </span>
+                                         <span className="text-xs text-secondary font-semibold whitespace-nowrap">排序规则</span>
+                                         <div className="relative">
+                                             <select
+                                                 value={sourceSortRule}
+                                                 onChange={(e) => setSourceSortRule(e.target.value)}
+                                                 className="appearance-none bg-surface-container-low border border-border-hairline rounded-lg pl-3 pr-8 py-1.5 text-xs font-semibold text-on-surface focus:outline-none focus:border-primary focus:ring-2 focus:ring-primary/10 transition-all"
+                                             >
+                                                 <option value="price_asc">货源价格正序</option>
+                                                 <option value="page_original">页面原始排序</option>
+                                             </select>
+                                             <span className="material-symbols-outlined absolute right-2 top-1/2 -translate-y-1/2 text-secondary text-[16px] pointer-events-none">expand_more</span>
+                                         </div>
                                      </div>
 
-                                     <div className="flex items-center gap-2 bg-surface-container border border-border-hairline px-3 py-2 rounded-xl ambient-shadow">
+                                     <div className="flex items-center gap-2">
                                          <span className="material-symbols-outlined text-[15px] text-secondary">filter_alt</span>
                                          <span className="text-xs text-secondary font-semibold whitespace-nowrap">货源渠道</span>
                                          <div className="relative">
@@ -6706,7 +7403,7 @@ const App = () => {
                                      </div>
 
                                      {selectableSources.length > 0 && (
-                                         <div className="flex items-center gap-4 bg-surface-container border border-border-hairline px-4 py-2 rounded-xl ambient-shadow">
+                                         <div className="flex items-center gap-4">
                                              <label className="text-xs text-secondary font-semibold cursor-pointer flex items-center gap-1">
                                                  <input 
                                                      type="checkbox" 
@@ -6762,7 +7459,7 @@ const App = () => {
                                  </div>
                                  <div className="w-full flex justify-end">
                                      <span className="text-[11px] text-secondary">
-                                         {sourceSortStrategyDescription}
+                                         {sourceSortRuleDescription}
                                      </span>
                                  </div>
                              </header>
@@ -6820,7 +7517,7 @@ const App = () => {
                                         </div>
                                     );
                                 })}
-                                {resolvedChannelGroups.map(group => (
+                                {paginatedChannelGroups.map(group => (
                                      <div key={`channel-group-${group.channel_id}`} className="space-y-3">
                                          <div className="flex flex-wrap items-center gap-2 px-1">
                                              <span className="font-sans text-xs font-bold text-on-surface">
@@ -6883,6 +7580,8 @@ const App = () => {
                                              const pageOriginalIndex = Number(src.page_original_index || 0);
                                              const isDropped = !!src.drop_reason;
                                              const isChecked = selectedIds.includes(src.db_id);
+                                            const detailIncomplete = isSourceDetailIncomplete(src);
+                                            const detailIncompleteReason = getSourceDetailIncompleteReason(src);
                                             const sourceMetrics = [
                                                 src.pickup_48h_text,
                                                 src.pickup_24h_text,
@@ -6934,7 +7633,17 @@ const App = () => {
                                                                  {src.title}
                                                              </a>
                                                              <div className="flex flex-wrap gap-3 items-center mt-2.5 text-xs text-secondary">
-                                                                 <span>{src.sku_count > 0 ? `${src.sku_count} 个多属性 SKU 规格` : '一口价商品'}</span>
+                                                                 {detailIncomplete ? (
+                                                                     <span
+                                                                         className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-warning/10 text-warning border border-warning/20 text-[10px] font-bold"
+                                                                         title={detailIncompleteReason}
+                                                                     >
+                                                                         <span className="material-symbols-outlined text-[13px] leading-none">warning</span>
+                                                                         风控未完整抓取
+                                                                     </span>
+                                                                 ) : (
+                                                                     <span>{src.sku_count > 0 ? `${src.sku_count} 个多属性 SKU 规格` : '一口价商品'}</span>
+                                                                 )}
                                                                  <span className="w-1.5 h-1.5 rounded-full bg-border-hairline"></span>
                                                                  <span className={`font-mono border px-2 py-0.5 rounded text-[10px] ${
                                                                      pageOriginalIndex > 0
@@ -6983,9 +7692,9 @@ const App = () => {
                                                                  </span>
                                                              </div>
                                                          ) : (
-                                                             <>
-                                                                 <div className="flex justify-end gap-3 items-baseline">
-                                                                     <span className="font-mono text-lg font-black text-on-surface">¥{src.min_price}</span>
+                                                                 <>
+                                                                     <div className="flex justify-end gap-3 items-baseline">
+                                                                     <span className="font-mono text-lg font-black text-on-surface">{formatSourceDisplayPrice(src)}</span>
                                                                  </div>
                                                                  
                                                                  <SelectionButton
@@ -7003,7 +7712,31 @@ const App = () => {
                                      </div>
                                  ))}
 
-                                 {selectedItem.sources?.length === 0 && (
+                                {sourceListTotalPages > 1 && (
+                                    <div className="flex justify-center items-center gap-4 pt-2">
+                                        <button
+                                            type="button"
+                                            className="w-8 h-8 flex items-center justify-center rounded-lg border border-border-hairline bg-surface-container-lowest text-secondary hover:text-primary hover:border-primary transition-all disabled:opacity-40"
+                                            disabled={currentSourceListPage <= 1}
+                                            onClick={() => setSourceListPage(currentSourceListPage - 1)}
+                                        >
+                                            <span className="material-symbols-outlined text-[18px]">chevron_left</span>
+                                        </button>
+                                        <span className="font-sans text-xs text-secondary font-semibold">
+                                            第 {currentSourceListPage} / {sourceListTotalPages} 页（共 {sourceListTotal} 条，每页 {SOURCE_LIST_PAGE_SIZE} 条）
+                                        </span>
+                                        <button
+                                            type="button"
+                                            className="w-8 h-8 flex items-center justify-center rounded-lg border border-border-hairline bg-surface-container-lowest text-secondary hover:text-primary hover:border-primary transition-all disabled:opacity-40"
+                                            disabled={currentSourceListPage >= sourceListTotalPages}
+                                            onClick={() => setSourceListPage(currentSourceListPage + 1)}
+                                        >
+                                            <span className="material-symbols-outlined text-[18px]">chevron_right</span>
+                                        </button>
+                                    </div>
+                                )}
+
+                                {sourceListTotal === 0 && detailFallbackFilterChannels.length === 0 && (
                                      <div className="bg-surface-container-lowest border border-border-hairline rounded-xl py-12 text-center text-xs text-secondary">
                                          该爆款商品暂未匹配到对应的货源。
                                      </div>
@@ -7015,6 +7748,16 @@ const App = () => {
                 ) : view === "published" ? <PublishedManager hideHeader={true} /> : null
                 }
             </main>
+            {taskStartConfig && (
+                <TaskStartConfigModal
+                    keyword={taskStartConfig.keyword}
+                    crawlConfig={taskStartConfig.crawl}
+                    sourceChannelsConfig={taskStartConfig.sourceChannels}
+                    llmConfig={taskStartConfig.llm}
+                    onStart={createTask}
+                    onClose={() => setTaskStartConfig(null)}
+                />
+            )}
             {confirmDialog && (
                 <ActionConfirmModal
                     title={confirmDialog.title}

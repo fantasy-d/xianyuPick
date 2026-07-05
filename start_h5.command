@@ -17,4 +17,4 @@ UVICORN_BIN="/opt/anaconda3/envs/mytools/bin/uvicorn"
 sleep 2 && open "http://localhost:8000" &
 
 # 启动 FastAPI 后端
-$UVICORN_BIN src.web_api.main:app --host 0.0.0.0 --port 8000 --reload
+$UVICORN_BIN src.web_api.main:app --host 0.0.0.0 --port 8000

@@ -19,6 +19,7 @@ if str(SRC_DIR) not in sys.path:
 
 from src.xianyu_tools.config import settings
 from src.xianyu_tools.channel_search_filters import (
+    get_ali1688_configurable_channel_search_filter_keys,
     get_ali1688_channel_search_filter_keys,
     get_ali1688_channel_search_filter_meta,
     get_ali1688_query_filter_definitions,
@@ -1177,7 +1178,7 @@ def validate_ali1688_query_filter_definition_contract() -> None:
 
 def validate_shared_channel_search_filter_definition_contract() -> None:
     all_keys = get_ali1688_channel_search_filter_keys()
-    _assert(len(all_keys) == 11, "共享筛选定义应稳定覆盖 11 个 1688 搜索筛选项")
+    _assert(len(all_keys) == 12, "共享筛选定义应稳定覆盖 12 个 1688 搜索筛选项")
     _assert(all_keys[0] == "rapid_invoice", "共享筛选定义应保持稳定顺序，避免前后端展示漂移")
     labels_by_key = {
         key: get_ali1688_channel_search_filter_meta(key)["label"]
@@ -1196,8 +1197,9 @@ def validate_shared_channel_search_filter_definition_contract() -> None:
             "strength_verified": "实力认证",
             "official_logistics": "官方物流",
             "encrypted_waybill": "密文面单",
+            "douyin_encrypted_waybill": "抖音面单",
         },
-        "共享筛选定义必须覆盖截图中的 11 个中文能力标签，避免 UI / 审计报告散落硬编码",
+        "共享筛选定义必须覆盖截图中的中文能力标签，避免 UI / 审计报告散落硬编码",
     )
 
     selected_meta = get_ali1688_channel_search_filter_meta("selected_distributors")
@@ -1215,9 +1217,32 @@ def validate_shared_channel_search_filter_definition_contract() -> None:
     )
 
     encrypted_meta = get_ali1688_channel_search_filter_meta("encrypted_waybill")
+    douyin_waybill_meta = get_ali1688_channel_search_filter_meta("douyin_encrypted_waybill")
+    configurable_keys = get_ali1688_configurable_channel_search_filter_keys()
     _assert(
         encrypted_meta["mapping_type"] == "special_panel_candidate",
         "密文面单应在共享定义中标记为 special_panel_candidate",
+    )
+    _assert(
+        encrypted_meta["is_parent"] is True and encrypted_meta["is_configurable"] is False,
+        "密文面单应作为父级面板入口保留，但不能作为可勾选配置项",
+    )
+    _assert(
+        "encrypted_waybill" not in configurable_keys,
+        "密文面单父级入口不应出现在可配置筛选项列表中",
+    )
+    _assert(
+        douyin_waybill_meta["mapping_type"] == "special_panel_candidate",
+        "抖音面单应在共享定义中标记为 special_panel_candidate",
+    )
+    _assert(
+        douyin_waybill_meta["parent_key"] == "encrypted_waybill"
+        and douyin_waybill_meta["parent_label"] == "密文面单",
+        "抖音面单应挂在密文面单父级入口下",
+    )
+    _assert(
+        "douyin_encrypted_waybill" in configurable_keys,
+        "抖音面单子选项应出现在可配置筛选项列表中",
     )
     semantic_meta = get_ali1688_channel_search_filter_meta("single_piece_free_shipping")
     _assert(
@@ -1243,6 +1268,10 @@ def validate_shared_channel_search_filter_definition_contract() -> None:
     _assert(
         encrypted_meta["next_required_action"] == "panel_open_and_toggle",
         "密文面单应在共享定义中标记下一步待补齐的动作链路",
+    )
+    _assert(
+        "密文面单：抖音面单" in douyin_waybill_meta["probe_terms"],
+        "抖音面单应识别 1688 图搜页的密文面单子选项 chip",
     )
 
     query_definitions = get_ali1688_query_filter_definitions()

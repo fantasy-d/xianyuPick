@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import json, asyncio, os, uuid, pymysql, re, sys, signal, logging, subprocess
+import json, asyncio, os, uuid, pymysql, re, sys, signal, logging, subprocess, shlex
 from datetime import datetime
 from pathlib import Path
-from typing import Dict
+from typing import Any, Dict
 from urllib.parse import unquote
 from fastapi import FastAPI
 from fastapi.responses import PlainTextResponse, FileResponse
@@ -42,7 +42,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 WEB_DIR = BASE_DIR / "web"
 OUTPUTS_DIR = BASE_DIR / "outputs"
 
-SOURCE_ESTIMATED_PROFIT_OFFSET = 20.0
+DEFAULT_GROSS_PROFIT_RATE = 0.3
 
 # --- 辅助函数 ---
 DB_CONFIG = settings.get_database_config()
@@ -70,15 +70,87 @@ def _extract_xianyu_item_id(item_url: str | None) -> str | None:
     return None
 
 
-def _compute_source_estimated_profit(source_row: dict, listing_price: float) -> float:
+def _normalize_gross_profit_rate(value) -> float:
+    try:
+        rate = float(value)
+        if rate > 1:
+            rate = rate / 100
+        if rate <= 0:
+            return DEFAULT_GROSS_PROFIT_RATE
+        return min(rate, 1)
+    except Exception:
+        return DEFAULT_GROSS_PROFIT_RATE
+
+
+def _compute_source_estimated_profit(source_row: dict, gross_profit_rate: float | None = None) -> float:
     source = source_row or {}
-    existing_profit = source.get("estimated_profit")
-    if existing_profit not in (None, ""):
-        try:
-            return float(existing_profit)
-        except Exception:
-            pass
-    return _to_float(listing_price) - _to_float(source.get("min_price")) - SOURCE_ESTIMATED_PROFIT_OFFSET
+    rate = _normalize_gross_profit_rate(gross_profit_rate)
+    return _to_float(source.get("min_price")) * rate
+
+
+def _safe_int(value) -> int | None:
+    try:
+        if value is None or value == "":
+            return None
+        return int(value)
+    except Exception:
+        return None
+
+
+def _normalize_openapi_product_status(detail_data: dict[str, Any]) -> dict[str, Any]:
+    data = detail_data if isinstance(detail_data, dict) else {}
+    product_status = _safe_int(data.get("product_status"))
+    publish_status = _safe_int(data.get("publish_status"))
+
+    publish_status_map = {
+        -1: ("failed", "不可操作"),
+        1: ("selected", "草稿箱"),
+        2: ("pending", "待发布"),
+        3: ("success", "销售中"),
+        4: ("depublished", "已下架"),
+        5: ("depublished", "已售罄"),
+        9: ("failed", "商品异常"),
+    }
+    if publish_status in publish_status_map:
+        status, label = publish_status_map[publish_status]
+        return {"status": status, "label": label}
+
+    product_status_map = {
+        -1: ("deleted", "已删除"),
+        21: ("pending", "待发布"),
+        22: ("success", "销售中"),
+        23: ("depublished", "已售罄"),
+        31: ("depublished", "手动下架"),
+        33: ("depublished", "售出下架"),
+        36: ("depublished", "自动下架"),
+    }
+    if product_status in product_status_map:
+        status, label = product_status_map[product_status]
+        return {"status": status, "label": label}
+
+    status_text = " ".join(
+        str(data.get(key) or "")
+        for key in ("status", "status_text", "status_name", "product_status_text", "publish_status_text")
+    )
+    if any(word in status_text for word in ("已删除", "删除")):
+        return {"status": "deleted", "label": status_text.strip() or "已删除"}
+    if any(word in status_text for word in ("已下架", "下架")):
+        return {"status": "depublished", "label": status_text.strip() or "已下架"}
+    if any(word in status_text for word in ("已上架", "上架中", "在线", "在售", "出售中", "发布成功")):
+        return {"status": "success", "label": status_text.strip() or "已上架"}
+    if any(word in status_text for word in ("发布中", "审核中", "同步中")):
+        return {"status": "pending", "label": status_text.strip() or "发布中"}
+    if any(word in status_text for word in ("失败", "异常", "驳回")):
+        return {"status": "failed", "label": status_text.strip() or "发布失败"}
+    if any(word in status_text for word in ("待发布", "草稿")):
+        return {"status": "selected", "label": status_text.strip() or "待发布"}
+
+    return {
+        "status": "",
+        "label": "",
+        "raw_product_status": product_status,
+        "raw_publish_status": publish_status,
+    }
 
 
 def _ordered_unique_string_list(values) -> list[str]:
@@ -204,7 +276,7 @@ def _sort_detail_sources_and_groups(
     source_rows: list[dict],
     channel_groups_map: dict[str, dict],
     used_channels_map: dict[str, dict],
-    listing_price: float,
+    gross_profit_rate: float,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     def source_page_order(source: dict) -> tuple[int, int]:
         page_index = int(source.get("page_original_index") or 0)
@@ -213,7 +285,7 @@ def _sort_detail_sources_and_groups(
 
     def source_profit_order(source: dict) -> tuple[float, int, int]:
         page_index, db_id = source_page_order(source)
-        return -_compute_source_estimated_profit(source, listing_price), page_index, db_id
+        return -_compute_source_estimated_profit(source, gross_profit_rate), page_index, db_id
 
     sorted_sources = sorted(
         list(source_rows or []),
@@ -227,7 +299,7 @@ def _sort_detail_sources_and_groups(
             key=source_profit_order,
         )
         best_estimated_profit = (
-            max(_compute_source_estimated_profit(source, listing_price) for source in sorted_group_sources)
+            max(_compute_source_estimated_profit(source, gross_profit_rate) for source in sorted_group_sources)
             if sorted_group_sources
             else float("-inf")
         )
@@ -430,11 +502,27 @@ def init_db_schema():
             ("seven_day_dispatch_count", "ALTER TABLE ali1688_sources ADD COLUMN seven_day_dispatch_count INT DEFAULT 0;"),
             ("listing_count", "ALTER TABLE ali1688_sources ADD COLUMN listing_count INT DEFAULT 0;"),
             ("distributor_count", "ALTER TABLE ali1688_sources ADD COLUMN distributor_count INT DEFAULT 0;"),
+            ("is_detail_incomplete", "ALTER TABLE ali1688_sources ADD COLUMN is_detail_incomplete TINYINT(1) DEFAULT 0;"),
+            ("detail_incomplete_reason", "ALTER TABLE ali1688_sources ADD COLUMN detail_incomplete_reason VARCHAR(255) DEFAULT '';"),
+            ("detail_status", "ALTER TABLE ali1688_sources ADD COLUMN detail_status VARCHAR(32) DEFAULT '';"),
         ):
             try:
                 cursor.execute(ddl)
             except Exception:
                 pass
+        try:
+            cursor.execute("""
+                UPDATE ali1688_sources
+                SET
+                    is_detail_incomplete = 1,
+                    detail_incomplete_reason = '历史数据：详情页未完整抓取，可能受风控/验证码影响',
+                    detail_status = 'failed'
+                WHERE COALESCE(is_detail_incomplete, 0) = 0
+                  AND COALESCE(sku_count, 0) = 0
+                  AND (images IS NULL OR TRIM(images) = '' OR TRIM(images) = '[]')
+            """)
+        except Exception:
+            pass
             
         # 4. 自愈修改 publish_status 的 ENUM 增加本地选品/下架/删除状态
         try:
@@ -450,6 +538,11 @@ def init_db_schema():
         # 6. 自愈添加 total_tokens 字段以支持 Token 的计量
         try:
             cursor.execute("ALTER TABLE tasks ADD COLUMN total_tokens INT DEFAULT 0;")
+        except Exception:
+            pass
+        # 任务启动时的商品爬取配置快照。任务执行读取快照，不受后续系统默认配置变更影响。
+        try:
+            cursor.execute("ALTER TABLE tasks ADD COLUMN crawl_config_snapshot_json TEXT DEFAULT NULL;")
         except Exception:
             pass
         # 7. 物理刷新历史数据，防止 NULL 导致前端 React 渲染 crash
@@ -502,6 +595,27 @@ init_db_schema()
 def sanitize_dir_name(name: str) -> str:
     clean = re.sub(r'\s+', '', str(name))
     return re.sub(r'[\\/:*?"<>|]', '_', clean).strip()[:60]
+
+
+def _parse_json_dict(raw_value, fallback=None) -> dict:
+    fallback = fallback if isinstance(fallback, dict) else {}
+    if isinstance(raw_value, dict):
+        return raw_value
+    if not raw_value:
+        return fallback
+    try:
+        parsed = json.loads(raw_value)
+        return parsed if isinstance(parsed, dict) else fallback
+    except Exception:
+        return fallback
+
+
+def build_task_crawl_config_snapshot(raw_cfg: dict | None = None) -> dict:
+    cfg = raw_cfg if isinstance(raw_cfg, dict) else settings.get_crawl_config()
+    return settings.normalize_crawl_config(
+        cfg,
+        source_channels_cfg=settings.get_source_channels_config(),
+    )
 
 def _clean_html_span(text: str) -> str:
     if not text: return ""
@@ -955,17 +1069,27 @@ class Task:
             logger.error(f"Failed to update task {task_id}: {e}")
 
     @staticmethod
-    def add(keyword: str):
+    def add(keyword: str, crawl_config_snapshot: dict | None = None):
         try:
             from scripts.run_xianyu_hot_items import detect_input_type
             input_type = detect_input_type(keyword)
+            snapshot = build_task_crawl_config_snapshot(crawl_config_snapshot)
+            snapshot_json = json.dumps(snapshot, ensure_ascii=False)
             
             task_id, now = str(uuid.uuid4())[:8], datetime.now()
             version = now.strftime("%Y%m%d")
             root_dir = str(OUTPUTS_DIR / f"{sanitize_dir_name(keyword)}_{version}")
             conn = get_db_conn(); cursor = conn.cursor()
-            cursor.execute("INSERT INTO tasks (id, keyword, status, progress, msg, created_at, root_dir, version, is_deleted, input_type) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, %s)",
-                         (task_id, keyword, "排队中", 0, "等待调度", now, root_dir, version, input_type))
+            cursor.execute(
+                """
+                INSERT INTO tasks (
+                    id, keyword, status, progress, msg, created_at, root_dir, version,
+                    is_deleted, input_type, crawl_config_snapshot_json
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s)
+                """,
+                (task_id, keyword, "排队中", 0, "等待调度", now, root_dir, version, input_type, snapshot_json),
+            )
             conn.commit(); conn.close()
             logger.info(f"Task added: {keyword} ({task_id}), type: {input_type}")
             return task_id
@@ -980,7 +1104,7 @@ async def pipeline_worker():
         task_id, root_dir = None, None
         try:
             conn = get_db_conn(); cursor = conn.cursor()
-            cursor.execute("SELECT id, keyword, root_dir FROM tasks WHERE status = '排队中' AND is_deleted = 0 ORDER BY created_at ASC LIMIT 1")
+            cursor.execute("SELECT id, keyword, root_dir, crawl_config_snapshot_json FROM tasks WHERE status = '排队中' AND is_deleted = 0 ORDER BY created_at ASC LIMIT 1")
             t_data = cursor.fetchone()
             if not t_data:
                 conn.close(); await asyncio.sleep(5); continue
@@ -993,9 +1117,20 @@ async def pipeline_worker():
             
             log_file = Path(root_dir) / "task.log"
             log_file.parent.mkdir(parents=True, exist_ok=True)
+            snapshot = _parse_json_dict(t_data.get("crawl_config_snapshot_json"))
+            crawl_config_arg = ""
+            if snapshot:
+                snapshot_file = Path(root_dir) / "task_crawl_config_snapshot.json"
+                snapshot_file.write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+                crawl_config_arg = f" --crawl-config-file {shlex.quote(str(snapshot_file))}"
             
             python_path = sys.executable
-            cmd = f"export PYTHONPATH=$PYTHONPATH:{BASE_DIR}/src && {python_path} scripts/run_full_pipeline.py --keyword '{keyword}' --task-id '{task_id}' > '{log_file}' 2>&1"
+            cmd = (
+                f"export PYTHONPATH=$PYTHONPATH:{shlex.quote(str(BASE_DIR / 'src'))} && "
+                f"{shlex.quote(python_path)} scripts/run_full_pipeline.py "
+                f"--keyword {shlex.quote(keyword)} --task-id {shlex.quote(task_id)}"
+                f"{crawl_config_arg} > {shlex.quote(str(log_file))} 2>&1"
+            )
             
             process = await asyncio.create_subprocess_shell(cmd, cwd=str(BASE_DIR), preexec_fn=os.setsid)
             Task.update(task_id, pgid=os.getpgid(process.pid))
@@ -1057,7 +1192,7 @@ def _channel_filter_snapshot_has_signal(snapshot: dict | None) -> bool:
 def list_tasks():
     try:
         conn = get_db_conn(); cursor = conn.cursor()
-        cursor.execute("SELECT id, keyword, status, progress, msg, created_at, version, input_type, total_tokens FROM tasks WHERE is_deleted = 0 ORDER BY created_at DESC")
+        cursor.execute("SELECT id, keyword, status, progress, msg, created_at, version, input_type, total_tokens, crawl_config_snapshot_json FROM tasks WHERE is_deleted = 0 ORDER BY created_at DESC")
         rows = cursor.fetchall()
         task_ids = [row["id"] for row in rows if row.get("id")]
         task_channel_map = {}
@@ -1123,6 +1258,7 @@ def list_tasks():
         conn.close()
         for r in rows:
             if isinstance(r['created_at'], datetime): r['created_at'] = r['created_at'].strftime("%Y-%m-%d %H:%M")
+            r["crawl_config_snapshot"] = _parse_json_dict(r.pop("crawl_config_snapshot_json", None))
             r["used_channels"] = task_channel_map.get(r["id"], [])
             r["channel_summaries"] = task_channel_summary_map.get(r["id"], r["used_channels"])
         return rows
@@ -1132,7 +1268,8 @@ def list_tasks():
 
 @app.post("/api/tasks")
 def create_task(req: dict): 
-    tid = Task.add(req["keyword"])
+    snapshot = build_task_crawl_config_snapshot(req.get("crawl_config") if isinstance(req.get("crawl_config"), dict) else None)
+    tid = Task.add(req["keyword"], snapshot)
     return {"id": tid} if tid else {"error": "Failed to create task"}
 
 @app.post("/api/tasks/{task_id}/pause")
@@ -1157,7 +1294,7 @@ def pause_task(task_id: str):
 def retry_task(task_id: str):
     logger.info(f"Retry/Resume requested for task: {task_id}")
     conn = get_db_conn(); cursor = conn.cursor()
-    cursor.execute("SELECT keyword, status, created_at FROM tasks WHERE id = %s", (task_id,))
+    cursor.execute("SELECT keyword, status, created_at, crawl_config_snapshot_json FROM tasks WHERE id = %s", (task_id,))
     row = cursor.fetchone()
     if not row: conn.close(); return {"error": "Not found"}
     is_today = row['created_at'].date() == datetime.now().date()
@@ -1185,7 +1322,8 @@ def retry_task(task_id: str):
             return {"status": "ok", "action": "overwritten_today"}
         else:
             logger.info(f"Creating new version for legacy task {task_id}")
-            conn.close(); new_id = Task.add(row['keyword'])
+            snapshot = _parse_json_dict(row.get("crawl_config_snapshot_json"))
+            conn.close(); new_id = Task.add(row['keyword'], snapshot if snapshot else None)
             return {"status": "ok", "new_id": new_id, "action": "created_new_day"}
     else:
         logger.info(f"Resuming task {task_id} from checkpoint")
@@ -1239,6 +1377,8 @@ def delete_task(task_id: str):
 def get_task_details(task_id: str):
     try:
         conn = get_db_conn(); cursor = conn.cursor()
+        crawl_cfg = settings.get_crawl_config()
+        gross_profit_rate = _normalize_gross_profit_rate(crawl_cfg.get("gross_profit_rate"))
         # 1. 找到该任务下的所有闲鱼爆款
         cursor.execute("SELECT * FROM xianyu_items WHERE task_id = %s ORDER BY rank_index ASC", (task_id,))
         db_items = cursor.fetchall()
@@ -1246,7 +1386,6 @@ def get_task_details(task_id: str):
         details = []
         for item in db_items:
             item_db_id = item['id'] # 闲鱼商品的唯一主键
-            listing_price = _to_float(item.get('price'))
             # 2. 根据该主键去 1688 货源表里捞数据
             cursor.execute("""
                 SELECT * FROM ali1688_sources
@@ -1343,6 +1482,9 @@ def get_task_details(task_id: str):
                     "seven_day_dispatch_count": int(s.get('seven_day_dispatch_count') or 0),
                     "listing_count": int(s.get('listing_count') or 0),
                     "distributor_count": int(s.get('distributor_count') or 0),
+                    "is_detail_incomplete": bool(s.get('is_detail_incomplete')),
+                    "detail_incomplete_reason": s.get('detail_incomplete_reason') or '',
+                    "detail_status": s.get('detail_status') or '',
                     "source_filter_snapshot": filter_snapshot,
                     "source_filter_summary": _summarize_channel_filter_snapshot(
                         filter_snapshot,
@@ -1353,7 +1495,7 @@ def get_task_details(task_id: str):
                     "publish_status": latest_status.get("publish_status", "none"),
                     "published_url": latest_status.get("published_url", ""),
                 }
-                source_row["estimated_profit"] = _compute_source_estimated_profit(source_row, listing_price)
+                source_row["estimated_profit"] = _compute_source_estimated_profit(source_row, gross_profit_rate)
                 sources_data.append(source_row)
 
                 if channel_id not in channel_groups_map:
@@ -1404,7 +1546,7 @@ def get_task_details(task_id: str):
                 source_rows=sources_data,
                 channel_groups_map=channel_groups_map,
                 used_channels_map=used_channels_map,
-                listing_price=listing_price,
+                gross_profit_rate=gross_profit_rate,
             )
             for group in sorted_channel_groups:
                 group["filter_summary"] = _summarize_channel_filter_snapshot(
@@ -1618,6 +1760,7 @@ async def batch_publish_to_xianyu(req: dict = {}):
     conn = get_db_conn(); cursor = conn.cursor()
 
     items_to_publish = []
+    items_to_republish = []
     failed_items = []
 
     for sid in source_ids:
@@ -1626,6 +1769,36 @@ async def batch_publish_to_xianyu(req: dict = {}):
         if not source:
             failed_items.append({"source_id": sid, "msg": "货源数据在数据库中不存在"})
             continue
+
+        cursor.execute("""
+            SELECT publish_status
+            FROM xianyu_published_items
+            WHERE source_db_id = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (sid,))
+        latest_publish = cursor.fetchone()
+        latest_status = latest_publish.get("publish_status") if latest_publish else None
+        if latest_status == "deleted":
+            failed_items.append({"source_id": sid, "msg": "商品已删除，无法重新上架，请重新加入选品后发布"})
+            continue
+
+        if latest_status != "success":
+            cursor.execute("""
+                SELECT xianyu_item_id, task_id
+                FROM xianyu_published_items
+                WHERE source_db_id = %s AND publish_status = 'depublished' AND xianyu_item_id IS NOT NULL
+                ORDER BY created_at DESC
+                LIMIT 1
+            """, (sid,))
+            depublished_publish = cursor.fetchone()
+            if depublished_publish and depublished_publish.get("xianyu_item_id"):
+                items_to_republish.append({
+                    "source_id": sid,
+                    "product_id": depublished_publish["xianyu_item_id"],
+                    "task_id": depublished_publish.get("task_id") or source["task_id"],
+                })
+                continue
 
         images = json.loads(source['images'] or "[]")
         custom_info = custom_configs.get(str(sid)) or {}
@@ -1691,6 +1864,38 @@ async def batch_publish_to_xianyu(req: dict = {}):
         conn = get_db_conn(); cursor = conn.cursor()
         final_success = []
         final_failed = failed_items
+
+        for item in items_to_republish:
+            sid = item["source_id"]
+            pid = item["product_id"]
+            try:
+                listing_res = publisher.commit_publish(pid)
+                if listing_res.get("status") == "success":
+                    pub_url = f"https://www.goofish.com/item?id={pid}"
+                    cursor.execute(
+                        "INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url) VALUES (%s,%s,%s,%s,%s,%s)",
+                        (item["task_id"], sid, pid, 'success', '已重新上架下架商品', pub_url),
+                    )
+                    final_success.append({
+                        "source_id": sid,
+                        "product_id": pid,
+                        "published_url": pub_url,
+                        "status": "success",
+                        "mode": "republish"
+                    })
+                else:
+                    final_failed.append({
+                        "source_id": sid,
+                        "msg": f"重新上架失败: {listing_res.get('msg', '未知错误')}",
+                        "status": "failed"
+                    })
+            except Exception as e:
+                logger.error(f"Republish depublished product failed for source {sid}: {e}")
+                final_failed.append({
+                    "source_id": sid,
+                    "msg": f"重新上架异常: {e}",
+                    "status": "failed"
+                })
         
         for succ in batch_res.get("success", []):
             sid = succ["source_id"]
@@ -1743,6 +1948,47 @@ async def publish_to_xianyu(source_id: int, req: dict = {}):
     cursor.execute("SELECT * FROM ali1688_sources WHERE id = %s", (source_id,))
     source = cursor.fetchone()
     if not source: conn.close(); return {"error": "Source not found"}
+    cursor.execute("""
+        SELECT publish_status
+        FROM xianyu_published_items
+        WHERE source_db_id = %s
+        ORDER BY created_at DESC
+        LIMIT 1
+    """, (source_id,))
+    latest_publish = cursor.fetchone()
+    latest_status = latest_publish.get("publish_status") if latest_publish else None
+    if latest_status == "deleted":
+        conn.close()
+        return {"status": "failed", "msg": "商品已删除，无法重新上架，请重新加入选品后发布"}
+
+    depublished_publish = None
+    if latest_status != "success":
+        cursor.execute("""
+            SELECT xianyu_item_id, task_id
+            FROM xianyu_published_items
+            WHERE source_db_id = %s AND publish_status = 'depublished' AND xianyu_item_id IS NOT NULL
+            ORDER BY created_at DESC
+            LIMIT 1
+        """, (source_id,))
+        depublished_publish = cursor.fetchone()
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    if depublished_publish and depublished_publish.get("xianyu_item_id"):
+        try:
+            publisher = PublisherV3(account_id=account_id)
+            xianyu_item_id = depublished_publish["xianyu_item_id"]
+            result = publisher.commit_publish(xianyu_item_id)
+            if result.get("status") == "success":
+                pub_url = f"https://www.goofish.com/item?id={xianyu_item_id}"
+                cursor.execute("INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url) VALUES (%s,%s,%s,%s,%s,%s)",
+                             (depublished_publish.get('task_id') or source['task_id'], source_id, xianyu_item_id, 'success', '已重新上架下架商品', pub_url))
+                conn.commit(); conn.close(); return {"status": "success", "xianyu_item_id": xianyu_item_id, "published_url": pub_url, "mode": "republish"}
+            conn.close()
+            return {"status": "failed", "msg": f"重新上架失败: {result.get('msg', '未知错误')}"}
+        except Exception as e:
+            logger.error(f"Republish depublished product failed for source {source_id}: {e}")
+            conn.close()
+            return {"status": "failed", "msg": f"重新上架异常: {e}"}
+
     images = json.loads(source['images'] or "[]")
 
     # 支持前端传入自定义标题和价格，否则使用默认值
@@ -1770,7 +2016,6 @@ async def publish_to_xianyu(source_id: int, req: dict = {}):
         item_data["sku_items"] = sku_items
     if sku_images:
         item_data["sku_images"] = sku_images
-    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
     try:
         publisher = PublisherV3(account_id=account_id)
         result = publisher.publish_item(item_data)
@@ -1787,6 +2032,95 @@ def get_published_status(source_id: int):
     cursor.execute("SELECT publish_status, published_url FROM xianyu_published_items WHERE source_db_id = %s ORDER BY created_at DESC LIMIT 1", (source_id,))
     res = cursor.fetchone(); conn.close()
     return res if res else {"publish_status": "none"}
+
+@app.post("/api/selection/sync_status/batch")
+async def batch_sync_selection_status(req: dict = {}):
+    logger.info(f"OpenAPI batch selection status sync request: {req}")
+    source_ids = req.get("source_ids", [])
+    account_id = get_request_openapi_account_id(req)
+    if not source_ids:
+        return {"success": [], "failed": [{"source_id": 0, "msg": "未选中任何选品"}]}
+
+    from xianyu_tools.xianyu_adapter.publisher_v3 import PublisherV3
+    try:
+        publisher = PublisherV3(account_id=account_id)
+    except Exception as e:
+        logger.error(f"Failed to initialize PublisherV3 for status sync: {e}")
+        return {"success": [], "failed": [{"source_id": sid, "msg": f"初始化发布器失败: {e}"} for sid in source_ids]}
+
+    conn = get_db_conn(); cursor = conn.cursor()
+    success_list = []
+    failed_list = []
+
+    for sid in source_ids:
+        cursor.execute("""
+            SELECT publish_status, xianyu_item_id, task_id, published_url
+            FROM xianyu_published_items
+            WHERE source_db_id = %s
+            ORDER BY created_at DESC LIMIT 1
+        """, (sid,))
+        row = cursor.fetchone()
+
+        if not row:
+            failed_list.append({"source_id": sid, "msg": "未找到选品记录"})
+            continue
+
+        local_status = row.get("publish_status")
+        xianyu_item_id = row.get("xianyu_item_id")
+        if local_status == "selected":
+            failed_list.append({"source_id": sid, "msg": "该选品尚未发布，无需同步闲鱼状态"})
+            continue
+        if not xianyu_item_id:
+            failed_list.append({"source_id": sid, "msg": "缺少闲管家商品 ID，无法查询商品详情"})
+            continue
+
+        try:
+            result = publisher.query_product_detail(xianyu_item_id)
+        except Exception as e:
+            logger.error(f"Selection status sync failed for source {sid}: {e}")
+            failed_list.append({"source_id": sid, "msg": f"查询商品详情异常: {e}"})
+            continue
+
+        if result.get("status") != "success":
+            failed_list.append({"source_id": sid, "msg": result.get("msg") or "查询商品详情失败"})
+            continue
+
+        detail_data = result.get("data") or {}
+        normalized = _normalize_openapi_product_status(detail_data)
+        remote_status = normalized.get("status")
+        if remote_status not in {"selected", "pending", "success", "failed", "depublished", "deleted"}:
+            failed_list.append({
+                "source_id": sid,
+                "msg": (
+                    "查询成功，但暂未识别闲管家状态"
+                    f"（product_status={normalized.get('raw_product_status')}, "
+                    f"publish_status={normalized.get('raw_publish_status')}）"
+                )
+            })
+            continue
+
+        msg = f"已同步选品状态：{normalized.get('label') or remote_status}"
+        published_url = row.get("published_url")
+        if remote_status == "success":
+            published_url = published_url or f"https://www.goofish.com/item?id={xianyu_item_id}"
+        if remote_status in {"depublished", "deleted"}:
+            published_url = None
+
+        cursor.execute("""
+            INSERT INTO xianyu_published_items (task_id, source_db_id, xianyu_item_id, publish_status, publish_msg, published_url)
+            VALUES (%s, %s, %s, %s, %s, %s)
+        """, (row.get("task_id"), sid, xianyu_item_id, remote_status, msg, published_url))
+        success_list.append({
+            "source_id": sid,
+            "status": remote_status,
+            "publish_status": remote_status,
+            "msg": msg,
+            "published_url": published_url,
+        })
+
+    conn.commit()
+    conn.close()
+    return {"success": success_list, "failed": failed_list}
 
 @app.post("/api/depublish/batch")
 async def batch_depublish_from_xianyu(req: dict = {}):
@@ -2112,6 +2446,9 @@ def get_xianyu_products(
             s.images as source_images,
             s.min_price as source_price,
             s.sku_count as source_sku_count,
+            s.is_detail_incomplete as source_is_detail_incomplete,
+            s.detail_incomplete_reason as source_detail_incomplete_reason,
+            s.detail_status as source_detail_status,
             xi.title as ref_title,
             xi.price as ref_price,
             xi.want_count as ref_want_count
@@ -2147,6 +2484,9 @@ def get_xianyu_products(
             "source_image": images_list[0] if images_list else "",
             "source_price": float(r["source_price"]) if r["source_price"] is not None else 0.0,
             "source_sku_count": r["source_sku_count"],
+            "source_is_detail_incomplete": bool(r.get("source_is_detail_incomplete")),
+            "source_detail_incomplete_reason": r.get("source_detail_incomplete_reason") or "",
+            "source_detail_status": r.get("source_detail_status") or "",
             "ref_title": r["ref_title"] or "",
             "ref_price": float(r["ref_price"]) if r["ref_price"] is not None else 0.0,
             "ref_want_count": r["ref_want_count"] or 0
@@ -2419,6 +2759,9 @@ async def update_system_configs(payload: dict):
         except (ValueError, TypeError):
             source_limit = 10
         crawl_cfg["source_limit_1688"] = source_limit
+
+        gross_profit_rate = crawl_cfg.get("gross_profit_rate", DEFAULT_GROSS_PROFIT_RATE)
+        crawl_cfg["gross_profit_rate"] = _normalize_gross_profit_rate(gross_profit_rate)
 
         # 过滤模型子集，确保其中每一个都存在于 llm 配置的白名单中
         models_subset = crawl_cfg.get("source_filter_models", [])

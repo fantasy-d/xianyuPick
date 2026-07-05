@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from xianyu_tools.channel_search_filters import (
-    get_ali1688_channel_search_filter_keys,
+    get_ali1688_configurable_channel_search_filter_keys,
     get_ali1688_channel_search_filter_meta,
 )
 
@@ -149,6 +149,7 @@ class ConfigManager:
     def _get_default_crawl_config() -> Dict[str, Any]:
         return {
             "source_limit_1688": 10,
+            "gross_profit_rate": 0.3,
             "source_filter_models": [],
             "source_channel_selection_mode": "active_pool",
             "enabled_source_channels": [],
@@ -158,7 +159,7 @@ class ConfigManager:
     @staticmethod
     def _get_supported_channel_search_filter_keys(channel_type: str | None) -> List[str]:
         if str(channel_type or "").strip().lower() == "ali1688":
-            return list(get_ali1688_channel_search_filter_keys())
+            return list(get_ali1688_configurable_channel_search_filter_keys())
         return []
 
     def _normalize_channel_search_filters(
@@ -394,6 +395,18 @@ class ConfigManager:
         except (TypeError, ValueError):
             source_limit = default_cfg["source_limit_1688"]
 
+        gross_profit_rate = raw_cfg.get("gross_profit_rate", default_cfg["gross_profit_rate"])
+        try:
+            gross_profit_rate = float(gross_profit_rate)
+            if gross_profit_rate > 1:
+                gross_profit_rate = gross_profit_rate / 100
+            if gross_profit_rate <= 0:
+                gross_profit_rate = default_cfg["gross_profit_rate"]
+            elif gross_profit_rate > 1:
+                gross_profit_rate = 1
+        except (TypeError, ValueError):
+            gross_profit_rate = default_cfg["gross_profit_rate"]
+
         models_subset = raw_cfg.get("source_filter_models", default_cfg["source_filter_models"])
         if not isinstance(models_subset, list):
             models_subset = []
@@ -477,6 +490,7 @@ class ConfigManager:
 
         return {
             "source_limit_1688": source_limit,
+            "gross_profit_rate": gross_profit_rate,
             "source_filter_models": models_subset,
             "source_channel_selection_mode": selection_mode,
             "enabled_source_channels": ordered_entries,

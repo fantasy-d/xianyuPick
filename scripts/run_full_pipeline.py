@@ -8,6 +8,33 @@ sys.path.insert(0, str(BASE_DIR))
 sys.path.insert(0, str(BASE_DIR / "src"))
 from xianyu_tools.logging_util import get_unified_logger
 
+
+def apply_task_crawl_config_override(config_file: str | None, logger=None) -> dict:
+    if not config_file:
+        return {}
+    config_path = Path(config_file)
+    try:
+        raw_cfg = json.loads(config_path.read_text(encoding="utf-8"))
+        if not isinstance(raw_cfg, dict):
+            raise ValueError("crawl config snapshot must be a JSON object")
+        from xianyu_tools.config import settings
+        normalized = settings.normalize_crawl_config(
+            raw_cfg,
+            source_channels_cfg=settings.get_source_channels_config(),
+        )
+
+        def _task_crawl_config():
+            return json.loads(json.dumps(normalized, ensure_ascii=False))
+
+        settings.get_crawl_config = _task_crawl_config
+        if logger:
+            logger.info(f"[Task Config] Loaded task crawl config snapshot: {config_path}")
+        return normalized
+    except Exception as exc:
+        if logger:
+            logger.warning(f"[Task Config] Failed to load task crawl config snapshot {config_path}: {exc}")
+        return {}
+
 async def run_command(cmd, logger):
     logger.info(f"Executing Subprocess: {cmd}")
     process = await asyncio.create_subprocess_shell(cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
@@ -170,11 +197,27 @@ def init_db_schema():
             "ALTER TABLE ali1688_sources ADD COLUMN listing_count INT DEFAULT 0;",
             "ALTER TABLE ali1688_sources ADD COLUMN distributor_count INT DEFAULT 0;",
             "ALTER TABLE ali1688_sources ADD COLUMN source_filter_snapshot_json TEXT DEFAULT NULL;",
+            "ALTER TABLE ali1688_sources ADD COLUMN is_detail_incomplete TINYINT(1) DEFAULT 0;",
+            "ALTER TABLE ali1688_sources ADD COLUMN detail_incomplete_reason VARCHAR(255) DEFAULT '';",
+            "ALTER TABLE ali1688_sources ADD COLUMN detail_status VARCHAR(32) DEFAULT '';",
         ):
             try:
                 cursor.execute(ddl)
             except Exception:
                 pass
+        try:
+            cursor.execute("""
+                UPDATE ali1688_sources
+                SET
+                    is_detail_incomplete = 1,
+                    detail_incomplete_reason = '历史数据：详情页未完整抓取，可能受风控/验证码影响',
+                    detail_status = 'failed'
+                WHERE COALESCE(is_detail_incomplete, 0) = 0
+                  AND COALESCE(sku_count, 0) = 0
+                  AND (images IS NULL OR TRIM(images) = '' OR TRIM(images) = '[]')
+            """)
+        except Exception:
+            pass
         try:
             cursor.execute("ALTER TABLE tasks ADD COLUMN input_type VARCHAR(20) DEFAULT 'keyword';")
         except Exception:
@@ -231,6 +274,7 @@ async def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--keyword", required=True)
     parser.add_argument("--task-id", required=False)
+    parser.add_argument("--crawl-config-file", required=False)
     args = parser.parse_args()
     
     keyword, task_id = args.keyword.replace("'", ""), args.task_id
@@ -253,6 +297,7 @@ async def main():
     root_dir.mkdir(parents=True, exist_ok=True)
     log_file_path = root_dir / "task.log"
     logger = get_unified_logger("Pipeline", log_file=str(log_file_path))
+    apply_task_crawl_config_override(args.crawl_config_file, logger)
 
     # --- 1. 闲鱼扫描 ---
     cur_phase = checkpoint.get("phase", 1)
@@ -469,9 +514,10 @@ async def main():
                                 pickup_48h_text, pickup_24h_text, month_dispatch_text, seven_day_dispatch_text,
                                 listing_count_text, distributor_count_text, waybill_support_text, settled_years_text, company_name,
                                 page_original_index, source_filter_snapshot_json,
-                                month_dispatch_count, seven_day_dispatch_count, listing_count, distributor_count
+                                month_dispatch_count, seven_day_dispatch_count, listing_count, distributor_count,
+                                is_detail_incomplete, detail_incomplete_reason, detail_status
                             )
-                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         """, (
                             item_db_id,
                             task_id,
@@ -511,6 +557,9 @@ async def main():
                             int(res.get("seven_day_dispatch_count") or 0),
                             int(res.get("listing_count") or 0),
                             int(res.get("distributor_count") or 0),
+                            1 if res.get("is_detail_incomplete") else 0,
+                            str(res.get("detail_incomplete_reason") or ""),
+                            str(res.get("detail_status") or res.get("status") or ""),
                         ))
                         source_id = _cursor.lastrowid
 

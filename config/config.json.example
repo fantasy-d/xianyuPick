@@ -40,5 +40,13 @@
             "stuff_status": 100,
             "express_fee": 0
         }
+    },
+    "crawl": {
+        "source_limit_1688": 10,
+        "gross_profit_rate": 0.3,
+        "source_filter_models": [],
+        "source_channel_selection_mode": "active_pool",
+        "enabled_source_channels": [],
+        "channel_search_filters": []
     }
 }
