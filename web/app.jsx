@@ -1,5 +1,6 @@
 const { useState, useEffect, useRef, useMemo } = React;
 const sourceSkuCache = new Map();
+const TOKEN_LOG_PAGE_SIZE = 10;
 
 // --- 任务类型标签组件 ---
 const renderTaskTypeBadge = (inputType) => {
@@ -89,6 +90,7 @@ const TokenStatsView = ({ hideHeader = false }) => {
     const [stats, setStats] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState(null);
+    const [tokenLogPage, setTokenLogPage] = useState(1);
 
     const fetchStats = async () => {
         try {
@@ -98,6 +100,7 @@ const TokenStatsView = ({ hideHeader = false }) => {
             if (data.status === 'success') {
                 setStats(data);
                 setError(null);
+                setTokenLogPage(1);
             } else {
                 setError(data.message || '加载统计数据失败');
             }
@@ -132,6 +135,12 @@ const TokenStatsView = ({ hideHeader = false }) => {
     }
 
     const { summary, by_model, by_feature, recent_logs } = stats;
+    const tokenLogTotalPages = Math.max(1, Math.ceil(recent_logs.length / TOKEN_LOG_PAGE_SIZE));
+    const currentTokenLogPage = Math.max(1, Math.min(tokenLogPage, tokenLogTotalPages));
+    const paginatedTokenLogs = recent_logs.slice(
+        (currentTokenLogPage - 1) * TOKEN_LOG_PAGE_SIZE,
+        currentTokenLogPage * TOKEN_LOG_PAGE_SIZE
+    );
 
     return (
         <div className="view-content">
@@ -290,7 +299,7 @@ const TokenStatsView = ({ hideHeader = false }) => {
                 <div className="px-6 py-4 border-b border-border-hairline flex justify-between items-center bg-surface-container-lowest">
                     <h3 className="font-sans text-sm font-bold text-on-surface flex items-center gap-1.5">
                         <span className="material-symbols-outlined text-[18px] text-primary">receipt_long</span>
-                        <span>审计流水日志 (最近 20 次)</span>
+                        <span>审计流水日志</span>
                     </h3>
                 </div>
                 <div className="overflow-x-auto">
@@ -314,7 +323,7 @@ const TokenStatsView = ({ hideHeader = false }) => {
                                     </td>
                                 </tr>
                             ) : (
-                                recent_logs.map(log => (
+                                paginatedTokenLogs.map(log => (
                                     <tr key={log.id} className="hover:bg-surface-container-low/50 transition-colors">
                                         <td className="p-4 font-mono text-xs text-on-surface whitespace-nowrap">{log.created_at}</td>
                                         <td className="p-4 font-sans text-xs text-on-surface">
@@ -347,6 +356,29 @@ const TokenStatsView = ({ hideHeader = false }) => {
                         </tbody>
                     </table>
                 </div>
+                {tokenLogTotalPages > 1 && (
+                    <div className="flex justify-center items-center gap-4 px-6 py-4 border-t border-border-hairline bg-surface-container-lowest">
+                        <button
+                            type="button"
+                            className="w-8 h-8 flex items-center justify-center rounded-lg border border-border-hairline bg-surface-container-lowest text-secondary hover:text-primary hover:border-primary transition-all disabled:opacity-40"
+                            disabled={currentTokenLogPage <= 1}
+                            onClick={() => setTokenLogPage(currentTokenLogPage - 1)}
+                        >
+                            <span className="material-symbols-outlined text-[18px]">chevron_left</span>
+                        </button>
+                        <span className="font-sans text-xs text-secondary font-semibold">
+                            第 {currentTokenLogPage} / {tokenLogTotalPages} 页（共 {recent_logs.length} 条，每页 {TOKEN_LOG_PAGE_SIZE} 条）
+                        </span>
+                        <button
+                            type="button"
+                            className="w-8 h-8 flex items-center justify-center rounded-lg border border-border-hairline bg-surface-container-lowest text-secondary hover:text-primary hover:border-primary transition-all disabled:opacity-40"
+                            disabled={currentTokenLogPage >= tokenLogTotalPages}
+                            onClick={() => setTokenLogPage(currentTokenLogPage + 1)}
+                        >
+                            <span className="material-symbols-outlined text-[18px]">chevron_right</span>
+                        </button>
+                    </div>
+                )}
             </div>
         </div>
     );
@@ -1602,7 +1634,7 @@ const PublishedManager = ({ hideHeader = false }) => {
                     {totalPages > 1 && (
                         <div className="p-4 border-t border-border-hairline bg-surface-container-lowest flex items-center justify-between">
                             <span className="font-mono text-xs text-secondary">
-                                共 {total} 个商品，当前显示第 {page} / {totalPages} 页
+                                第 {page} / {totalPages} 页（共 {total} 条，每页 {limit} 条）
                             </span>
                             <div className="flex items-center gap-1.5">
                                 <button 
@@ -6353,7 +6385,7 @@ const App = () => {
                                                     <span className="material-symbols-outlined text-[16px]">chevron_left</span>
                                                 </button>
                                                 <span className="font-sans text-[11px] text-secondary font-semibold">
-                                                    页码 {currentArchivePage} / {totalPages}
+                                                    第 {currentArchivePage} / {totalPages} 页（共 {completedTasks.length} 条，每页 {itemsPerPage} 条）
                                                 </span>
                                                 <button
                                                     className="w-7 h-7 flex items-center justify-center rounded border border-border-hairline text-secondary hover:bg-surface-container-low transition-colors disabled:opacity-40"
@@ -6442,14 +6474,18 @@ const App = () => {
                                                      })}
                                                  </div>
                                                  
-                                                 <div className="flex justify-between items-center gap-4 mt-2.5 border-t border-border-hairline/60 pt-2.5">
+                                                 <div className="flex justify-between items-end gap-4 mt-2.5 border-t border-border-hairline/60 pt-2.5">
                                                      <span className="text-base font-black text-primary">¥{group.xianyu_item?.price}</span>
-                                                     <span className="text-xs text-secondary font-semibold bg-surface-container px-2 py-0.5 rounded-full">
-                                                         {group.sources?.length || 0} 个比价货源
-                                                     </span>
+                                                     <div className="flex flex-col items-end gap-1 shrink-0">
+                                                         <span className="text-xs text-secondary font-semibold leading-none">
+                                                             {group.sources?.length || 0}个货源
+                                                         </span>
+                                                         <span className="font-mono text-[10px] leading-none text-outline/60">
+                                                             DB_ID: {group.xianyu_item?.db_id}
+                                                         </span>
+                                                     </div>
                                                  </div>
                                              </div>
-                                             <div className="id-corner">DB_ID: {group.xianyu_item?.db_id}</div>
                                          </div>
                                      )) : (
                                          <div className="col-span-full bg-surface-container-lowest border border-border-hairline rounded-xl py-24 text-center">
@@ -6468,7 +6504,7 @@ const App = () => {
                                              <span className="material-symbols-outlined text-[18px]">chevron_left</span>
                                          </button>
                                          <span className="font-sans text-xs text-secondary font-semibold">
-                                             第 {currentResultPage} / {totalResultPages} 页（共{detailedItems.length}个）
+                                             第 {currentResultPage} / {totalResultPages} 页（共 {detailedItems.length} 条，每页 {itemsPerPage} 条）
                                          </span>
                                          <button
                                              className="w-8 h-8 flex items-center justify-center rounded-lg border border-border-hairline bg-surface-container-lowest text-secondary hover:text-primary hover:border-primary transition-all disabled:opacity-40"
@@ -6563,7 +6599,7 @@ const App = () => {
                                                  <span className="material-symbols-outlined text-[18px]">chevron_left</span>
                                              </button>
                                              <span className="font-sans text-xs text-secondary font-semibold">
-                                                 第 {currentResultTaskPage} / {totalResultTaskPages} 页（共{completedTasks.length}个）
+                                                 第 {currentResultTaskPage} / {totalResultTaskPages} 页（共 {completedTasks.length} 条，每页 {tasksPerPage} 条）
                                              </span>
                                              <button
                                                  className="w-8 h-8 flex items-center justify-center rounded-lg border border-border-hairline bg-surface-container-lowest text-secondary hover:text-primary hover:border-primary transition-all disabled:opacity-40"

@@ -2224,7 +2224,7 @@ def get_token_stats():
         """)
         by_feature = cursor.fetchall()
         
-        # 4. 最近 20 条明细日志 (关联任务关键词)
+        # 4. 明细日志 (关联任务关键词)
         cursor.execute("""
             SELECT 
                 l.id,
@@ -2239,7 +2239,6 @@ def get_token_stats():
             FROM llm_token_logs l
             LEFT JOIN tasks t ON l.task_id = t.id
             ORDER BY l.id DESC
-            LIMIT 20
         """)
         recent_logs = cursor.fetchall()
         
