@@ -1441,6 +1441,18 @@ const OrderImageThumb = ({ order, sizeClass = "w-14 h-14" }) => {
     );
 };
 
+const OrderDetailField = ({ label, value, mono = false, primary = false }) => {
+    const displayValue = value === 0 || value === false ? String(value) : (value || '-');
+    return (
+        <div>
+            <div className="text-xs text-secondary mb-1">{label}</div>
+            <div className={`${mono ? 'font-mono' : ''} ${primary ? 'text-primary font-black text-lg' : 'text-on-surface font-semibold'} break-all`}>
+                {displayValue}
+            </div>
+        </div>
+    );
+};
+
 // --- 订单详情页组件 ---
 const OrderDetailPage = ({ orderNo, onBack }) => {
     const [orderDetail, setOrderDetail] = useState(null);
@@ -1527,7 +1539,14 @@ const OrderDetailPage = ({ orderNo, onBack }) => {
                                     <div className="text-base font-bold text-on-surface leading-snug">{orderDetail.goods?.title || '未命名商品'}</div>
                                     <div className="text-xs text-secondary mt-2">{orderDetail.goods?.sku_text || '默认规格'}</div>
                                     <div className="text-xs text-secondary mt-1">数量 {orderDetail.goods?.quantity || 0} · 单价 {orderDetail.goods?.price_text}</div>
-                                    <div className="text-xs text-secondary mt-1">商品 ID {orderDetail.goods?.item_id || '-'}</div>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mt-4 text-sm">
+                                        <OrderDetailField label="管家商品 ID" value={orderDetail.goods?.product_id} mono />
+                                        <OrderDetailField label="闲鱼商品 ID" value={orderDetail.goods?.item_id} mono />
+                                        <OrderDetailField label="商家编码" value={orderDetail.goods?.outer_id} mono />
+                                        <OrderDetailField label="管家 SKU ID" value={orderDetail.goods?.sku_id} mono />
+                                        <OrderDetailField label="商家 SKU 编码" value={orderDetail.goods?.sku_outer_id} mono />
+                                        <OrderDetailField label="商品服务项" value={orderDetail.goods?.service_support_text || orderDetail.goods?.service_support} />
+                                    </div>
                                 </div>
                             </div>
                         </section>
@@ -1535,39 +1554,39 @@ const OrderDetailPage = ({ orderNo, onBack }) => {
                         <section>
                             <div className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
                                 <span className="material-symbols-outlined text-primary text-[18px]">payments</span>
-                                金额与时间
+                                金额、支付与退款
                             </div>
                             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm">
-                                <div className="flex justify-between items-baseline gap-3"><span className="text-secondary">实付金额</span><span className="font-mono text-lg font-black text-primary">{orderDetail.pay_amount_text}</span></div>
-                                <div className="flex justify-between items-baseline gap-3"><span className="text-secondary">订单总额</span><span className="font-mono font-bold text-on-surface">{orderDetail.total_amount_text}</span></div>
-                                <div className="flex justify-between items-baseline gap-3"><span className="text-secondary">运费</span><span className="font-mono font-bold text-on-surface">{orderDetail.express_fee_text}</span></div>
-                                <div className="flex justify-between gap-3"><span className="text-secondary">下单时间</span><span className="text-on-surface font-semibold text-right">{orderDetail.order_time_text || '-'}</span></div>
-                                <div className="flex justify-between gap-3"><span className="text-secondary">支付时间</span><span className="text-on-surface font-semibold text-right">{orderDetail.pay_time_text || '-'}</span></div>
-                                <div className="flex justify-between gap-3"><span className="text-secondary">发货时间</span><span className="text-on-surface font-semibold text-right">{orderDetail.consign_time_text || '-'}</span></div>
-                                <div className="flex justify-between gap-3"><span className="text-secondary">取消时间</span><span className="text-on-surface font-semibold text-right">{orderDetail.cancel_time_text || '-'}</span></div>
+                                <OrderDetailField label="实付金额" value={orderDetail.pay_amount_text} mono primary />
+                                <OrderDetailField label="订单总额" value={orderDetail.total_amount_text} mono />
+                                <OrderDetailField label="运费" value={orderDetail.express_fee_text} mono />
+                                <OrderDetailField label="支付宝交易号" value={orderDetail.pay_no} mono />
+                                <OrderDetailField label="退款状态" value={orderDetail.refund_status_label} />
+                                <OrderDetailField label="退款金额" value={orderDetail.refund_amount_text} mono />
+                                <OrderDetailField label="下单时间" value={orderDetail.order_time_text} />
+                                <OrderDetailField label="支付时间" value={orderDetail.pay_time_text} />
+                                <OrderDetailField label="发货时间" value={orderDetail.consign_time_text} />
+                                <OrderDetailField label="成交时间" value={orderDetail.confirm_time_text} />
+                                <OrderDetailField label="退款时间" value={orderDetail.refund_time_text} />
+                                <OrderDetailField label="取消时间" value={orderDetail.cancel_time_text} />
+                                <OrderDetailField label="创建时间" value={orderDetail.create_time_text} />
+                                <OrderDetailField label="更新时间" value={orderDetail.update_time_text} />
+                                <OrderDetailField label="取消原因" value={orderDetail.cancel_reason} />
                             </div>
                         </section>
                     </div>
 
-                    <div className="grid grid-cols-1 xl:grid-cols-3 gap-6 pt-5 mt-5 border-t border-border-hairline">
+                    <div className="grid grid-cols-1 xl:grid-cols-4 gap-6 pt-5 mt-5 border-t border-border-hairline">
                         <section>
                             <div className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
                                 <span className="material-symbols-outlined text-primary text-[18px]">location_on</span>
                                 收货信息
                             </div>
                             <div className="space-y-3 text-sm">
-                                <div>
-                                    <div className="text-xs text-secondary mb-1">收货人</div>
-                                    <div className="font-semibold text-on-surface">{orderDetail.receiver_name || '-'}</div>
-                                </div>
-                                <div>
-                                    <div className="text-xs text-secondary mb-1">联系电话</div>
-                                    <div className="font-semibold text-on-surface">{orderDetail.receiver_mobile || '-'}</div>
-                                </div>
-                                <div>
-                                    <div className="text-xs text-secondary mb-1">收货地址</div>
-                                    <div className="font-semibold text-on-surface leading-relaxed">{orderDetail.receiver_address || '-'}</div>
-                                </div>
+                                <OrderDetailField label="收货人" value={orderDetail.receiver_name} />
+                                <OrderDetailField label="联系电话" value={orderDetail.receiver_mobile} mono />
+                                <OrderDetailField label="省市区街道" value={[orderDetail.receiver_prov_name, orderDetail.receiver_city_name, orderDetail.receiver_area_name, orderDetail.receiver_town_name].filter(Boolean).join('')} />
+                                <OrderDetailField label="详细地址" value={orderDetail.receiver_address_detail || orderDetail.receiver_address} />
                             </div>
                         </section>
 
@@ -1577,14 +1596,10 @@ const OrderDetailPage = ({ orderNo, onBack }) => {
                                 物流信息
                             </div>
                             <div className="space-y-3 text-sm">
-                                <div>
-                                    <div className="text-xs text-secondary mb-1">物流公司</div>
-                                    <div className="font-semibold text-on-surface">{orderDetail.express_name || orderDetail.express_code || '暂无物流公司'}</div>
-                                </div>
-                                <div>
-                                    <div className="text-xs text-secondary mb-1">运单号</div>
-                                    <div className="font-mono font-semibold text-on-surface">{orderDetail.waybill_no || '暂无运单号'}</div>
-                                </div>
+                                <OrderDetailField label="物流公司" value={orderDetail.express_name || orderDetail.express_code || '暂无物流公司'} />
+                                <OrderDetailField label="快递公司代码" value={orderDetail.express_code} mono />
+                                <OrderDetailField label="运单号" value={orderDetail.waybill_no || '暂无运单号'} mono />
+                                <OrderDetailField label="发货类型" value={orderDetail.consign_type_label} />
                             </div>
                         </section>
 
@@ -1594,20 +1609,26 @@ const OrderDetailPage = ({ orderNo, onBack }) => {
                                 交易对象
                             </div>
                             <div className="space-y-3 text-sm">
-                                <div>
-                                    <div className="text-xs text-secondary mb-1">买家昵称</div>
-                                    <div className="font-semibold text-on-surface">{orderDetail.buyer_nick || '-'}</div>
-                                </div>
-                                <div>
-                                    <div className="text-xs text-secondary mb-1">卖家账号</div>
-                                    <div className="font-semibold text-on-surface">{orderDetail.seller_name || '-'}</div>
-                                </div>
+                                <OrderDetailField label="买家昵称" value={orderDetail.buyer_nick} />
+                                <OrderDetailField label="买家标识" value={orderDetail.buyer_eid} mono />
+                                <OrderDetailField label="卖家账号" value={orderDetail.seller_name} />
+                                <OrderDetailField label="卖家标识" value={orderDetail.seller_eid} mono />
                                 {orderDetail.seller_remark && (
-                                    <div>
-                                        <div className="text-xs text-secondary mb-1">卖家备注</div>
-                                        <div className="text-secondary leading-relaxed">{orderDetail.seller_remark}</div>
-                                    </div>
+                                    <OrderDetailField label="卖家备注" value={orderDetail.seller_remark} />
                                 )}
+                            </div>
+                        </section>
+
+                        <section>
+                            <div className="font-sans text-sm font-bold text-on-surface mb-4 flex items-center gap-2">
+                                <span className="material-symbols-outlined text-primary text-[18px]">category</span>
+                                业务信息
+                            </div>
+                            <div className="space-y-3 text-sm">
+                                <OrderDetailField label="订单类型" value={orderDetail.order_type_label} />
+                                <OrderDetailField label="子业务类型" value={orderDetail.idle_biz_type_label} />
+                                <OrderDetailField label="拼团状态" value={orderDetail.pin_group_status_label} />
+                                <OrderDetailField label="是否含税" value={orderDetail.is_tax_included_text} />
                             </div>
                         </section>
                     </div>
@@ -1974,30 +1995,36 @@ const OrderManager = ({ hideHeader = false, onOpenDetail }) => {
                     <table className="w-full text-left">
                         <thead>
                             <tr className="bg-table-header-bg border-b border-border-hairline">
-                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary w-12"></th>
-                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">商品</th>
-                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">订单</th>
-                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">订单状态</th>
-                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">订单时间</th>
-                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">数量</th>
-                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">金额</th>
-                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">总金额</th>
-                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">买家/收货</th>
-                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">物流</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-border-hairline">
-                            {loading ? (
-                                <tr>
-                                    <td colSpan="10" className="py-12 text-center text-secondary text-sm">
-                                        <span className="material-symbols-outlined animate-spin text-primary align-middle mr-2">sync</span>
-                                        正在读取订单...
-                                    </td>
-                                </tr>
-                            ) : orders.length === 0 ? (
-                                <tr>
-                                    <td colSpan="10" className="py-12 text-center text-secondary text-sm">暂无订单数据</td>
-                                </tr>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary w-12"></th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">商品</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">商品编码</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">订单</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">订单类型</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">订单状态</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">退款状态</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">订单时间</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">关键时间</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">数量</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">金额</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">总金额</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">支付/退款</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">买家/卖家/收货</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">物流</th>
+	                                <th className="p-cell-padding font-sans text-xs font-bold text-secondary">业务</th>
+	                            </tr>
+	                        </thead>
+	                        <tbody className="divide-y divide-border-hairline">
+	                            {loading ? (
+	                                <tr>
+	                                    <td colSpan="16" className="py-12 text-center text-secondary text-sm">
+	                                        <span className="material-symbols-outlined animate-spin text-primary align-middle mr-2">sync</span>
+	                                        正在读取订单...
+	                                    </td>
+	                                </tr>
+	                            ) : orders.length === 0 ? (
+	                                <tr>
+	                                    <td colSpan="16" className="py-12 text-center text-secondary text-sm">暂无订单数据</td>
+	                                </tr>
                             ) : orders.map(order => {
                                 const isSelected = selectedOrderNo === order.order_no;
                                 return (
@@ -2016,43 +2043,84 @@ const OrderManager = ({ hideHeader = false, onOpenDetail }) => {
                                                 aria-label={`选择订单 ${order.order_no}`}
                                             />
                                         </td>
-                                        <td className="p-cell-padding min-w-[300px]">
-                                            <div className="flex items-start gap-3">
-                                                <OrderImageThumb order={order} />
-                                                <div className="min-w-0">
-                                                    <div className="font-sans text-sm font-bold text-on-surface line-clamp-2">{order.goods?.title || '未命名商品'}</div>
-                                                    <div className="text-xs text-secondary mt-1 line-clamp-1">{order.goods?.sku_text || '默认规格'}</div>
-                                                </div>
-                                            </div>
-                                        </td>
-                                        <td className="p-cell-padding">
-                                            <div className="font-mono text-xs font-bold text-on-surface">{order.order_no}</div>
-                                        </td>
-                                        <td className="p-cell-padding">
-                                            <div className="inline-flex items-center px-2 py-0.5 rounded-full bg-surface-container border border-border-hairline text-[10px] text-secondary font-bold">
-                                                {order.order_status_label}
-                                            </div>
-                                        </td>
-                                        <td className="p-cell-padding min-w-[150px]">
-                                            <div className="text-[11px] text-secondary">{order.order_time_text || '无下单时间'}</div>
-                                        </td>
-                                        <td className="p-cell-padding">
-                                            <div className="font-mono text-xs font-bold text-on-surface">{order.goods?.quantity || 0}</div>
-                                        </td>
-                                        <td className="p-cell-padding">
-                                            <div className="font-mono text-sm font-bold text-primary">{order.pay_amount_text}</div>
-                                        </td>
-                                        <td className="p-cell-padding">
-                                            <div className="font-mono text-sm font-bold text-on-surface">{order.total_amount_text}</div>
-                                        </td>
-                                        <td className="p-cell-padding min-w-[220px]">
-                                            <div className="text-xs font-bold text-on-surface">{order.buyer_nick || '未知买家'}</div>
-                                            <div className="text-[11px] text-secondary mt-1 line-clamp-2">{order.receiver_name} {order.receiver_mobile} {order.receiver_address}</div>
-                                        </td>
-                                        <td className="p-cell-padding">
-                                            <div className="text-xs font-bold text-on-surface">{order.express_name || order.express_code || '未发货/无物流'}</div>
-                                            <div className="text-[11px] text-secondary mt-1">{order.waybill_no || '暂无运单号'}</div>
-                                        </td>
+	                                        <td className="p-cell-padding min-w-[300px]">
+	                                            <div className="flex items-start gap-3">
+	                                                <OrderImageThumb order={order} />
+	                                                <div className="min-w-0">
+	                                                    <div className="font-sans text-sm font-bold text-on-surface line-clamp-2">{order.goods?.title || '未命名商品'}</div>
+	                                                    <div className="text-xs text-secondary mt-1 line-clamp-1">{order.goods?.sku_text || '默认规格'}</div>
+	                                                    <div className="text-[11px] text-secondary mt-1 line-clamp-1">服务 {order.goods?.service_support_text || order.goods?.service_support || '-'}</div>
+	                                                </div>
+	                                            </div>
+	                                        </td>
+	                                        <td className="p-cell-padding min-w-[180px]">
+	                                            <div className="font-mono text-[11px] text-on-surface">闲鱼 {order.goods?.item_id || '-'}</div>
+	                                            <div className="font-mono text-[11px] text-secondary mt-1">管家 {order.goods?.product_id || '-'}</div>
+	                                            <div className="font-mono text-[11px] text-secondary mt-1">商编 {order.goods?.outer_id || '-'}</div>
+	                                            <div className="font-mono text-[11px] text-secondary mt-1">SKU {order.goods?.sku_id || '-'}</div>
+	                                            <div className="font-mono text-[11px] text-secondary mt-1">SKU商编 {order.goods?.sku_outer_id || '-'}</div>
+	                                        </td>
+	                                        <td className="p-cell-padding">
+	                                            <div className="font-mono text-xs font-bold text-on-surface">{order.order_no}</div>
+	                                        </td>
+	                                        <td className="p-cell-padding min-w-[90px]">
+	                                            <div className="text-xs font-bold text-on-surface">{order.order_type_label || '-'}</div>
+	                                        </td>
+	                                        <td className="p-cell-padding">
+	                                            <div className="inline-flex items-center px-2 py-0.5 rounded-full bg-surface-container border border-border-hairline text-[10px] text-secondary font-bold">
+	                                                {order.order_status_label}
+	                                            </div>
+	                                        </td>
+	                                        <td className="p-cell-padding min-w-[100px]">
+	                                            <div className="text-xs font-bold text-on-surface">{order.refund_status_label || '-'}</div>
+	                                            <div className="font-mono text-[11px] text-secondary mt-1">{order.refund_amount_text || '¥0.00'}</div>
+	                                        </td>
+	                                        <td className="p-cell-padding min-w-[150px]">
+	                                            <div className="text-[11px] text-secondary">{order.order_time_text || '无下单时间'}</div>
+	                                        </td>
+	                                        <td className="p-cell-padding min-w-[180px]">
+	                                            <div className="text-[11px] text-secondary">支付 {order.pay_time_text || '-'}</div>
+	                                            <div className="text-[11px] text-secondary mt-1">发货 {order.consign_time_text || '-'}</div>
+	                                            <div className="text-[11px] text-secondary mt-1">成交 {order.confirm_time_text || '-'}</div>
+	                                            <div className="text-[11px] text-secondary mt-1">退款 {order.refund_time_text || '-'}</div>
+	                                            <div className="text-[11px] text-secondary mt-1">取消 {order.cancel_time_text || '-'}</div>
+	                                            <div className="text-[11px] text-secondary mt-1">创建 {order.create_time_text || '-'}</div>
+	                                            <div className="text-[11px] text-secondary mt-1">更新 {order.update_time_text || '-'}</div>
+	                                        </td>
+	                                        <td className="p-cell-padding">
+	                                            <div className="font-mono text-xs font-bold text-on-surface">{order.goods?.quantity || 0}</div>
+	                                        </td>
+	                                        <td className="p-cell-padding">
+	                                            <div className="font-mono text-sm font-bold text-primary">{order.pay_amount_text}</div>
+	                                        </td>
+	                                        <td className="p-cell-padding">
+	                                            <div className="font-mono text-sm font-bold text-on-surface">{order.total_amount_text}</div>
+	                                        </td>
+	                                        <td className="p-cell-padding min-w-[180px]">
+	                                            <div className="font-mono text-[11px] text-on-surface">支付号 {order.pay_no || '-'}</div>
+	                                            <div className="font-mono text-[11px] text-secondary mt-1">退款额 {order.refund_amount_text || '¥0.00'}</div>
+	                                            <div className="text-[11px] text-secondary mt-1">取消 {order.cancel_reason || '-'}</div>
+	                                        </td>
+	                                        <td className="p-cell-padding min-w-[260px]">
+	                                            <div className="text-xs font-bold text-on-surface">买家 {order.buyer_nick || '未知买家'}</div>
+	                                            <div className="font-mono text-[11px] text-secondary mt-1">买家标识 {order.buyer_eid || '-'}</div>
+	                                            <div className="text-xs font-bold text-on-surface mt-2">卖家 {order.seller_name || '-'}</div>
+	                                            <div className="font-mono text-[11px] text-secondary mt-1">卖家标识 {order.seller_eid || '-'}</div>
+	                                            <div className="text-[11px] text-secondary mt-2 line-clamp-2">收货 {order.receiver_name} {order.receiver_mobile} {order.receiver_address}</div>
+	                                            {order.seller_remark && <div className="text-[11px] text-secondary mt-1 line-clamp-1">备注 {order.seller_remark}</div>}
+	                                        </td>
+	                                        <td className="p-cell-padding min-w-[150px]">
+	                                            <div className="text-xs font-bold text-on-surface">{order.express_name || order.express_code || '未发货/无物流'}</div>
+	                                            <div className="font-mono text-[11px] text-secondary mt-1">代码 {order.express_code || '-'}</div>
+	                                            <div className="font-mono text-[11px] text-secondary mt-1">{order.waybill_no || '暂无运单号'}</div>
+	                                            <div className="text-[11px] text-secondary mt-1">{order.consign_type_label || '-'}</div>
+	                                            <div className="font-mono text-[11px] text-secondary mt-1">运费 {order.express_fee_text || '¥0.00'}</div>
+	                                        </td>
+	                                        <td className="p-cell-padding min-w-[130px]">
+	                                            <div className="text-xs font-bold text-on-surface">{order.idle_biz_type_label || '-'}</div>
+	                                            <div className="text-[11px] text-secondary mt-1">拼团 {order.pin_group_status_label || '-'}</div>
+	                                            <div className="text-[11px] text-secondary mt-1">含税 {order.is_tax_included_text || '-'}</div>
+	                                        </td>
                                     </tr>
                                 );
                             })}

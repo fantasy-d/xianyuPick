@@ -197,6 +197,64 @@ OPENAPI_ORDER_STATUS_LABELS = {
     24: "已关闭",
 }
 
+OPENAPI_ORDER_TYPE_LABELS = {
+    1: "普通订单",
+    2: "分销订单",
+    3: "验货宝订单",
+    4: "拍卖订单",
+    7: "卡密订单",
+    8: "直充订单",
+    9: "严选订单",
+    10: "特卖订单",
+    11: "潮玩订单",
+    12: "捡漏订单",
+    14: "预售订单",
+    15: "拼团订单",
+    24: "跨境订单",
+}
+
+OPENAPI_REFUND_STATUS_LABELS = {
+    0: "未申请退款",
+    1: "待商家处理",
+    2: "待买家退货",
+    3: "待商家收货",
+    4: "退款关闭",
+    5: "退款成功",
+    6: "已拒绝退款",
+    8: "待确认退货地址",
+}
+
+OPENAPI_CONSIGN_TYPE_LABELS = {
+    0: "未发货",
+    1: "物流发货",
+    2: "虚拟发货",
+}
+
+OPENAPI_IDLE_BIZ_TYPE_LABELS = {
+    0: "-",
+    20: "拼团订单",
+}
+
+OPENAPI_PIN_GROUP_STATUS_LABELS = {
+    0: "-",
+    1: "拼团中",
+    2: "拼团成功",
+    3: "拼团超时",
+}
+
+OPENAPI_SERVICE_SUPPORT_LABELS = {
+    "SDR": "七天无理由退货",
+    "NFR": "描述不符包邮退",
+    "VNR": "描述不符全额退（虚拟类）",
+    "FD_10MS": "10分钟极速发货（虚拟类）",
+    "FD_24HS": "24小时极速发货",
+    "FD_48HS": "48小时极速发货",
+    "FD_GPA": "正品保障（包赔）",
+    "NFGC": "不符必赔",
+    "RISK_30D": "30天收货",
+    "RISK_90D": "90天收货",
+}
+
 
 def _format_openapi_order_status(value) -> str:
     try:
@@ -206,10 +264,25 @@ def _format_openapi_order_status(value) -> str:
     return OPENAPI_ORDER_STATUS_LABELS.get(status, f"状态 {status}")
 
 
+def _format_openapi_enum(value, labels: dict[int, str], fallback_prefix: str) -> str:
+    try:
+        status = int(value)
+    except Exception:
+        return "-"
+    return labels.get(status, f"{fallback_prefix} {status}")
+
+
+def _normalize_service_support(value) -> tuple[list[str], list[str], str]:
+    codes = [item.strip() for item in str(value or "").split(",") if item.strip()]
+    labels = [OPENAPI_SERVICE_SUPPORT_LABELS.get(code, code) for code in codes]
+    return codes, labels, "、".join(labels)
+
+
 def _normalize_openapi_order(order_data: dict[str, Any] | None, *, include_raw: bool = False) -> dict[str, Any]:
     order = order_data if isinstance(order_data, dict) else {}
     goods = order.get("goods") if isinstance(order.get("goods"), dict) else {}
     images = goods.get("images") if isinstance(goods.get("images"), list) else []
+    service_codes, service_labels, service_text = _normalize_service_support(goods.get("service_support"))
     address_parts = [
         order.get("prov_name"),
         order.get("city_name"),
@@ -219,15 +292,26 @@ def _normalize_openapi_order(order_data: dict[str, Any] | None, *, include_raw: 
     ]
     normalized = {
         "order_no": str(order.get("order_no") or ""),
+        "order_type": order.get("order_type"),
+        "order_type_label": _format_openapi_enum(order.get("order_type"), OPENAPI_ORDER_TYPE_LABELS, "订单类型"),
         "order_status": order.get("order_status"),
         "order_status_label": _format_openapi_order_status(order.get("order_status")),
         "refund_status": order.get("refund_status"),
+        "refund_status_label": _format_openapi_enum(order.get("refund_status"), OPENAPI_REFUND_STATUS_LABELS, "退款状态"),
+        "refund_amount": order.get("refund_amount"),
+        "refund_amount_text": _format_cent_amount(order.get("refund_amount")),
+        "refund_time_text": _format_unix_time(order.get("refund_time")),
         "order_time": order.get("order_time"),
         "order_time_text": _format_unix_time(order.get("order_time")),
+        "pay_no": str(order.get("pay_no") or ""),
         "pay_time_text": _format_unix_time(order.get("pay_time")),
         "consign_time_text": _format_unix_time(order.get("consign_time")),
+        "consign_type": order.get("consign_type"),
+        "consign_type_label": _format_openapi_enum(order.get("consign_type"), OPENAPI_CONSIGN_TYPE_LABELS, "发货类型"),
         "confirm_time_text": _format_unix_time(order.get("confirm_time")),
+        "cancel_reason": str(order.get("cancel_reason") or ""),
         "cancel_time_text": _format_unix_time(order.get("cancel_time")),
+        "create_time_text": _format_unix_time(order.get("create_time")),
         "update_time_text": _format_unix_time(order.get("update_time")),
         "total_amount": order.get("total_amount"),
         "total_amount_text": _format_cent_amount(order.get("total_amount")),
@@ -236,10 +320,23 @@ def _normalize_openapi_order(order_data: dict[str, Any] | None, *, include_raw: 
         "express_fee": order.get("express_fee"),
         "express_fee_text": _format_cent_amount(order.get("express_fee")),
         "buyer_nick": str(order.get("buyer_nick") or ""),
+        "buyer_eid": str(order.get("buyer_eid") or ""),
         "seller_name": str(order.get("seller_name") or ""),
+        "seller_eid": str(order.get("seller_eid") or ""),
         "seller_remark": str(order.get("seller_remark") or ""),
+        "idle_biz_type": order.get("idle_biz_type"),
+        "idle_biz_type_label": _format_openapi_enum(order.get("idle_biz_type"), OPENAPI_IDLE_BIZ_TYPE_LABELS, "子业务类型"),
+        "pin_group_status": order.get("pin_group_status"),
+        "pin_group_status_label": _format_openapi_enum(order.get("pin_group_status"), OPENAPI_PIN_GROUP_STATUS_LABELS, "拼团状态"),
+        "is_tax_included": order.get("is_tax_included"),
+        "is_tax_included_text": "是" if order.get("is_tax_included") is True else ("否" if order.get("is_tax_included") is False else "-"),
         "receiver_name": str(order.get("receiver_name") or ""),
         "receiver_mobile": str(order.get("receiver_mobile") or ""),
+        "receiver_prov_name": str(order.get("prov_name") or ""),
+        "receiver_city_name": str(order.get("city_name") or ""),
+        "receiver_area_name": str(order.get("area_name") or ""),
+        "receiver_town_name": str(order.get("town_name") or ""),
+        "receiver_address_detail": str(order.get("address") or ""),
         "receiver_address": "".join(str(part or "") for part in address_parts),
         "waybill_no": str(order.get("waybill_no") or ""),
         "express_code": str(order.get("express_code") or ""),
@@ -253,10 +350,14 @@ def _normalize_openapi_order(order_data: dict[str, Any] | None, *, include_raw: 
             "item_id": str(goods.get("item_id") or ""),
             "outer_id": str(goods.get("outer_id") or ""),
             "sku_id": str(goods.get("sku_id") or ""),
+            "sku_outer_id": str(goods.get("sku_outer_id") or ""),
             "sku_text": str(goods.get("sku_text") or ""),
             "image": str(images[0]) if images else "",
             "images": images,
             "service_support": str(goods.get("service_support") or ""),
+            "service_support_codes": service_codes,
+            "service_support_labels": service_labels,
+            "service_support_text": service_text,
         },
     }
     if include_raw:
