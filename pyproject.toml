@@ -4,11 +4,15 @@ version = "0.1.0"
 description = "Tools for scanning Xianyu hot items and validating 1688 image-search sources."
 requires-python = ">=3.11"
 dependencies = [
+    "mcp>=1.0.0,<2",
     "scrapling>=0.4.8",
     "browserforge>=1.2.4",
     "patchright>=1.60.1",
     "msgspec>=0.21.1",
 ]
+
+[project.scripts]
+xianyu-mcp = "xianyu_tools.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=68"]

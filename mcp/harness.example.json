@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "xianyu-tools": {
+      "command": "/opt/anaconda3/envs/mytools/bin/xianyu-mcp",
+      "cwd": "/Users/mac/PycharmProjects/mytools/xianyu-tools",
+      "env": {
+        "PYTHONPATH": "/Users/mac/PycharmProjects/mytools/xianyu-tools/src"
+      }
+    }
+  }
+}
